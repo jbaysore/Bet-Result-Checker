@@ -242,3 +242,147 @@ def get_promo_boost_percentage(promo_id: str) -> float | None:
                 return None
 
     return None
+
+
+# ════════════════════════════════════════════════════════════════════
+# ── Promotion Updater reads ─────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════════
+
+def load_pending_promotions() -> list[dict]:
+    """
+    Reads the Promotions tab and returns every row where Status is
+    currently "Pending" -- the only rows the Promotion Updater needs to
+    look at, since Realized/Unused are terminal and (per the established
+    "never overwrite an existing value" convention used throughout this
+    project) are never revisited.
+
+    Reads by HEADER NAME via config.PROMO_COL, matching the existing
+    get_promo_boost_percentage() convention -- the Promotions tab's
+    column layout is not assumed fixed, unlike the Bets tab's COL dict.
+
+    Returns a list of dicts keyed by the same logical names as
+    config.PROMO_COL (promo_id, book, promo_type, expiration_date, etc.),
+    plus "row_idx" (1-based, for writing back later). Numeric/date
+    fields are returned as raw stripped strings -- parsing into actual
+    numbers/dates is promo_resolver.py's job, kept separate so this
+    function stays a thin, honest read with no business logic.
+    """
+    from config import PROMOTIONS_TAB, PROMO_COL, PROMO_STATUS_PENDING
+
+    client = _get_client()
+    sheet = client.open_by_key(SHEET_ID)
+    tab = sheet.worksheet(PROMOTIONS_TAB)
+
+    rows = tab.get_all_values()
+    if not rows:
+        return []
+
+    headers = rows[0]
+    col_idx = {}
+    for key, header_name in PROMO_COL.items():
+        try:
+            col_idx[key] = headers.index(header_name)
+        except ValueError:
+            # Column doesn't exist in the live sheet yet -- leave it out
+            # of col_idx rather than failing the whole read. Code further
+            # down the pipeline (promo_resolver.py) treats a missing key
+            # the same as a blank value for that field.
+            print(f"[sheets_reader] ⚠️  Promotions tab is missing expected "
+                  f"column '{header_name}' -- continuing without it.")
+
+    if "promo_id" not in col_idx or "status" not in col_idx:
+        raise RuntimeError(
+            "[sheets_reader] Promotions tab is missing 'Promo ID' or 'Status' "
+            "column entirely -- cannot proceed."
+        )
+
+    def cell(row, key):
+        idx = col_idx.get(key)
+        if idx is None or idx >= len(row):
+            return ""
+        return row[idx].strip()
+
+    pending = []
+    for row_idx, row in enumerate(rows[1:], start=2):  # row 1 is header
+        status = cell(row, "status")
+        if status != PROMO_STATUS_PENDING:
+            continue
+
+        pending.append({
+            "row_idx":              row_idx,
+            "promo_id":             cell(row, "promo_id"),
+            "book":                 cell(row, "book"),
+            "promo_name":           cell(row, "promo_name"),
+            "promo_type":           cell(row, "promo_type"),
+            "boost_pct":            cell(row, "boost_pct"),
+            "reward":               cell(row, "reward"),
+            "qualifying_cost":      cell(row, "qualifying_cost"),
+            "bonus_amount":         cell(row, "bonus_amount"),
+            "status":               status,
+            "notes":                cell(row, "notes"),
+            "expiration_date":      cell(row, "expiration_date"),
+            "expected_reward_count":cell(row, "expected_reward_count"),
+            "reward_timing":        cell(row, "reward_timing"),
+            "token_usage_window":   cell(row, "token_usage_window"),
+        })
+
+    return pending
+
+
+def load_bets_by_promo_id(tab_name: str, col: dict) -> dict[str, list[dict]]:
+    """
+    Reads the ENTIRE Bets tab once and groups every row that has a
+    non-blank Promo ID, keyed by that Promo ID. Built for the Promotion
+    Updater, which needs to evaluate potentially many Pending promos per
+    run -- reading the whole tab once and grouping in memory is far
+    cheaper than a separate Sheets API read per promo.
+
+    Unlike load_pending_bets(), this is NOT filtered by Result, Bet Type,
+    or anything else -- it returns every linked row in whatever state
+    it's currently in (settled or not), since the Promotion Updater's
+    logic (promo_resolver.py) needs to see unsettled reward bets too, to
+    know it must keep waiting rather than finalize prematurely.
+
+    Returns: {promo_id: [bet_dict, ...]}, each bet_dict containing every
+    column this project's Bets tab has, keyed by the same names
+    load_pending_bets() uses, plus "result"/"pl"/"payout" (always
+    included here, unlike load_pending_bets() which omits them since
+    they're guaranteed blank there).
+    """
+    client = _get_client()
+    sheet = client.open_by_key(SHEET_ID)
+    tab = sheet.worksheet(tab_name)
+
+    rows = tab.get_all_values()
+    if not rows:
+        return {}
+
+    grouped: dict[str, list[dict]] = {}
+
+    for row_idx, row in enumerate(rows[1:], start=2):  # row 1 is header
+        while len(row) <= max(col.values()):
+            row.append("")
+
+        promo_id = row[col["promo_id"]].strip()
+        if not promo_id:
+            continue
+
+        bet = {
+            "row_idx":      row_idx,
+            "bet_id":       row[col["bet_id"]].strip(),
+            "date_placed":  row[col["date_placed"]].strip(),
+            "book":         row[col["book"]].strip(),
+            "sport":        row[col["sport"]].strip(),
+            "stake":        row[col["stake"]].strip(),
+            "fee":          row[col["fee"]].strip(),
+            "bet_category": row[col["bet_category"]].strip(),
+            "promo_id":     promo_id,
+            "result":       row[col["result"]].strip(),
+            "payout":       row[col["payout"]].strip(),
+            "pl":           row[col["pl"]].strip(),
+            "odds_taken":   row[col["odds_taken"]].strip(),
+        }
+
+        grouped.setdefault(promo_id, []).append(bet)
+
+    return grouped
