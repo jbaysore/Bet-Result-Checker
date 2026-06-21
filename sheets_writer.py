@@ -228,3 +228,190 @@ def write_pl_payout(row_idx: int, bet_id: str, pl: float, payout: float | None) 
         print(f"[sheets_writer] ❌ Unexpected error writing to row {row_idx} "
               f"(BetID: {bet_id}): {e}")
         return False
+
+
+# ════════════════════════════════════════════════════════════════════
+# ── Promotion Updater writes ────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════════
+
+def _get_promotions_sheet():
+    from config import PROMOTIONS_TAB
+    client = _get_client()
+    spreadsheet = client.open_by_key(SHEET_ID)
+    return spreadsheet.worksheet(PROMOTIONS_TAB)
+
+
+def _promo_col_letter_lookup():
+    """
+    Resolves config.PROMO_COL's header names to actual 1-based column
+    indices against the LIVE sheet, the same on-demand approach
+    get_promo_boost_percentage() already uses, rather than assuming a
+    fixed position -- so this keeps working even if columns are
+    reordered, as long as the header names themselves don't change.
+    """
+    from config import PROMO_COL
+
+    sheet = _get_promotions_sheet()
+    headers = sheet.row_values(1)
+
+    idx = {}
+    for key, header_name in PROMO_COL.items():
+        try:
+            idx[key] = headers.index(header_name) + 1  # gspread is 1-based
+        except ValueError:
+            idx[key] = None
+    return idx
+
+
+def write_promo_qualifying_cost(row_idx: int, promo_id: str, qualifying_cost: float) -> bool:
+    """
+    Backfills the Qualifying Cost cell for a Promotions row, ONLY if it's
+    currently blank -- never overwrites an existing value, same
+    "never overwrite" convention as write_pl_payout().
+
+    This is intentionally a separate, narrower write than
+    write_promo_resolution() below: Qualifying Cost can become knowable
+    (the qualifying window has closed, so the set of linked Qualifying
+    Bet rows is final and stable) well before the REST of the promo can
+    be finalized (reward tokens might still be unclaimed or unsettled).
+    Filling it in as soon as it's stable, rather than waiting for full
+    resolution, means Bonus Net Value figures elsewhere in the project
+    aren't needlessly stuck at $0 for weeks while a slow-resolving token
+    bet is pending.
+
+    Re-verifies BetID-equivalent identity (Promo ID) and blankness at
+    write time, not just read time, guarding against the same kind of
+    race write_pl_payout() guards against.
+
+    Returns:
+        True if written, False if skipped (Promo ID mismatch, cell
+        already had a value, or the column doesn't exist in the sheet).
+    """
+    idx = _promo_col_letter_lookup()
+    promo_id_col = idx.get("promo_id")
+    qc_col = idx.get("qualifying_cost")
+
+    if promo_id_col is None or qc_col is None:
+        print(f"[sheets_writer] ⚠️  Promotions tab is missing 'Promo ID' or "
+              f"'Qualifying Cost' column -- cannot write to row {row_idx}.")
+        return False
+
+    try:
+        sheet = _get_promotions_sheet()
+
+        current_promo_id = sheet.cell(row_idx, promo_id_col).value
+        if str(current_promo_id).strip() != str(promo_id).strip():
+            print(f"[sheets_writer] ⚠️  Promotions row {row_idx} Promo ID mismatch. "
+                  f"Expected '{promo_id}', found '{current_promo_id}'. Skipping write.")
+            return False
+
+        current_qc = sheet.cell(row_idx, qc_col).value
+        if current_qc:
+            print(f"[sheets_writer] Promotions row {row_idx} (Promo ID: {promo_id}) "
+                  f"already has Qualifying Cost '{current_qc}'. Skipping -- "
+                  f"never overwrite an existing value.")
+            return False
+
+        sheet.update_cell(row_idx, qc_col, qualifying_cost)
+        print(f"[sheets_writer] ✅ Promotions row {row_idx} (Promo ID: {promo_id}) "
+              f"→ Qualifying Cost={qualifying_cost}")
+        return True
+
+    except gspread.exceptions.APIError as e:
+        print(f"[sheets_writer] ❌ Sheets API error writing Qualifying Cost to "
+              f"Promotions row {row_idx} (Promo ID: {promo_id}): {e}")
+        return False
+    except Exception as e:
+        print(f"[sheets_writer] ❌ Unexpected error writing Qualifying Cost to "
+              f"Promotions row {row_idx} (Promo ID: {promo_id}): {e}")
+        return False
+
+
+def write_promo_resolution(row_idx: int, promo_id: str, status: str,
+                            realized_date: str, realized_amount: float) -> bool:
+    """
+    Finalizes a Promotions row -- writes Status, Realized Date, and
+    Realized Amount together in one batched call. Used for BOTH terminal
+    outcomes: a real Realized close-out (status="Realized", whatever the
+    computed dollar amount is, including a legitimate $0), and the
+    Unused close-out (status="Unused", realized_amount=0, for a
+    qualifying window that expired with zero linked activity).
+
+    Guards against double-writes the same way write_result() does for
+    Bets rows: re-verifies Promo ID matches AND that Status is still
+    "Pending" at write time, not just at whatever earlier point this
+    row was read -- since this script could in principle run again
+    before a previous run's write is reflected back, or someone could
+    have hand-edited the row in between.
+
+    Args:
+        row_idx:         1-based row index in the Promotions sheet
+        promo_id:        Used to confirm we're writing to the right row
+        status:          config.PROMO_STATUS_REALIZED or
+                          config.PROMO_STATUS_UNUSED -- never PENDING,
+                          since this function's entire purpose is closing
+                          a promo out.
+        realized_date:   ISO date string (YYYY-MM-DD) for when this was
+                          finalized.
+        realized_amount: The final dollar value. 0 is a fully legitimate
+                          value here (a $0 Realized promo is different
+                          from Unused -- see config.PROMO_STATUS_UNUSED's
+                          docstring) and must NOT be treated as "no
+                          value provided."
+
+    Returns:
+        True if written, False if skipped (Promo ID mismatch, Status was
+        no longer "Pending", or a required column is missing).
+    """
+    from config import PROMO_STATUS_PENDING
+
+    idx = _promo_col_letter_lookup()
+    promo_id_col = idx.get("promo_id")
+    status_col = idx.get("status")
+    realized_date_col = idx.get("realized_date")
+    realized_amount_col = idx.get("realized_amount")
+
+    missing = [name for name, col in [
+        ("Promo ID", promo_id_col), ("Status", status_col),
+        ("Realized Date", realized_date_col), ("Realized Amount", realized_amount_col)
+    ] if col is None]
+    if missing:
+        print(f"[sheets_writer] ⚠️  Promotions tab is missing column(s) "
+              f"{missing} -- cannot write resolution to row {row_idx}.")
+        return False
+
+    try:
+        sheet = _get_promotions_sheet()
+
+        current_promo_id = sheet.cell(row_idx, promo_id_col).value
+        if str(current_promo_id).strip() != str(promo_id).strip():
+            print(f"[sheets_writer] ⚠️  Promotions row {row_idx} Promo ID mismatch. "
+                  f"Expected '{promo_id}', found '{current_promo_id}'. Skipping write.")
+            return False
+
+        current_status = sheet.cell(row_idx, status_col).value
+        if str(current_status).strip() != PROMO_STATUS_PENDING:
+            print(f"[sheets_writer] Promotions row {row_idx} (Promo ID: {promo_id}) "
+                  f"Status is already '{current_status}', not Pending. Skipping -- "
+                  f"never overwrite a terminal state.")
+            return False
+
+        cell_list = [
+            gspread.Cell(row_idx, status_col, status),
+            gspread.Cell(row_idx, realized_date_col, realized_date),
+            gspread.Cell(row_idx, realized_amount_col, realized_amount),
+        ]
+        sheet.update_cells(cell_list)
+        print(f"[sheets_writer] ✅ Promotions row {row_idx} (Promo ID: {promo_id}) "
+              f"→ Status={status}, Realized Date={realized_date}, "
+              f"Realized Amount={realized_amount}")
+        return True
+
+    except gspread.exceptions.APIError as e:
+        print(f"[sheets_writer] ❌ Sheets API error writing resolution to "
+              f"Promotions row {row_idx} (Promo ID: {promo_id}): {e}")
+        return False
+    except Exception as e:
+        print(f"[sheets_writer] ❌ Unexpected error writing resolution to "
+              f"Promotions row {row_idx} (Promo ID: {promo_id}): {e}")
+        return False
