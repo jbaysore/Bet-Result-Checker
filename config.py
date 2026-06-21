@@ -152,3 +152,78 @@ ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports"
 # /api/bet-review/check-espn endpoint for the Stats page's manual review
 # flow, which does live league discovery per-request and never reads a
 # stored mapping from this sheet or anywhere else.
+
+
+# ════════════════════════════════════════════════════════════════════
+# ── Promotions tab (Promotion Updater) ──────────────────────────────
+# ════════════════════════════════════════════════════════════════════
+# Read by HEADER NAME, not a fixed COL index dict -- matches the existing
+# convention already established in sheets_reader.py's
+# get_promo_boost_percentage() ("nothing else in this project assumes a
+# fixed column layout for the Promotions tab"). This dict exists only to
+# avoid retyping the literal header strings at every call site; it is
+# NOT a positional index map like Bets' COL dict above.
+#
+# Schema (16 columns, confirmed against the live sheet 2026-06-21):
+# Promo ID | Book | Promo Name | Promo Type | Boost % | Reward |
+# Qualifying Cost | Bonus Amount | Status | Realized Date |
+# Realized Amount | Notes | Expiration Date | Expected Reward Count |
+# Reward Timing | Token Usage Window (days)
+#
+# The last 4 columns were added specifically to support the automated
+# Promotion Updater -- see PromotionWizard.jsx (the wizard that writes
+# new rows) for the per-promo-type applicability rules these encode.
+PROMO_COL = {
+    "promo_id":              "Promo ID",
+    "book":                  "Book",
+    "promo_name":            "Promo Name",
+    "promo_type":            "Promo Type",
+    "boost_pct":             "Boost %",
+    "reward":                "Reward",
+    "qualifying_cost":       "Qualifying Cost",
+    "bonus_amount":          "Bonus Amount",
+    "status":                "Status",
+    "realized_date":         "Realized Date",
+    "realized_amount":       "Realized Amount",
+    "notes":                 "Notes",
+    "expiration_date":       "Expiration Date",
+    "expected_reward_count": "Expected Reward Count",
+    "reward_timing":         "Reward Timing",
+    "token_usage_window":    "Token Usage Window (days)",
+}
+
+PROMOTIONS_TAB = "Promotions"
+
+# ── Promotion Status values ─────────────────────────────────────────
+PROMO_STATUS_PENDING  = "Pending"
+PROMO_STATUS_REALIZED = "Realized"
+# Distinct from a $0 Realized promo: Unused means the qualifying window
+# expired with ZERO qualifying activity ever linked -- "I forgot this
+# existed," not "I did it and it paid nothing." Confirmed as a required
+# distinction during the Promotion Updater design conversation
+# (2026-06-21).
+PROMO_STATUS_UNUSED   = "Unused"
+
+# ── Promo Type values ───────────────────────────────────────────────
+# Deliberately the SAME string values as the corresponding
+# BET_CATEGORY_* constants above (Promo Type on a Promotions row and Bet
+# Category on its linked Bets rows are written identically by design --
+# e.g. a "Bonus Bet" promo's reward bets are logged with
+# Bet Category = "Bonus Bet"). Aliased here under PROMO_TYPE_* names
+# purely for readability at Promotion Updater call sites, not because
+# the values actually differ.
+PROMO_TYPE_BONUS_BET     = BET_CATEGORY_BONUS_BET
+PROMO_TYPE_DEPOSIT_BONUS = BET_CATEGORY_DEPOSIT_BONUS
+PROMO_TYPE_PROFIT_BOOST  = BET_CATEGORY_PROFIT_BOOST
+PROMO_TYPE_INSURANCE_BET = BET_CATEGORY_INSURANCE_BET
+
+# Promo types with a multi-grant token model (qualifying window,
+# Expected Reward Count, Reward Timing, per-token Usage Window) --
+# Bonus Bet and Profit Boost share this entire machinery, differing only
+# in how a claimed token's value is computed (see promo_resolver.py).
+MULTI_GRANT_PROMO_TYPES = {PROMO_TYPE_BONUS_BET, PROMO_TYPE_PROFIT_BOOST}
+
+# ── Reward Timing values ────────────────────────────────────────────
+# Matches PromotionWizard.jsx's REWARD_TIMING_OPTIONS exactly.
+REWARD_TIMING_PER_QUALIFYING_BET = "Per Qualifying Bet"
+REWARD_TIMING_END_OF_WINDOW      = "End of Window"
