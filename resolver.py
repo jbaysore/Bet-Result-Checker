@@ -151,13 +151,15 @@ def calculate_pl_and_payout(result: str, stake: float, odds_taken: float,
             fee IS subtracted separately on a loss), specifically because
             for fee_before_odds books the fee was already part of the
             stake you paid, not a separate charge layered on top.
-      PUSH: same mechanic as VOID below (no real push example seen yet,
-            but inferred from confirmed VOID behavior being driven by the
-            same "fee is never returned once charged" mechanic) --
-            Payout = stake - fee, P/L = 0.
-      VOID: Payout = stake - fee, P/L = 0 -- confirmed directly: a real
-            Polymarket VOID on a $51.24 stake with $1.08 fee returned
-            exactly $50.16 (stake - fee), not the full stake.
+      PUSH: Payout = stake - fee, P/L = -fee (not 0 -- corrected
+            2026-06-20: the fee is a real, permanent loss even though
+            the stake itself is returned, same reasoning as VOID below).
+      VOID: Payout = stake - fee, P/L = -fee -- confirmed directly: a
+            real Polymarket VOID on a $51.24 stake with $1.08 fee
+            returned exactly $50.16 (stake - fee). P/L was originally
+            set to 0 (treating this as break-even), which was wrong --
+            staking $51.24 and getting back $50.16 is a genuine $1.08
+            loss, not a wash.
     """
     is_promo_funded = bet_category in PROMO_FUNDED_CATEGORIES
 
@@ -207,7 +209,10 @@ def calculate_pl_and_payout(result: str, stake: float, odds_taken: float,
 
     if result == RESULT_PUSH:
         if fee_before_odds:
-            return 0.0, round(stake - fee, 2)
+            # Same fix as VOID below: P/L = -fee, not 0 -- you staked the
+            # full amount including fee, got back stake-fee, so the fee
+            # is a genuine, permanent loss even on a push.
+            return round(-fee, 2), round(stake - fee, 2)
         # Push still incurs the fee -- confirmed against the Illinois Gaming
         # Board's FAQ via DraftKings' support page: "the pass-through tax
         # will not be returned if the bet is graded as a push."
@@ -217,7 +222,15 @@ def calculate_pl_and_payout(result: str, stake: float, odds_taken: float,
         if fee_before_odds:
             # Confirmed directly from a real Polymarket VOID: $51.24 stake,
             # $1.08 fee, returned exactly $50.16 -- fee is never refunded.
-            return 0.0, round(stake - fee, 2)
+            # P/L = -fee (not 0): you staked the full amount including fee,
+            # got back stake-fee, so you're genuinely down the fee amount.
+            # This corrects an earlier error (2026-06-20) where P/L was
+            # set to 0.0, treating the void as break-even -- it isn't,
+            # since the fee is a real, permanent loss even when the bet
+            # itself never happened.
+            if is_promo_funded:
+                return round(-fee, 2), None
+            return round(-fee, 2), round(stake - fee, 2)
         # Void does NOT incur the fee for traditional sportsbooks, unlike
         # push -- confirmed: "pushed bets will pay the fee, but voided
         # bets do not" (Legal Sports Report, citing IL sportsbook policy).
