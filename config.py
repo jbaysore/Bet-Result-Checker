@@ -1,0 +1,154 @@
+import os
+import json
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# ── Google Sheets ────────────────────────────────────────────────
+SHEET_ID = os.getenv("SHEET_ID")
+SHEET_TAB = os.getenv("SHEET_TAB", "Bets")
+
+# Locally: GOOGLE_APPLICATION_CREDENTIALS points to a file path.
+# On Cloud Run: GOOGLE_APPLICATION_CREDENTIALS_JSON holds the raw JSON
+# content, injected directly from Secret Manager.
+CREDENTIALS_PATH = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+CREDENTIALS_JSON = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+
+
+def get_credentials_info() -> dict:
+    """
+    Returns the service account credentials as a dict, regardless of
+    whether they came from a local file (dev) or an injected secret (Cloud Run).
+    """
+    if CREDENTIALS_JSON:
+        return json.loads(CREDENTIALS_JSON)
+    if CREDENTIALS_PATH:
+        with open(CREDENTIALS_PATH, "r") as f:
+            return json.load(f)
+    raise RuntimeError(
+        "No credentials found. Set GOOGLE_APPLICATION_CREDENTIALS (local file path) "
+        "or GOOGLE_APPLICATION_CREDENTIALS_JSON (raw JSON, used on Cloud Run)."
+    )
+
+
+# ── Odds API ─────────────────────────────────────────────────────
+ODDS_API_KEY = os.getenv("ODDS_API_KEY")
+ODDS_API_BASE = "https://api.the-odds-api.com/v4"
+
+# ── Column mapping (0-indexed) ───────────────────────────────────
+# Matches: BetID | Date Placed | Book | Sport | Team1 | Team2 |
+#          Game Date | Game Start Time | Selection | Bet Type |
+#          OddsTaken | DecimalOddsTaken | ClosingOdds | DecimalClosingOdds |
+#          CLV | Stake | Fee | Bet Category | Promo ID | Result | Payout |
+#          P/L | Running P/L | Notes
+#
+# Fee was added 2026-06-20, inserted after Stake -- every column from
+# Bet Category onward shifted by +1 from its previous position. Every
+# consumer of this mapping in the project (Python: sheets_reader.py,
+# sheets_writer.py; Node: server.js, useBankroll.js, BetsPage.jsx,
+# StatsPage.jsx, LogBetWizard.jsx) reads by key name or header name, not
+# raw numeric index, so this insertion required updating ONLY this dict
+# and the sheet's actual column order -- no other file needed changes.
+COL = {
+    "bet_id":         0,
+    "date_placed":    1,
+    "book":           2,
+    "sport":          3,
+    "team1":          4,
+    "team2":          5,
+    "game_date":      6,
+    "game_start":     7,
+    "selection":      8,
+    "bet_type":       9,
+    "odds_taken":     10,
+    "decimal_odds":   11,
+    "closing_odds":   12,
+    "decimal_closing":13,
+    "clv":            14,
+    "stake":          15,
+    "fee":            16,
+    "bet_category":   17,
+    "promo_id":       18,
+    "result":         19,
+    "payout":         20,
+    "pl":             21,
+    "running_pl":     22,
+    "notes":          23,
+}
+
+# ── Bet types ─────────────────────────────────────────────────────
+# Values as they appear in your Sheet's Bet Type column
+BET_TYPE_SPREAD     = "Spread"
+BET_TYPE_MONEYLINE  = "Moneyline"
+BET_TYPE_TOTAL      = "Total"
+BET_TYPE_DRAW       = "Draw"
+BET_TYPE_PARLAY     = "Parlay"
+BET_TYPE_PROP       = "Prop"
+
+# Bet types this tool will resolve automatically
+AUTOMATED_BET_TYPES = {BET_TYPE_SPREAD, BET_TYPE_MONEYLINE, BET_TYPE_TOTAL, BET_TYPE_DRAW}
+
+# ── Bet Categories ──────────────────────────────────────────────────
+# Matches the 6 canonical values enforced by LogBetWizard.jsx's BET_CATEGORIES
+# (Free Bet was removed -- unused, and its real payout behavior was never
+# validated against an actual promo).
+BET_CATEGORY_QUALIFYING     = "Qualifying Bet"
+BET_CATEGORY_DEPOSIT_BONUS  = "Deposit Bonus"
+BET_CATEGORY_BONUS_BET      = "Bonus Bet"
+BET_CATEGORY_PROFIT_BOOST   = "Profit Boost"
+BET_CATEGORY_STANDARD       = "Standard"
+BET_CATEGORY_INSURANCE_BET  = "Insurance Bet"
+
+# Categories where the stake itself is bonus/promotional credit, not real
+# cash -- a loss costs nothing (P/L = 0), and a void returns no Payout
+# (there was no real money to give back).
+PROMO_FUNDED_CATEGORIES = {BET_CATEGORY_BONUS_BET, BET_CATEGORY_DEPOSIT_BONUS}
+
+# Categories where real cash is at risk regardless of the promo label
+# attached -- a loss costs the full stake (P/L = -stake), and a void
+# returns the stake as Payout. Profit Boost and Insurance Bet both fall
+# here: the promo affects odds or provides a separate refund credit, but
+# the wagered stake itself was genuinely your money.
+REAL_MONEY_CATEGORIES = {BET_CATEGORY_STANDARD, BET_CATEGORY_QUALIFYING,
+                          BET_CATEGORY_PROFIT_BOOST, BET_CATEGORY_INSURANCE_BET}
+
+# ── Result values ─────────────────────────────────────────────────
+RESULT_WIN   = "WIN"
+RESULT_LOSS  = "LOSS"
+RESULT_PUSH  = "PUSH"
+RESULT_VOID  = "VOID"        # written when a game is cancelled/postponed and never played
+RESULT_NEEDS_REVIEW = "NEEDS_REVIEW"  # written when Odds API never returned a final
+                                       # score well past game time -- distinct from
+                                       # PENDING: this specifically means "check ESPN
+                                       # for cancellation via the Stats page" before
+                                       # falling back to full manual review. See the
+                                       # Log Bet Wizard's Step 3 design notes -- ESPN is
+                                       # only ever consulted here, on this rare path, via
+                                       # a human-confirmed live lookup, never automatically
+                                       # and never via a cached/stored sport->league mapping.
+RESULT_PENDING = "PENDING"  # written when a NEEDS_REVIEW check finds nothing useful
+                             # (or is skipped) -- fully manual review from here
+
+# ── Game status values ────────────────────────────────────────────
+# Contract that any upstream game-result source (ESPN, Odds API, etc.)
+# must translate its own status fields into before passing a game dict
+# to resolver.resolve(). Keeps resolver.py independent of any one
+# data source's specific status vocabulary.
+GAME_STATUS_FINAL     = "final"      # game completed normally, scores are official
+GAME_STATUS_CANCELLED = "cancelled"  # game was cancelled or postponed and will not be played
+
+# ── Polling settings ──────────────────────────────────────────────
+POLL_INTERVAL_SECONDS = 1800       # 30 minutes between polls
+POLL_START_BUFFER_SECONDS = 1800   # start polling 30 min after scheduled game start
+POLL_MAX_DURATION_SECONDS = 21600  # give up after 6 hours, write PENDING
+
+# ── ESPN API ──────────────────────────────────────────────────────
+ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports"
+
+# NOTE: this is no longer used by poll_bet() (which is Odds-API-only as of
+# today) or by sheets_reader.py (load_sport_map() was removed -- it read a
+# sport->ESPN-league mapping from the "Name References" sheet that nothing
+# calls anymore). ESPN is still used, but only via server.js's
+# /api/bet-review/check-espn endpoint for the Stats page's manual review
+# flow, which does live league discovery per-request and never reads a
+# stored mapping from this sheet or anywhere else.

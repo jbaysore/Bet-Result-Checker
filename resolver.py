@@ -1,0 +1,413 @@
+from config import (
+    BET_TYPE_SPREAD, BET_TYPE_MONEYLINE, BET_TYPE_TOTAL, BET_TYPE_DRAW,
+    RESULT_WIN, RESULT_LOSS, RESULT_PUSH, RESULT_VOID,
+    GAME_STATUS_CANCELLED,
+    PROMO_FUNDED_CATEGORIES, REAL_MONEY_CATEGORIES,
+    BET_CATEGORY_PROFIT_BOOST, BET_CATEGORY_BONUS_BET,
+)
+
+
+def resolve(bet: dict, game: dict) -> str:
+    """
+    Compares a logged bet against a final game result and returns
+    RESULT_WIN, RESULT_LOSS, RESULT_PUSH, or RESULT_VOID.
+
+    Args:
+        bet:  A pending bet dict from sheets_reader.load_pending_bets()
+              Keys used: bet_type, selection, team1, team2
+        game: A final game dict from espn.get_game_result() or
+              odds_api.get_game_result()
+              Keys used: home_team, away_team, home_score, away_score,
+              and optionally "status" — if present and equal to
+              config.GAME_STATUS_CANCELLED, the bet is resolved as VOID
+              without requiring or trusting score fields. Any data source
+              feeding this function is responsible for translating its
+              own status vocabulary into config.GAME_STATUS_* values.
+
+    Returns:
+        "WIN", "LOSS", "PUSH", or "VOID"
+
+    Raises:
+        ValueError if the bet type is unrecognised or selection can't be parsed.
+    """
+    # Check for a cancelled/postponed game before touching scores at all —
+    # a cancelled game's score fields may be missing or meaningless, so this
+    # must short-circuit ahead of every other branch, not be inferred from
+    # a tied or zero score.
+    if game.get("status") == GAME_STATUS_CANCELLED:
+        return RESULT_VOID
+
+    bet_type  = bet["bet_type"].strip()
+    selection = bet["selection"].strip()
+    team1     = bet["team1"].strip()
+    team2     = bet["team2"].strip()
+
+    home_team  = game["home_team"]
+    away_team  = game["away_team"]
+    home_score = game["home_score"]
+    away_score = game["away_score"]
+
+    if bet_type == BET_TYPE_MONEYLINE:
+        return _resolve_moneyline(selection, team1, team2, home_team, away_team,
+                                  home_score, away_score)
+
+    elif bet_type == BET_TYPE_SPREAD:
+        return _resolve_spread(selection, team1, team2, home_team, away_team,
+                               home_score, away_score)
+
+    elif bet_type == BET_TYPE_TOTAL:
+        return _resolve_total(selection, home_score, away_score)
+
+    elif bet_type == BET_TYPE_DRAW:
+        return _resolve_draw(home_score, away_score)
+
+    else:
+        raise ValueError(f"[resolver] Unrecognised bet type: '{bet_type}'")
+
+
+def calculate_pl_and_payout(result: str, stake: float, odds_taken: float,
+                            bet_category: str, boost_pct: float = None,
+                            fee: float = 0.0, fee_before_odds: bool = False) -> tuple[float, float | None]:
+    """
+    Computes P/L and Payout for a resolved bet, given American odds and the
+    bet's category (which determines whether the stake was real cash or
+    promotional credit -- this changes the cost of a loss and the refund
+    on a void). Category also affects WIN math specifically for Profit
+    Boost: the stake is always real money (confirmed against real usage),
+    but the PROFIT portion is boosted by boost_pct, e.g. a 100% boost
+    doubles the normal profit. The stake itself is never boosted.
+
+    Args:
+        result:       One of RESULT_WIN, RESULT_LOSS, RESULT_PUSH, RESULT_VOID
+        stake:        The wagered amount, always a positive number
+        odds_taken:   American odds, e.g. 154 or -453
+        bet_category: One of the values in config.PROMO_FUNDED_CATEGORIES
+                      or config.REAL_MONEY_CATEGORIES
+        boost_pct:    Required when bet_category is "Profit Boost" and
+                      result is WIN -- the boost percentage from the
+                      linked Promotions row (e.g. 100.0 for a 100% boost).
+                      Ignored for every other category/result combination.
+        fee:          Any per-bet fee charged by the book. Defaults to 0.0
+                      since most bets/books have none and this field is
+                      filled in only when discovered during reconciliation
+                      against the book's real balance, not at logging time.
+        fee_before_odds: When True (looked up per-book from the "Book
+                      Settings" tab's Fee Before Odds column), the fee is
+                      treated as reducing the effective stake BEFORE
+                      profit/payout is computed from odds, rather than as
+                      a flat deduction layered on top afterward. Confirmed
+                      against two real Polymarket bets, reconciled exactly
+                      (within Polymarket's own UI rounding) against their
+                      quoted "to win" payout figures on 2026-06-20:
+                      Polymarket's share-based mechanism means the fee
+                      genuinely comes out of the amount actually wagered,
+                      not out of the final profit. Traditional sportsbooks
+                      (confirmed for Caesars via the Illinois Gaming
+                      Board's wager-tax FAQ) charge the fee as a separate
+                      pass-through on top of normal odds math instead --
+                      this is the default (False) behavior.
+
+    Returns:
+        (pl, payout) -- payout is None when nothing is paid out (a loss,
+        or a void on promo-funded credit that was never real money to
+        begin with).
+
+    Raises:
+        ValueError if bet_category is "Profit Boost", result is WIN, and
+        boost_pct is None -- this is a deliberate refusal to guess. Paying
+        out unboosted profit on a Profit Boost win would silently
+        underpay every such win with no visible error, which is worse
+        than failing loudly and requiring the Boost % to actually be set
+        on the linked Promotions row first.
+
+    Rules when fee_before_odds is False (traditional sportsbooks, default):
+      WIN:  pays stake + profit for every category EXCEPT Bonus Bet, which
+            pays profit only -- the bonus-bet token itself is consumed on
+            any outcome and never converts to withdrawable cash, even on
+            a win. For Profit Boost, profit is multiplied by
+            (1 + boost_pct/100) before being added to the stake for Payout.
+            Fee is then subtracted from P/L (not Payout).
+      LOSS: promo-funded categories (Bonus Bet, Deposit Bonus) cost
+            nothing, P/L = 0, since the stake was never real cash.
+            Everything else loses the full stake, P/L = -stake. Fee is
+            included in this loss regardless of fee_before_odds -- the
+            full original stake (fee included) was always confirmed lost
+            either way (see Decision Log, 2026-06-20).
+      PUSH: stake is returned in full (Payout = stake), P/L = -fee (push
+            still incurs the fee -- confirmed via DraftKings/IL FAQ).
+      VOID: real-money categories get the stake back (Payout = stake,
+            P/L = 0, fee NOT charged). Promo-funded categories get
+            nothing back (Payout = None, P/L = 0).
+
+    Rules when fee_before_odds is True (confirmed for Polymarket):
+      WIN:  effective_stake = stake - fee; profit is computed from
+            effective_stake (not the full stake); Payout =
+            effective_stake + profit; P/L = profit. No separate fee
+            subtraction afterward -- it's already reflected in the
+            smaller effective_stake.
+      LOSS: P/L = -stake, the full original stake (fee already included
+            in what Polymarket charged as Cost, so it's not subtracted
+            again). This is different from the False case above (where
+            fee IS subtracted separately on a loss), specifically because
+            for fee_before_odds books the fee was already part of the
+            stake you paid, not a separate charge layered on top.
+      PUSH: same mechanic as VOID below (no real push example seen yet,
+            but inferred from confirmed VOID behavior being driven by the
+            same "fee is never returned once charged" mechanic) --
+            Payout = stake - fee, P/L = 0.
+      VOID: Payout = stake - fee, P/L = 0 -- confirmed directly: a real
+            Polymarket VOID on a $51.24 stake with $1.08 fee returned
+            exactly $50.16 (stake - fee), not the full stake.
+    """
+    is_promo_funded = bet_category in PROMO_FUNDED_CATEGORIES
+
+    if result == RESULT_WIN:
+        effective_stake = (stake - fee) if fee_before_odds else stake
+        profit = _american_odds_profit(effective_stake, odds_taken)
+        if bet_category == BET_CATEGORY_PROFIT_BOOST:
+            if boost_pct is None:
+                raise ValueError(
+                    "[resolver] Cannot resolve a Profit Boost WIN without a boost "
+                    "percentage -- set 'Boost %' on the linked Promotions row "
+                    "before resolving this bet. Refusing to guess at an unboosted "
+                    "payout, since that would silently underpay this win."
+                )
+            profit = round(profit * (1 + boost_pct / 100), 2)
+
+        if fee_before_odds:
+            # Fee is already reflected in effective_stake -- no separate
+            # subtraction here, that would double-deduct it.
+            if bet_category == BET_CATEGORY_BONUS_BET:
+                return round(profit, 2), round(profit, 2)
+            return round(profit, 2), round(effective_stake + profit, 2)
+
+        # Bonus Bet is the one category where a WIN does not return the
+        # stake -- the bonus-bet token is consumed regardless of outcome,
+        # and only the profit becomes real, withdrawable money. Every
+        # other category (including Deposit Bonus, which behaves as real
+        # credit once granted) pays stake + profit on a win.
+        if bet_category == BET_CATEGORY_BONUS_BET:
+            return round(profit - fee, 2), round(profit, 2)
+        return round(profit - fee, 2), round(stake + profit, 2)
+
+    if result == RESULT_LOSS:
+        if is_promo_funded:
+            return round(0.0 - fee, 2), None
+        if fee_before_odds:
+            # Fee is already part of the original stake (it was deducted
+            # from the Cost Polymarket charged) -- the full stake lost
+            # already reflects it. Subtracting fee again here would
+            # double-charge it, which is exactly the bug this branch
+            # exists to avoid (caught by test_polymarket_fee_mechanics.py).
+            return round(-stake, 2), None
+        # Traditional sportsbook: fee is a separate charge layered on top
+        # of the lost stake (confirmed via test_fee.py against DraftKings/
+        # Illinois fee rules).
+        return round(-stake - fee, 2), None
+
+    if result == RESULT_PUSH:
+        if fee_before_odds:
+            return 0.0, round(stake - fee, 2)
+        # Push still incurs the fee -- confirmed against the Illinois Gaming
+        # Board's FAQ via DraftKings' support page: "the pass-through tax
+        # will not be returned if the bet is graded as a push."
+        return round(0.0 - fee, 2), stake
+
+    if result == RESULT_VOID:
+        if fee_before_odds:
+            # Confirmed directly from a real Polymarket VOID: $51.24 stake,
+            # $1.08 fee, returned exactly $50.16 -- fee is never refunded.
+            return 0.0, round(stake - fee, 2)
+        # Void does NOT incur the fee for traditional sportsbooks, unlike
+        # push -- confirmed: "pushed bets will pay the fee, but voided
+        # bets do not" (Legal Sports Report, citing IL sportsbook policy).
+        if is_promo_funded:
+            return 0.0, None
+        return 0.0, stake
+
+    raise ValueError(f"[resolver] Cannot calculate P/L for unrecognised result: '{result}'")
+
+
+def _american_odds_profit(stake: float, odds: float) -> float:
+    """
+    Converts American odds to profit on a winning bet.
+    Positive odds (e.g. +154): profit = stake * (odds / 100)
+    Negative odds (e.g. -453): profit = stake * (100 / abs(odds))
+    """
+    if odds > 0:
+        return round(stake * (odds / 100), 2)
+    else:
+        return round(stake * (100 / abs(odds)), 2)
+
+
+# ── Moneyline ─────────────────────────────────────────────────────────────────
+
+def _resolve_moneyline(selection, team1, team2, home_team, away_team,
+                       home_score, away_score) -> str:
+    """
+    Selection is a team name (Team 1 or Team 2 from sheet), or "Draw".
+    For team bets, the selected team must win outright.
+    For Draw bets, scores must be equal at full time.
+    """
+    # Handle three-way moneyline draw selection (common in soccer)
+    if selection.strip().lower() == "draw":
+        return _resolve_draw(home_score, away_score)
+
+    if home_score == away_score:
+        return RESULT_PUSH
+
+    winning_team = home_team if home_score > away_score else away_team
+    bet_team = _resolve_team(selection, team1, team2, home_team, away_team)
+
+    return RESULT_WIN if _team_matches(bet_team, winning_team) else RESULT_LOSS
+
+
+# ── Spread ────────────────────────────────────────────────────────────────────
+
+def _resolve_spread(selection, team1, team2, home_team, away_team,
+                    home_score, away_score) -> str:
+    """
+    Selection format: "Chiefs -3.5" or "Raiders +3.5" or "Chiefs -3"
+    Parses the team name and line from the selection string.
+    """
+    team_name, line = _parse_spread_selection(selection)
+    bet_team = _resolve_team(team_name, team1, team2, home_team, away_team)
+
+    # Determine if the bet team is home or away, then calculate margin
+    if _team_matches(bet_team, home_team):
+        margin = home_score - away_score
+    else:
+        margin = away_score - home_score
+
+    # Apply the spread: positive line = underdog, negative = favourite
+    # margin + line > 0 → covered, == 0 → push, < 0 → lost
+    result = margin + line
+
+    if result > 0:
+        return RESULT_WIN
+    elif result < 0:
+        return RESULT_LOSS
+    else:
+        return RESULT_PUSH
+
+
+def _parse_spread_selection(selection: str) -> tuple[str, float]:
+    """
+    Parses "Chiefs -3.5" → ("Chiefs", -3.5)
+    Parses "Raiders +7"  → ("Raiders", 7.0)
+    Parses "Lakers -3"   → ("Lakers", -3.0)
+
+    Raises ValueError if the format can't be parsed.
+    """
+    selection = selection.strip()
+
+    # Find the last token — should be the line (e.g. "-3.5", "+7")
+    parts = selection.rsplit(" ", 1)
+    if len(parts) != 2:
+        raise ValueError(f"[resolver] Can't parse spread selection: '{selection}'. "
+                         f"Expected format: 'Team -3.5' or 'Team +7'")
+
+    team_part = parts[0].strip()
+    line_part = parts[1].strip()
+
+    try:
+        line = float(line_part)
+    except ValueError:
+        raise ValueError(f"[resolver] Can't parse line '{line_part}' from selection "
+                         f"'{selection}'. Expected a number like -3.5 or +7.")
+
+    return team_part, line
+
+
+# ── Total ─────────────────────────────────────────────────────────────────────
+
+def _resolve_total(selection: str, home_score: int, away_score: int) -> str:
+    """
+    Selection format: "Over 47.5" or "Under 47.5" or "Over 210" etc.
+    Case-insensitive.
+    """
+    parts = selection.strip().split(" ", 1)
+    if len(parts) != 2:
+        raise ValueError(f"[resolver] Can't parse total selection: '{selection}'. "
+                         f"Expected format: 'Over 47.5' or 'Under 47.5'")
+
+    direction = parts[0].strip().lower()
+    try:
+        line = float(parts[1].strip())
+    except ValueError:
+        raise ValueError(f"[resolver] Can't parse total line from '{selection}'.")
+
+    actual = home_score + away_score
+
+    if actual == line:
+        return RESULT_PUSH
+
+    if direction == "over":
+        return RESULT_WIN if actual > line else RESULT_LOSS
+    elif direction == "under":
+        return RESULT_WIN if actual < line else RESULT_LOSS
+    else:
+        raise ValueError(f"[resolver] Unknown total direction '{direction}' in '{selection}'. "
+                         f"Expected 'Over' or 'Under'.")
+
+
+# ── Draw ──────────────────────────────────────────────────────────────────────
+
+def _resolve_draw(home_score: int, away_score: int) -> str:
+    """
+    Bet on the draw — wins if scores are equal at full time.
+    """
+    return RESULT_WIN if home_score == away_score else RESULT_LOSS
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _resolve_team(selection_team: str, team1: str, team2: str,
+                  home_team: str, away_team: str) -> str:
+    """
+    Maps the team name from the Selection column back to the
+    API-returned team name (home_team or away_team).
+
+    Tries matching against team1/team2 first (sheet names),
+    then directly against the API names as a fallback.
+    """
+    sel = selection_team.lower().strip()
+
+    if _fuzzy_match(sel, team1.lower()):
+        # team1 from sheet — now find its API counterpart
+        if _fuzzy_match(team1.lower(), home_team.lower()):
+            return home_team
+        if _fuzzy_match(team1.lower(), away_team.lower()):
+            return away_team
+
+    if _fuzzy_match(sel, team2.lower()):
+        if _fuzzy_match(team2.lower(), home_team.lower()):
+            return home_team
+        if _fuzzy_match(team2.lower(), away_team.lower()):
+            return away_team
+
+    # Direct match against API names as last resort
+    if _fuzzy_match(sel, home_team.lower()):
+        return home_team
+    if _fuzzy_match(sel, away_team.lower()):
+        return away_team
+
+    raise ValueError(f"[resolver] Could not match selection team '{selection_team}' "
+                     f"to either '{home_team}' or '{away_team}'.")
+
+
+def _fuzzy_match(a: str, b: str) -> bool:
+    """
+    Returns True if two team name strings refer to the same team.
+    Checks exact match, then substring in either direction.
+    Handles "Chiefs" matching "Kansas City Chiefs" etc.
+    """
+    a = a.strip()
+    b = b.strip()
+    if not a or not b:
+        return False
+    return a == b or a in b or b in a
+
+
+def _team_matches(team_a: str, team_b: str) -> bool:
+    return _fuzzy_match(team_a.lower(), team_b.lower())
