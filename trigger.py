@@ -23,8 +23,7 @@ def main():
         sys.exit(1)
 
     if not pending:
-        print("[trigger] ✅ No pending bets found. Nothing to do.")
-        sys.exit(0)
+        print("[trigger] ✅ No pending bets found.")
 
     # ── Filter to bets where game time has passed ────────────────
     now_ct = datetime.now(CENTRAL)
@@ -55,41 +54,41 @@ def main():
 
     if not ready:
         print("\n[trigger] ✅ No bets ready to check right now.")
-        sys.exit(0)
 
     # ── Process each ready bet ───────────────────────────────────
-    print(f"\n[trigger] Processing {len(ready)} bet(s)...\n")
-
     results = {"resolved": 0, "still_pending": 0, "needs_review": 0}
 
-    for i, bet in enumerate(ready, start=1):
-        print(f"─ Bet {i}/{len(ready)} "
-              f"─────────────────────────────────────────")
-        print(f"  BetID:     {bet['bet_id']}")
-        print(f"  Sport:     {bet['sport']}")
-        print(f"  Game:      {bet['team1']} vs {bet['team2']}")
-        print(f"  Date:      {bet['game_date']} {bet['game_start']}")
-        print(f"  Bet type:  {bet['bet_type']}")
-        print(f"  Selection: {bet['selection']}")
-        print()
+    if ready:
+        print(f"\n[trigger] Processing {len(ready)} bet(s)...\n")
 
-        # poll_bet now checks ONCE and returns a status string -- it never
-        # sleeps or loops internally (2026-06-20 redesign: the 30-min
-        # Cloud Scheduler trigger IS the retry mechanism now, not an
-        # in-process wait).
-        status = poll_bet(bet)
+        for i, bet in enumerate(ready, start=1):
+            print(f"─ Bet {i}/{len(ready)} "
+                  f"─────────────────────────────────────────")
+            print(f"  BetID:     {bet['bet_id']}")
+            print(f"  Sport:     {bet['sport']}")
+            print(f"  Game:      {bet['team1']} vs {bet['team2']}")
+            print(f"  Date:      {bet['game_date']} {bet['game_start']}")
+            print(f"  Bet type:  {bet['bet_type']}")
+            print(f"  Selection: {bet['selection']}")
+            print()
 
-        if status == "resolved":
-            results["resolved"] += 1
-        elif status == "needs_review":
-            results["needs_review"] += 1
-        elif status in ("still_pending", "not_yet_time"):
-            results["still_pending"] += 1
-        # "error" is intentionally not counted in any bucket above --
-        # poll_bet already prints a ❌ line for it; this loop doesn't need
-        # a separate counter for something that's already loud in the logs.
+            # poll_bet now checks ONCE and returns a status string -- it never
+            # sleeps or loops internally (2026-06-20 redesign: the 30-min
+            # Cloud Scheduler trigger IS the retry mechanism now, not an
+            # in-process wait).
+            status = poll_bet(bet)
 
-        print()
+            if status == "resolved":
+                results["resolved"] += 1
+            elif status == "needs_review":
+                results["needs_review"] += 1
+            elif status in ("still_pending", "not_yet_time"):
+                results["still_pending"] += 1
+            # "error" is intentionally not counted in any bucket above --
+            # poll_bet already prints a ❌ line for it; this loop doesn't need
+            # a separate counter for something that's already loud in the logs.
+
+            print()
 
     # ── P/L/Payout Completion: fill in rows that have a Result but are ──
     # ── missing P/L and Payout (most commonly: a manually-resolved      ──
