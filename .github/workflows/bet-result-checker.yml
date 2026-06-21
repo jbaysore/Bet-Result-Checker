@@ -1,0 +1,27 @@
+name: Run Bet Result Checker
+on:
+  workflow_dispatch:
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run Bet Result Checker
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS_JSON: ${{ secrets.SERVICE_ACCOUNT_JSON }}
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          SHEET_ID: ${{ secrets.SHEET_ID }}
+          SHEET_TAB: Bets
+        run: python trigger.py
