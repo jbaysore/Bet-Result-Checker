@@ -167,7 +167,7 @@ ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports"
 # Schema (16 columns, confirmed against the live sheet 2026-06-21):
 # Promo ID | Book | Promo Name | Promo Type | Boost % | Reward |
 # Qualifying Cost | Bonus Amount | Status | Realized Date |
-# Realized Amount | Notes | Expiration Date | Expected Reward Count |
+# Realized Amount | Notes | Expiration Date/Time | Expected Reward Count |
 # Reward Timing | Token Usage Window (days)
 #
 # The last 4 columns were added specifically to support the automated
@@ -186,7 +186,7 @@ PROMO_COL = {
     "realized_date":         "Realized Date",
     "realized_amount":       "Realized Amount",
     "notes":                 "Notes",
-    "expiration_date":       "Expiration Date",
+    "expiration_date":       "Expiration Date/Time",
     "expected_reward_count": "Expected Reward Count",
     "reward_timing":         "Reward Timing",
     "token_usage_window":    "Token Usage Window (days)",
