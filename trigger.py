@@ -74,8 +74,8 @@ def main():
 
             # poll_bet now checks ONCE and returns a status string -- it never
             # sleeps or loops internally (2026-06-20 redesign: the 30-min
-            # Cloud Scheduler trigger IS the retry mechanism now, not an
-            # in-process wait).
+            # cron-job.org-triggered GitHub Actions run IS the retry
+            # mechanism now, not an in-process wait).
             status = poll_bet(bet)
 
             if status == "resolved":
