@@ -5,7 +5,7 @@ import pytz
 from sheets_reader import load_pending_promotions, load_bets_by_promo_id, get_book_fee_before_odds
 from sheets_writer import write_promo_qualifying_cost, write_promo_resolution
 from promo_resolver import evaluate_promo
-from config import SHEET_TAB, COL, PROMO_TYPE_PROFIT_BOOST, BET_CATEGORY_PROFIT_BOOST
+from config import SHEET_TAB, PROMO_TYPE_PROFIT_BOOST, BET_CATEGORY_PROFIT_BOOST
 
 CENTRAL = pytz.timezone("America/Chicago")
 
@@ -39,7 +39,7 @@ def main():
     # of how many promos are Pending in a given run.
     print(f"[promo_trigger] Loading linked bets from '{SHEET_TAB}' tab...")
     try:
-        bets_by_promo = load_bets_by_promo_id(SHEET_TAB, COL)
+        bets_by_promo = load_bets_by_promo_id(SHEET_TAB)
     except Exception as e:
         print(f"[promo_trigger] ❌ Failed to load Bets tab: {e}")
         sys.exit(1)
