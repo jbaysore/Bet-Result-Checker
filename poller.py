@@ -20,23 +20,22 @@ def poll_bet(bet: dict) -> bool:
     Checks a single bet for a final result ONCE, then returns -- does not
     sleep, loop, or retry internally.
 
-    This is a deliberate architectural change (2026-06-20): the Cloud Run
-    Job this runs in is triggered by Cloud Scheduler every 30 minutes
-    (POLL_INTERVAL_SECONDS), and the job's own execution timeout is 600
-    seconds. The original design had this function sleep internally
-    between retries -- which meant any bet without an immediate result
-    would reliably blow through the 600-second timeout and get killed by
-    Cloud Run mid-poll, while a NEW scheduled execution started in parallel
-    every 30 minutes regardless, re-reading the same pending bets from
-    scratch. That's not a fixable timeout-tuning problem; it's two retry
-    mechanisms (an internal sleep loop and an external 30-min schedule)
-    fighting each other. The fix is to have exactly one retry mechanism --
-    the external schedule -- and make each invocation do a single,
-    fast check per bet.
+    This is a deliberate architectural change (2026-06-20): this script runs
+    as a GitHub Actions workflow, triggered via workflow_dispatch every 30
+    minutes (POLL_INTERVAL_SECONDS) by an external cron-job.org schedule
+    calling GitHub's REST API. The original design had this function sleep
+    internally between retries -- which meant any bet without an immediate
+    result would reliably blow through the runner's timeout and get killed
+    mid-poll, while a NEW triggered run started in parallel every 30 minutes
+    regardless, re-reading the same pending bets from scratch. That's not a
+    fixable timeout-tuning problem; it's two retry mechanisms (an internal
+    sleep loop and an external 30-min schedule) fighting each other. The fix
+    is to have exactly one retry mechanism -- the external schedule -- and
+    make each invocation do a single, fast check per bet.
 
     Skip conditions (returns False without writing anything, no error):
       - Game hasn't started yet (+ buffer) -- nothing to check yet, the
-        NEXT scheduled execution will pick it up once it's time.
+        NEXT triggered run will pick it up once it's time.
       - Game started, buffer has passed, but it's been LESS than
         POLL_START_BUFFER_SECONDS + POLL_MAX_DURATION_SECONDS since game
         start -- a normal "not final yet, try again next scheduled run"
@@ -57,7 +56,7 @@ def poll_bet(bet: dict) -> bool:
           "resolved"      -- a final result was found and written this call
           "not_yet_time"  -- game hasn't started (+ buffer) yet
           "still_pending" -- checked, no final score yet, within the normal
-                             window -- the NEXT scheduled execution will
+                             window -- the NEXT triggered run will
                              check again. This is the expected outcome for
                              most bets on most runs, not an error.
           "needs_review"  -- past the give-up threshold, NEEDS_REVIEW was
@@ -83,7 +82,7 @@ def poll_bet(bet: dict) -> bool:
     if now_utc < poll_start:
         print(f"[poller] BetID {bet_id}: game starts at {game_dt.strftime('%m/%d/%Y %I:%M %p CT')}, "
               f"not yet past the {_format_duration(POLL_START_BUFFER_SECONDS)} buffer. "
-              f"Skipping this run -- next scheduled execution will check again.")
+              f"Skipping this run -- next triggered run will check again.")
         return "not_yet_time"
 
     print(f"[poller] BetID {bet_id}: checking now — {now_utc.strftime('%H:%M:%S UTC')}")
@@ -117,7 +116,7 @@ def poll_bet(bet: dict) -> bool:
         write_result(row_idx, RESULT_NEEDS_REVIEW, bet_id)
         return "needs_review"
 
-    print(f"[poller] BetID {bet_id}: not final yet. Next scheduled execution will check again.")
+    print(f"[poller] BetID {bet_id}: not final yet. Next triggered run will check again.")
     return "still_pending"
 
 
@@ -127,8 +126,8 @@ def _fetch_result(bet: dict, sport: str) -> dict | None:
     NOT consulted here during normal polling -- ESPN requires knowing
     which league path corresponds to this sport, and reliably determining
     that mapping turned out to need either a fragile fuzzy match or a
-    cached lookup table, both of which were rejected: Cloud Run has no
-    persistent local disk for a cache, and a stored sport->league mapping
+    cached lookup table, both of which were rejected: GitHub Actions runners
+    have no persistent disk between runs for a cache, and a stored sport->league mapping
     is exactly the kind of stale, unverified data source this project has
     been actively moving away from. Odds API needs no such mapping --
     it uses its own sport_key directly, the same one already on the bet.
