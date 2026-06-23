@@ -13,7 +13,42 @@ def _get_client():
     return gspread.authorize(creds)
 
 
-def load_pending_bets(tab_name: str, col: dict) -> list[dict]:
+def _resolve_bet_col_indices(headers: list[str]) -> dict[str, int | None]:
+    """
+    Maps config.BET_COL logical keys to 0-based column indices against the
+    live Bets tab header row. Missing headers are omitted (None) rather
+    than failing the whole read.
+    """
+    from config import BET_COL
+
+    col_idx: dict[str, int | None] = {}
+    for key, header_name in BET_COL.items():
+        try:
+            col_idx[key] = headers.index(header_name)
+        except ValueError:
+            col_idx[key] = None
+            print(f"[sheets_reader] ⚠️  Bets tab is missing expected "
+                  f"column '{header_name}' -- continuing without it.")
+    return col_idx
+
+
+def _pad_bet_row(row: list, col_idx: dict[str, int | None]) -> list:
+    valid = [i for i in col_idx.values() if i is not None]
+    if not valid:
+        return row
+    while len(row) <= max(valid):
+        row.append("")
+    return row
+
+
+def _bet_cell(row: list, col_idx: dict, key: str) -> str:
+    idx = col_idx.get(key)
+    if idx is None or idx >= len(row):
+        return ""
+    return row[idx].strip()
+
+
+def load_pending_bets(tab_name: str) -> list[dict]:
     """
     Reads the Bets tab and returns all rows where:
       - Result column is blank
@@ -33,14 +68,20 @@ def load_pending_bets(tab_name: str, col: dict) -> list[dict]:
     if not rows:
         return []
 
+    headers = rows[0]
+    col = _resolve_bet_col_indices(headers)
+    if col.get("result") is None or col.get("bet_id") is None:
+        raise RuntimeError(
+            "[sheets_reader] Bets tab is missing 'BetID' or 'Result' "
+            "column entirely -- cannot proceed."
+        )
+
     pending = []
     for row_idx, row in enumerate(rows[1:], start=2):  # row 1 is header
-        # Pad row in case trailing blank cells are omitted by Sheets API
-        while len(row) <= max(col.values()):
-            row.append("")
+        row = _pad_bet_row(row, col)
 
-        result = row[col["result"]].strip()
-        bet_type = row[col["bet_type"]].strip()
+        result = _bet_cell(row, col, "result")
+        bet_type = _bet_cell(row, col, "bet_type")
 
         if result:
             continue  # already resolved
@@ -50,26 +91,26 @@ def load_pending_bets(tab_name: str, col: dict) -> list[dict]:
 
         pending.append({
             "row_idx":     row_idx,
-            "bet_id":      row[col["bet_id"]].strip(),
-            "sport":       row[col["sport"]].strip(),
-            "book":        row[col["book"]].strip(),
-            "team1":       row[col["team1"]].strip(),
-            "team2":       row[col["team2"]].strip(),
-            "game_date":   row[col["game_date"]].strip(),
-            "game_start":  row[col["game_start"]].strip(),
-            "selection":   row[col["selection"]].strip(),
+            "bet_id":      _bet_cell(row, col, "bet_id"),
+            "sport":       _bet_cell(row, col, "sport"),
+            "book":        _bet_cell(row, col, "book"),
+            "team1":       _bet_cell(row, col, "team1"),
+            "team2":       _bet_cell(row, col, "team2"),
+            "game_date":   _bet_cell(row, col, "game_date"),
+            "game_start":  _bet_cell(row, col, "game_start"),
+            "selection":   _bet_cell(row, col, "selection"),
             "bet_type":    bet_type,
-            "odds_taken":  row[col["odds_taken"]].strip(),
-            "stake":       row[col["stake"]].strip(),
-            "fee":         row[col["fee"]].strip(),
-            "bet_category": row[col["bet_category"]].strip(),
-            "promo_id":    row[col["promo_id"]].strip(),
+            "odds_taken":  _bet_cell(row, col, "odds_taken"),
+            "stake":       _bet_cell(row, col, "stake"),
+            "fee":         _bet_cell(row, col, "fee"),
+            "bet_category": _bet_cell(row, col, "bet_category"),
+            "promo_id":    _bet_cell(row, col, "promo_id"),
         })
 
     return pending
 
 
-def load_unresolved_pl_bets(tab_name: str, col: dict) -> list[dict]:
+def load_unresolved_pl_bets(tab_name: str) -> list[dict]:
     """
     Reads the Bets tab and returns all rows where:
       - Result is already filled in (WIN/LOSS/PUSH/VOID -- a real outcome,
@@ -107,14 +148,21 @@ def load_unresolved_pl_bets(tab_name: str, col: dict) -> list[dict]:
     if not rows:
         return []
 
+    headers = rows[0]
+    col = _resolve_bet_col_indices(headers)
+    if col.get("result") is None or col.get("bet_id") is None:
+        raise RuntimeError(
+            "[sheets_reader] Bets tab is missing 'BetID' or 'Result' "
+            "column entirely -- cannot proceed."
+        )
+
     unresolved = []
     for row_idx, row in enumerate(rows[1:], start=2):  # row 1 is header
-        while len(row) <= max(col.values()):
-            row.append("")
+        row = _pad_bet_row(row, col)
 
-        result = row[col["result"]].strip()
-        pl = row[col["pl"]].strip()
-        payout = row[col["payout"]].strip()
+        result = _bet_cell(row, col, "result")
+        pl = _bet_cell(row, col, "pl")
+        payout = _bet_cell(row, col, "payout")
 
         if not result:
             continue  # no result yet -- this is load_pending_bets()'s job, not this one
@@ -125,20 +173,20 @@ def load_unresolved_pl_bets(tab_name: str, col: dict) -> list[dict]:
 
         unresolved.append({
             "row_idx":     row_idx,
-            "bet_id":      row[col["bet_id"]].strip(),
-            "sport":       row[col["sport"]].strip(),
-            "book":        row[col["book"]].strip(),
-            "team1":       row[col["team1"]].strip(),
-            "team2":       row[col["team2"]].strip(),
-            "game_date":   row[col["game_date"]].strip(),
-            "game_start":  row[col["game_start"]].strip(),
-            "selection":   row[col["selection"]].strip(),
-            "bet_type":    row[col["bet_type"]].strip(),
-            "odds_taken":  row[col["odds_taken"]].strip(),
-            "stake":       row[col["stake"]].strip(),
-            "fee":         row[col["fee"]].strip(),
-            "bet_category": row[col["bet_category"]].strip(),
-            "promo_id":    row[col["promo_id"]].strip(),
+            "bet_id":      _bet_cell(row, col, "bet_id"),
+            "sport":       _bet_cell(row, col, "sport"),
+            "book":        _bet_cell(row, col, "book"),
+            "team1":       _bet_cell(row, col, "team1"),
+            "team2":       _bet_cell(row, col, "team2"),
+            "game_date":   _bet_cell(row, col, "game_date"),
+            "game_start":  _bet_cell(row, col, "game_start"),
+            "selection":   _bet_cell(row, col, "selection"),
+            "bet_type":    _bet_cell(row, col, "bet_type"),
+            "odds_taken":  _bet_cell(row, col, "odds_taken"),
+            "stake":       _bet_cell(row, col, "stake"),
+            "fee":         _bet_cell(row, col, "fee"),
+            "bet_category": _bet_cell(row, col, "bet_category"),
+            "promo_id":    _bet_cell(row, col, "promo_id"),
             "result":      result,
         })
 
@@ -258,7 +306,7 @@ def load_pending_promotions() -> list[dict]:
 
     Reads by HEADER NAME via config.PROMO_COL, matching the existing
     get_promo_boost_percentage() convention -- the Promotions tab's
-    column layout is not assumed fixed, unlike the Bets tab's COL dict.
+    column layout is not assumed fixed; reads by header name via BET_COL.
 
     Returns a list of dicts keyed by the same logical names as
     config.PROMO_COL (promo_id, book, promo_type, expiration_date, etc.),
@@ -329,7 +377,7 @@ def load_pending_promotions() -> list[dict]:
     return pending
 
 
-def load_bets_by_promo_id(tab_name: str, col: dict) -> dict[str, list[dict]]:
+def load_bets_by_promo_id(tab_name: str) -> dict[str, list[dict]]:
     """
     Reads the ENTIRE Bets tab once and groups every row that has a
     non-blank Promo ID, keyed by that Promo ID. Built for the Promotion
@@ -357,30 +405,37 @@ def load_bets_by_promo_id(tab_name: str, col: dict) -> dict[str, list[dict]]:
     if not rows:
         return {}
 
+    headers = rows[0]
+    col = _resolve_bet_col_indices(headers)
+    if col.get("promo_id") is None:
+        raise RuntimeError(
+            "[sheets_reader] Bets tab is missing 'Promo ID' column entirely "
+            "-- cannot proceed."
+        )
+
     grouped: dict[str, list[dict]] = {}
 
     for row_idx, row in enumerate(rows[1:], start=2):  # row 1 is header
-        while len(row) <= max(col.values()):
-            row.append("")
+        row = _pad_bet_row(row, col)
 
-        promo_id = row[col["promo_id"]].strip()
+        promo_id = _bet_cell(row, col, "promo_id")
         if not promo_id:
             continue
 
         bet = {
             "row_idx":      row_idx,
-            "bet_id":       row[col["bet_id"]].strip(),
-            "date_placed":  row[col["date_placed"]].strip(),
-            "book":         row[col["book"]].strip(),
-            "sport":        row[col["sport"]].strip(),
-            "stake":        row[col["stake"]].strip(),
-            "fee":          row[col["fee"]].strip(),
-            "bet_category": row[col["bet_category"]].strip(),
+            "bet_id":       _bet_cell(row, col, "bet_id"),
+            "date_placed":  _bet_cell(row, col, "date_placed"),
+            "book":         _bet_cell(row, col, "book"),
+            "sport":        _bet_cell(row, col, "sport"),
+            "stake":        _bet_cell(row, col, "stake"),
+            "fee":          _bet_cell(row, col, "fee"),
+            "bet_category": _bet_cell(row, col, "bet_category"),
             "promo_id":     promo_id,
-            "result":       row[col["result"]].strip(),
-            "payout":       row[col["payout"]].strip(),
-            "pl":           row[col["pl"]].strip(),
-            "odds_taken":   row[col["odds_taken"]].strip(),
+            "result":       _bet_cell(row, col, "result"),
+            "payout":       _bet_cell(row, col, "payout"),
+            "pl":           _bet_cell(row, col, "pl"),
+            "odds_taken":   _bet_cell(row, col, "odds_taken"),
         }
 
         grouped.setdefault(promo_id, []).append(bet)
