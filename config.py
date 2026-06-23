@@ -9,8 +9,8 @@ SHEET_ID = os.getenv("SHEET_ID")
 SHEET_TAB = os.getenv("SHEET_TAB", "Bets")
 
 # Locally: GOOGLE_APPLICATION_CREDENTIALS points to a file path.
-# On Cloud Run: GOOGLE_APPLICATION_CREDENTIALS_JSON holds the raw JSON
-# content, injected directly from Secret Manager.
+# In GitHub Actions: GOOGLE_APPLICATION_CREDENTIALS_JSON holds the raw JSON
+# content, injected directly from the SERVICE_ACCOUNT_JSON repo secret.
 CREDENTIALS_PATH = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
 CREDENTIALS_JSON = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
 
@@ -18,7 +18,7 @@ CREDENTIALS_JSON = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
 def get_credentials_info() -> dict:
     """
     Returns the service account credentials as a dict, regardless of
-    whether they came from a local file (dev) or an injected secret (Cloud Run).
+    whether they came from a local file (dev) or an injected secret (GitHub Actions).
     """
     if CREDENTIALS_JSON:
         return json.loads(CREDENTIALS_JSON)
@@ -27,7 +27,7 @@ def get_credentials_info() -> dict:
             return json.load(f)
     raise RuntimeError(
         "No credentials found. Set GOOGLE_APPLICATION_CREDENTIALS (local file path) "
-        "or GOOGLE_APPLICATION_CREDENTIALS_JSON (raw JSON, used on Cloud Run)."
+        "or GOOGLE_APPLICATION_CREDENTIALS_JSON (raw JSON, used in GitHub Actions)."
     )
 
 
