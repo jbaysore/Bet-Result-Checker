@@ -1,6 +1,6 @@
 import gspread
 from google.oauth2.service_account import Credentials
-from config import SHEET_ID, SHEET_TAB, COL, RESULT_VOID, get_credentials_info
+from config import SHEET_ID, SHEET_TAB, RESULT_VOID, get_credentials_info
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -18,6 +18,25 @@ def _get_sheet():
     client = _get_client()
     spreadsheet = client.open_by_key(SHEET_ID)
     return spreadsheet.worksheet(SHEET_TAB)
+
+
+def _bets_col_letter_lookup():
+    """
+    Resolves config.BET_COL header names to actual 1-based column indices
+    against the LIVE Bets sheet header row, so columns may be reordered.
+    """
+    from config import BET_COL
+
+    sheet = _get_sheet()
+    headers = sheet.row_values(1)
+
+    idx = {}
+    for key, header_name in BET_COL.items():
+        try:
+            idx[key] = headers.index(header_name) + 1  # gspread is 1-based
+        except ValueError:
+            idx[key] = None
+    return idx
 
 
 def _get_book_refunds_fee_on_void(book: str) -> bool:
@@ -98,16 +117,23 @@ def write_result(row_idx: int, result: str, bet_id: str, book: str = None,
     Returns:
         True if write succeeded, False if it failed.
     """
-    result_col = COL["result"] + 1
-    payout_col = COL["payout"] + 1
-    pl_col     = COL["pl"] + 1
-    fee_col    = COL["fee"] + 1
+    idx = _bets_col_letter_lookup()
+    result_col = idx.get("result")
+    payout_col = idx.get("payout")
+    pl_col     = idx.get("pl")
+    fee_col    = idx.get("fee")
+    bet_id_col = idx.get("bet_id")
+
+    if None in (result_col, payout_col, pl_col, fee_col, bet_id_col):
+        print(f"[sheets_writer] ⚠️  Bets tab is missing one or more required "
+              f"columns (BetID, Result, Payout, P/L, Fee) -- cannot write "
+              f"to row {row_idx}.")
+        return False
 
     try:
         sheet = _get_sheet()
 
         # Safety check — verify the BetID in this row matches before writing
-        bet_id_col = COL["bet_id"] + 1
         current_bet_id = sheet.cell(row_idx, bet_id_col).value
 
         if current_bet_id != bet_id:
@@ -191,9 +217,15 @@ def write_pl_payout(row_idx: int, bet_id: str, pl: float, payout: float | None) 
         True if write succeeded, False if it failed or was skipped
         (BetID mismatch, or P/L/Payout were no longer both blank).
     """
-    pl_col     = COL["pl"] + 1
-    payout_col = COL["payout"] + 1
-    bet_id_col = COL["bet_id"] + 1
+    idx = _bets_col_letter_lookup()
+    pl_col     = idx.get("pl")
+    payout_col = idx.get("payout")
+    bet_id_col = idx.get("bet_id")
+
+    if None in (pl_col, payout_col, bet_id_col):
+        print(f"[sheets_writer] ⚠️  Bets tab is missing one or more required "
+              f"columns (BetID, P/L, Payout) -- cannot write to row {row_idx}.")
+        return False
 
     try:
         sheet = _get_sheet()
