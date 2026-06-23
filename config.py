@@ -35,45 +35,41 @@ def get_credentials_info() -> dict:
 ODDS_API_KEY = os.getenv("ODDS_API_KEY")
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 
-# ── Column mapping (0-indexed) ───────────────────────────────────
-# Matches: BetID | Date Placed | Book | Sport | Team1 | Team2 |
-#          Game Date | Game Start Time | Selection | Bet Type |
-#          OddsTaken | DecimalOddsTaken | ClosingOdds | DecimalClosingOdds |
-#          CLV | Stake | Fee | Bet Category | Promo ID | Result | Payout |
-#          P/L | Running P/L | Notes
+# ── Bets tab column headers ─────────────────────────────────────────
+# Read by HEADER NAME, not a fixed index dict -- matches the Promotions
+# tab convention (PROMO_COL). Resolves against the live sheet header row
+# at read/write time so columns may be reordered freely.
 #
-# Fee was added 2026-06-20, inserted after Stake -- every column from
-# Bet Category onward shifted by +1 from its previous position. Every
-# consumer of this mapping in the project (Python: sheets_reader.py,
-# sheets_writer.py; Node: server.js, useBankroll.js, BetsPage.jsx,
-# StatsPage.jsx, LogBetWizard.jsx) reads by key name or header name, not
-# raw numeric index, so this insertion required updating ONLY this dict
-# and the sheet's actual column order -- no other file needed changes.
-COL = {
-    "bet_id":         0,
-    "date_placed":    1,
-    "book":           2,
-    "sport":          3,
-    "team1":          4,
-    "team2":          5,
-    "game_date":      6,
-    "game_start":     7,
-    "selection":      8,
-    "bet_type":       9,
-    "odds_taken":     10,
-    "decimal_odds":   11,
-    "closing_odds":   12,
-    "decimal_closing":13,
-    "clv":            14,
-    "stake":          15,
-    "fee":            16,
-    "bet_category":   17,
-    "promo_id":       18,
-    "result":         19,
-    "payout":         20,
-    "pl":             21,
-    "running_pl":     22,
-    "notes":          23,
+# Schema: BetID | Date Placed | Book | Sport | Team 1 | Team 2 |
+#         Game Date | Game Start Time | Selection | Bet Type |
+#         OddsTaken | DecimalOddsTaken | ClosingOdds | DecimalClosingOdds |
+#         CLV | Stake | Fee | Bet Category | Promo ID | Result | Payout |
+#         P/L | Running P/L | Notes
+BET_COL = {
+    "bet_id":          "BetID",
+    "date_placed":     "Date Placed",
+    "book":            "Book",
+    "sport":           "Sport",
+    "team1":           "Team 1",
+    "team2":           "Team 2",
+    "game_date":       "Game Date",
+    "game_start":      "Game Start Time",
+    "selection":       "Selection",
+    "bet_type":        "Bet Type",
+    "odds_taken":      "OddsTaken",
+    "decimal_odds":    "DecimalOddsTaken",
+    "closing_odds":    "ClosingOdds",
+    "decimal_closing": "DecimalClosingOdds",
+    "clv":             "CLV",
+    "stake":           "Stake",
+    "fee":             "Fee",
+    "bet_category":    "Bet Category",
+    "promo_id":        "Promo ID",
+    "result":          "Result",
+    "payout":          "Payout",
+    "pl":              "P/L",
+    "running_pl":      "Running P/L",
+    "notes":           "Notes",
 }
 
 # ── Bet types ─────────────────────────────────────────────────────
@@ -162,7 +158,7 @@ ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports"
 # get_promo_boost_percentage() ("nothing else in this project assumes a
 # fixed column layout for the Promotions tab"). This dict exists only to
 # avoid retyping the literal header strings at every call site; it is
-# NOT a positional index map like Bets' COL dict above.
+# NOT a positional index map like Bets' BET_COL dict above.
 #
 # Schema (16 columns, confirmed against the live sheet 2026-06-21):
 # Promo ID | Book | Promo Name | Promo Type | Boost % | Reward |
