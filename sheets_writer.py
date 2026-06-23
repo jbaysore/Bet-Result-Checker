@@ -24,9 +24,10 @@ def _get_book_refunds_fee_on_void(book: str) -> bool:
     """
     Looks up whether `book` refunds its per-bet fee when a bet resolves to
     VOID, from the "Book Settings" tab (Book | Refunds Fee On Void). This
-    tab is the only storage shared between this Python deployment and the
-    Node Log Bet Wizard (no shared filesystem -- Cloud Run has no
-    persistent local disk), and is written ONLY by the wizard's Step 2
+    tab is the only storage shared between this Python GitHub Actions
+    workflow and the Node Log Bet Wizard (no shared filesystem -- a
+    GitHub Actions runner has no persistent disk between runs), and is
+    written ONLY by the wizard's Step 2
     prompt, never hand-edited, so the TRUE/FALSE literal is reliable here.
 
     Returns False (conservative default: do NOT zero the fee) if the book
