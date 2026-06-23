@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 import pytz
 from sheets_reader import load_pending_bets, load_unresolved_pl_bets
 from poller import poll_bet, complete_pl_payout, _parse_game_datetime
-from config import COL, SHEET_TAB
+from config import SHEET_TAB
 
 CENTRAL = pytz.timezone("America/Chicago")
 
@@ -17,7 +17,7 @@ def main():
     # ── Load pending bets ────────────────────────────────────────
     print(f"[trigger] Loading pending bets from '{SHEET_TAB}' tab...")
     try:
-        pending = load_pending_bets(SHEET_TAB, COL)
+        pending = load_pending_bets(SHEET_TAB)
     except Exception as e:
         print(f"[trigger] ❌ Failed to load pending bets: {e}")
         sys.exit(1)
@@ -95,7 +95,7 @@ def main():
     # ── NEEDS_REVIEW bet where Result was typed in by hand)             ──
     print(f"[trigger] Checking for rows with a Result but missing P/L/Payout...")
     try:
-        unresolved_pl = load_unresolved_pl_bets(SHEET_TAB, COL)
+        unresolved_pl = load_unresolved_pl_bets(SHEET_TAB)
     except Exception as e:
         print(f"[trigger] ❌ Failed to load unresolved P/L bets: {e}")
         unresolved_pl = []
