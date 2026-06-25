@@ -263,6 +263,110 @@ def write_pl_payout(row_idx: int, bet_id: str, pl: float, payout: float | None) 
         return False
 
 
+PL_BLOCKED_PREFIX = "⚠ P/L not calculated:"
+
+
+def flag_pl_blocked(row_idx: int, bet_id: str, reason: str) -> bool:
+    """
+    Appends a visible "⚠ P/L not calculated: <reason>" line to the Notes
+    column when complete_pl_payout()/poll_bet() has to skip P/L because
+    something's missing (most commonly a blank Fee -- see
+    poller._safe_calculate_pl_payout). Without this, a skip was only ever
+    printed to the script's own console log, which nobody watches between
+    scheduled runs -- the bet's Result would just look correctly settled
+    with a silently-blank P/L and no visible explanation anywhere on the
+    sheet itself.
+
+    Idempotent: if Notes already contains a PL_BLOCKED_PREFIX line, it's
+    replaced rather than duplicated (the reason can change between runs --
+    e.g. Fee gets filled in but a different field is now the blocker --
+    and re-appending every run would spam Notes on a bet that's skipped
+    repeatedly over weeks).
+
+    Does NOT touch Result, P/L, or Payout -- purely an informational note,
+    safe to call every time a skip happens.
+    """
+    idx = _bets_col_letter_lookup()
+    notes_col = idx.get("notes")
+    bet_id_col = idx.get("bet_id")
+
+    if None in (notes_col, bet_id_col):
+        print(f"[sheets_writer] ⚠️  Bets tab is missing Notes/BetID column -- "
+              f"cannot flag row {row_idx} as P/L-blocked.")
+        return False
+
+    try:
+        sheet = _get_sheet()
+
+        current_bet_id = sheet.cell(row_idx, bet_id_col).value
+        if current_bet_id != bet_id:
+            print(f"[sheets_writer] ⚠️  Row {row_idx} BetID mismatch. "
+                  f"Expected '{bet_id}', found '{current_bet_id}'. Skipping Notes flag.")
+            return False
+
+        existing_notes = sheet.cell(row_idx, notes_col).value or ""
+        flag_line = f"{PL_BLOCKED_PREFIX} {reason}"
+
+        other_lines = [
+            line for line in existing_notes.split("\n")
+            if line.strip() and not line.strip().startswith(PL_BLOCKED_PREFIX)
+        ]
+        new_notes = "\n".join(other_lines + [flag_line])
+
+        sheet.update_cell(row_idx, notes_col, new_notes)
+        print(f"[sheets_writer] 🚩 Row {row_idx} (BetID: {bet_id}) flagged: {flag_line}")
+        return True
+
+    except gspread.exceptions.APIError as e:
+        print(f"[sheets_writer] ❌ Sheets API error flagging row {row_idx} "
+              f"(BetID: {bet_id}): {e}")
+        return False
+    except Exception as e:
+        print(f"[sheets_writer] ❌ Unexpected error flagging row {row_idx} "
+              f"(BetID: {bet_id}): {e}")
+        return False
+
+
+def clear_pl_blocked_flag(row_idx: int, bet_id: str) -> bool:
+    """
+    Removes a previously-written flag_pl_blocked() line from Notes, once
+    P/L has actually been computed successfully -- called right after a
+    successful write_pl_payout() so the flag doesn't sit there forever
+    looking like P/L is still missing after it's been filled in.
+    Leaves any other Notes content untouched.
+    """
+    idx = _bets_col_letter_lookup()
+    notes_col = idx.get("notes")
+    bet_id_col = idx.get("bet_id")
+
+    if None in (notes_col, bet_id_col):
+        return False
+
+    try:
+        sheet = _get_sheet()
+
+        current_bet_id = sheet.cell(row_idx, bet_id_col).value
+        if current_bet_id != bet_id:
+            return False
+
+        existing_notes = sheet.cell(row_idx, notes_col).value or ""
+        if PL_BLOCKED_PREFIX not in existing_notes:
+            return True  # nothing to clear
+
+        other_lines = [
+            line for line in existing_notes.split("\n")
+            if line.strip() and not line.strip().startswith(PL_BLOCKED_PREFIX)
+        ]
+        sheet.update_cell(row_idx, notes_col, "\n".join(other_lines))
+        print(f"[sheets_writer] ✅ Row {row_idx} (BetID: {bet_id}) P/L-blocked flag cleared.")
+        return True
+
+    except Exception as e:
+        print(f"[sheets_writer] ❌ Unexpected error clearing P/L-blocked flag on row "
+              f"{row_idx} (BetID: {bet_id}): {e}")
+        return False
+
+
 # ════════════════════════════════════════════════════════════════════
 # ── Promotion Updater writes ────────────────────────────────────────
 # ════════════════════════════════════════════════════════════════════
