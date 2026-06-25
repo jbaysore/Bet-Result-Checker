@@ -9,7 +9,7 @@ from config import (
 )
 from sources import odds_api
 from resolver import resolve, calculate_pl_and_payout
-from sheets_writer import write_result, write_pl_payout
+from sheets_writer import write_result, write_pl_payout, flag_pl_blocked, clear_pl_blocked_flag
 from sheets_reader import get_promo_boost_percentage, get_book_fee_before_odds, load_unresolved_pl_bets
 
 CENTRAL = pytz.timezone("America/Chicago")
@@ -98,6 +98,8 @@ def poll_bet(bet: dict) -> bool:
 
         pl, payout = _safe_calculate_pl_payout(bet, result)
         success = write_result(row_idx, result, bet_id, book=bet.get("book"), pl=pl, payout=payout)
+        if success and pl is not None:
+            clear_pl_blocked_flag(row_idx, bet_id)
         return "resolved" if success else "error"
 
     if now_utc >= give_up_at:
@@ -206,10 +208,14 @@ def complete_pl_payout(bet: dict) -> str:
 
     if pl is None:
         # _safe_calculate_pl_payout already printed the specific reason
-        # (missing Fee, missing Boost %, parse error, etc.)
+        # (missing Fee, missing Boost %, parse error, etc.) AND flagged it
+        # in Notes via flag_pl_blocked() -- visible on the sheet itself,
+        # not just this script's own console log.
         return "skipped"
 
     success = write_pl_payout(row_idx, bet_id, pl, payout)
+    if success:
+        clear_pl_blocked_flag(row_idx, bet_id)
     return "completed" if success else "skipped"
 
 
@@ -221,16 +227,24 @@ def _safe_calculate_pl_payout(bet: dict, result: str) -> tuple[float | None, flo
     shouldn't prevent Result from being written; it just means P/L/Payout
     are left for manual entry on that one row, same as before this feature
     existed.
+
+    Every skip path also calls flag_pl_blocked() to leave a visible note
+    on the bet's row itself -- otherwise the only record of why P/L is
+    blank is this function's print() output, which nobody sees between
+    scheduled runs (confirmed 2026-06-24: a real Insurance Bet loss sat
+    with a silently-blank P/L because of exactly this).
     """
     bet_id = bet.get("bet_id", "?")
+    row_idx = bet.get("row_idx")
     try:
         stake = float(str(bet["stake"]).replace("$", "").replace(",", ""))
         odds_taken = float(str(bet["odds_taken"]).replace("+", ""))
         bet_category = bet.get("bet_category", "").strip()
     except (KeyError, ValueError, TypeError) as e:
-        print(f"[poller] ⚠️  BetID {bet_id}: could not parse stake/odds for P/L calculation "
-              f"(stake='{bet.get('stake')}', odds='{bet.get('odds_taken')}'): {e}. "
-              f"Result will be written without P/L/Payout.")
+        reason = (f"could not parse Stake ('{bet.get('stake')}') or "
+                  f"OddsTaken ('{bet.get('odds_taken')}').")
+        print(f"[poller] ⚠️  BetID {bet_id}: {reason} Result will be written without P/L/Payout.")
+        flag_pl_blocked(row_idx, bet_id, reason)
         return None, None
 
     # Fee is required, even for bets logged before this field existed --
@@ -241,16 +255,18 @@ def _safe_calculate_pl_payout(bet: dict, result: str) -> tuple[float | None, flo
     # rather than quietly under-reporting P/L by an unknown amount forever.
     fee_raw = bet.get("fee", "").strip()
     if fee_raw == "":
-        print(f"[poller] ⚠️  BetID {bet_id}: Fee column is blank. Refusing to guess "
-              f"$0 -- this likely predates the Fee field and needs to be backfilled "
-              f"(see your book-by-book balance reconciliation for known fee totals). "
-              f"Result will be written without P/L/Payout.")
+        reason = "Fee column is blank. Fill in Fee (even 0) to calculate P/L."
+        print(f"[poller] ⚠️  BetID {bet_id}: {reason} This likely predates the Fee field "
+              f"and needs to be backfilled (see your book-by-book balance reconciliation "
+              f"for known fee totals). Result will be written without P/L/Payout.")
+        flag_pl_blocked(row_idx, bet_id, reason)
         return None, None
     try:
         fee = float(fee_raw.replace("$", "").replace(",", ""))
     except ValueError:
-        print(f"[poller] ⚠️  BetID {bet_id}: could not parse Fee value '{fee_raw}'. "
-              f"Result will be written without P/L/Payout.")
+        reason = f"could not parse Fee value '{fee_raw}'."
+        print(f"[poller] ⚠️  BetID {bet_id}: {reason} Result will be written without P/L/Payout.")
+        flag_pl_blocked(row_idx, bet_id, reason)
         return None, None
 
     # Profit Boost wins need the boost percentage from the linked Promotions
@@ -260,15 +276,15 @@ def _safe_calculate_pl_payout(bet: dict, result: str) -> tuple[float | None, flo
     if bet_category == BET_CATEGORY_PROFIT_BOOST and result == RESULT_WIN:
         promo_id = bet.get("promo_id", "").strip()
         if not promo_id:
-            print(f"[poller] ⚠️  BetID {bet_id}: Profit Boost WIN but no Promo ID on "
-                  f"this row -- cannot look up boost percentage. "
-                  f"Result will be written without P/L/Payout.")
+            reason = "Profit Boost WIN but no Promo ID on this row -- cannot look up boost percentage."
+            print(f"[poller] ⚠️  BetID {bet_id}: {reason} Result will be written without P/L/Payout.")
+            flag_pl_blocked(row_idx, bet_id, reason)
             return None, None
         boost_pct = get_promo_boost_percentage(promo_id)
         if boost_pct is None:
-            print(f"[poller] ⚠️  BetID {bet_id}: Profit Boost WIN but no Boost % found "
-                  f"on Promotions row for Promo ID '{promo_id}'. "
-                  f"Result will be written without P/L/Payout.")
+            reason = f"Profit Boost WIN but no Boost % found on Promotions row for Promo ID '{promo_id}'."
+            print(f"[poller] ⚠️  BetID {bet_id}: {reason} Result will be written without P/L/Payout.")
+            flag_pl_blocked(row_idx, bet_id, reason)
             return None, None
 
     # Look up whether this book deducts its fee from the stake before
@@ -282,8 +298,9 @@ def _safe_calculate_pl_payout(bet: dict, result: str) -> tuple[float | None, flo
     try:
         return calculate_pl_and_payout(result, stake, odds_taken, bet_category, boost_pct, fee, fee_before_odds)
     except ValueError as e:
-        print(f"[poller] ⚠️  BetID {bet_id}: could not calculate P/L — {e}. "
-              f"Result will be written without P/L/Payout.")
+        reason = f"could not calculate P/L -- {e}"
+        print(f"[poller] ⚠️  BetID {bet_id}: {reason}. Result will be written without P/L/Payout.")
+        flag_pl_blocked(row_idx, bet_id, reason)
         return None, None
 
 
