@@ -1,3 +1,5 @@
+from decimal import Decimal, ROUND_DOWN
+
 from config import (
     BET_TYPE_SPREAD, BET_TYPE_MONEYLINE, BET_TYPE_TOTAL, BET_TYPE_DRAW, BET_TYPE_PARLAY,
     RESULT_WIN, RESULT_LOSS, RESULT_PUSH, RESULT_VOID,
@@ -275,11 +277,26 @@ def _american_odds_profit(stake: float, odds: float) -> float:
     Converts American odds to profit on a winning bet.
     Positive odds (e.g. +154): profit = stake * (odds / 100)
     Negative odds (e.g. -453): profit = stake * (100 / abs(odds))
+
+    Truncates (rounds DOWN) to the cent rather than rounding to nearest --
+    confirmed against two real DraftKings settlements that disagreed with
+    nearest-cent rounding by exactly $0.01 in the book's favor (stake
+    $325.76 @ -255: nearest-cent gives $127.75 profit/$453.51 payout, but
+    DraftKings actually paid $127.74/$453.50; stake $100 @ -453: nearest-
+    cent gives $22.08, DraftKings paid $22.07). Sportsbooks settle this
+    way industry-wide -- fractional cents are truncated in the house's
+    favor, never rounded up in the bettor's favor. Uses Decimal (not
+    float + math.floor) because binary floats can't exactly represent
+    most stake/odds combinations -- a stray float imprecision could flip
+    an exact cent value down by a penny it shouldn't lose. Decimal(str(x))
+    on the ORIGINAL inputs keeps the division exact-as-typed before
+    truncating only once, at the very end.
     """
     if odds > 0:
-        return round(stake * (odds / 100), 2)
+        raw = Decimal(str(stake)) * Decimal(str(odds)) / Decimal(100)
     else:
-        return round(stake * (100 / abs(odds)), 2)
+        raw = Decimal(str(stake)) * Decimal(100) / Decimal(str(abs(odds)))
+    return float(raw.quantize(Decimal('0.01'), rounding=ROUND_DOWN))
 
 
 # ── Moneyline ─────────────────────────────────────────────────────────────────
