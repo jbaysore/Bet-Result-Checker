@@ -245,6 +245,59 @@ def get_book_fee_before_odds(book: str) -> bool:
     return False
 
 
+def get_book_fee_config(book: str) -> dict:
+    """
+    Looks up a book's fee TYPE and rate from the "Book Settings" tab
+    (Book | ... | Fee Type | Fee Percent), added for ProphetX-style books
+    whose fee is a percentage of NET PROFIT charged only on a win (never a
+    loss, never a parlay -- see resolver.calculate_pl_and_payout's
+    fee_pct_on_win_only parameter), rather than a flat dollar amount
+    entered/known at logging time like every other book.
+
+    Deliberately a SEPARATE function from get_book_fee_before_odds() above
+    rather than folding this into it or replacing it -- those other call
+    sites (promo_trigger.py, promo_resolver.py) only ever need the
+    Fee Before Odds boolean, and giving them a dict they'd have to unpack
+    for one field would be pure churn for no benefit.
+
+    Returns {"fee_type": "", "fee_percent": None} (i.e. "use the normal
+    flat-fee path") if the book isn't found, or either column doesn't
+    exist yet -- same conservative-default reasoning as
+    get_book_fee_before_odds(): an unrecognised fee type should never be
+    silently treated as automated, since that would skip the "Fee is
+    required" safety check in poller.py for a book that actually needs a
+    manually-entered fee.
+    """
+    client = _get_client()
+    sheet = client.open_by_key(SHEET_ID)
+    tab = sheet.worksheet("Book Settings")
+
+    rows = tab.get_all_values()
+    if not rows:
+        return {"fee_type": "", "fee_percent": None}
+
+    headers = rows[0]
+    try:
+        idx_book = headers.index("Book")
+        idx_type = headers.index("Fee Type")
+        idx_pct = headers.index("Fee Percent")
+    except ValueError:
+        return {"fee_type": "", "fee_percent": None}
+
+    for row in rows[1:]:
+        if len(row) <= max(idx_book, idx_type, idx_pct):
+            continue
+        if row[idx_book].strip().lower() == book.strip().lower():
+            fee_type = row[idx_type].strip()
+            try:
+                fee_percent = float(row[idx_pct]) if row[idx_pct].strip() else None
+            except ValueError:
+                fee_percent = None
+            return {"fee_type": fee_type, "fee_percent": fee_percent}
+
+    return {"fee_type": "", "fee_percent": None}
+
+
 def get_promo_boost_percentage(promo_id: str) -> float | None:
     """
     Looks up the Boost % for a given Promo ID from the Promotions tab.
@@ -372,6 +425,7 @@ def load_pending_promotions() -> list[dict]:
             "expected_reward_count":cell(row, "expected_reward_count"),
             "reward_timing":        cell(row, "reward_timing"),
             "token_usage_window":   cell(row, "token_usage_window"),
+            "start_date":           cell(row, "start_date"),
         })
 
     return pending
