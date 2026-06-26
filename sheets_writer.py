@@ -8,23 +8,60 @@ SCOPES = [
 ]
 
 
+_client_cache = None
+_sheet_cache = None
+_col_idx_cache = None
+
+
 def _get_client():
-    creds_info = get_credentials_info()
-    creds = Credentials.from_service_account_info(creds_info, scopes=SCOPES)
-    return gspread.authorize(creds)
+    """
+    Cached for the lifetime of the current process (each scheduled run is
+    a fresh process, so there's no cross-run staleness risk) -- re-running
+    Credentials.from_service_account_info()/gspread.authorize() on every
+    single flag/write call was pure overhead, never actually needed.
+    """
+    global _client_cache
+    if _client_cache is None:
+        creds_info = get_credentials_info()
+        creds = Credentials.from_service_account_info(creds_info, scopes=SCOPES)
+        _client_cache = gspread.authorize(creds)
+    return _client_cache
 
 
 def _get_sheet():
-    client = _get_client()
-    spreadsheet = client.open_by_key(SHEET_ID)
-    return spreadsheet.worksheet(SHEET_TAB)
+    """
+    Cached for the lifetime of the current process. Every writer function
+    in this module used to call this on every single invocation, each
+    doing a full client.open_by_key() spreadsheet-metadata fetch (a real
+    network "read request" against the Sheets API quota) -- across a
+    handful of bets needing several flag/write calls each, this was
+    enough to trip 'Quota exceeded for Read requests per minute per user'
+    (confirmed 2026-06-26, a run crashed mid-batch on exactly this).
+    Caching means only the FIRST call in a run pays for the fetch; every
+    later call in the same run reuses the same worksheet object.
+    """
+    global _sheet_cache
+    if _sheet_cache is None:
+        client = _get_client()
+        spreadsheet = client.open_by_key(SHEET_ID)
+        _sheet_cache = spreadsheet.worksheet(SHEET_TAB)
+    return _sheet_cache
 
 
 def _bets_col_letter_lookup():
     """
     Resolves config.BET_COL header names to actual 1-based column indices
     against the LIVE Bets sheet header row, so columns may be reordered.
+
+    Cached for the lifetime of the current process -- the header row
+    can't meaningfully change mid-run, so re-fetching it (a separate
+    network read) on every single flag/write call was the other half of
+    the redundant-API-call problem _get_sheet()'s docstring describes.
     """
+    global _col_idx_cache
+    if _col_idx_cache is not None:
+        return _col_idx_cache
+
     from config import BET_COL
 
     sheet = _get_sheet()
@@ -36,6 +73,7 @@ def _bets_col_letter_lookup():
             idx[key] = headers.index(header_name) + 1  # gspread is 1-based
         except ValueError:
             idx[key] = None
+    _col_idx_cache = idx
     return idx
 
 
