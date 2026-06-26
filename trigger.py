@@ -76,7 +76,20 @@ def main():
             # sleeps or loops internally (2026-06-20 redesign: the 30-min
             # cron-job.org-triggered GitHub Actions run IS the retry
             # mechanism now, not an in-process wait).
-            status = poll_bet(bet)
+            #
+            # Wrapped in try/except (2026-06-26): a transient Sheets API
+            # error (e.g. a 429 read-quota hit) used to propagate all the
+            # way up and crash the ENTIRE run, losing the P/L Completion
+            # and Manual Payout passes below even though other bets in
+            # this loop had already succeeded. One bet's bad luck with a
+            # rate limit shouldn't cost every other bet's progress for
+            # this run -- the next scheduled run will retry this one.
+            try:
+                status = poll_bet(bet)
+            except Exception as e:
+                print(f"[trigger] ❌ BetID {bet['bet_id']}: unexpected error -- {e}. "
+                      f"Continuing with the next bet; this one will be retried next run.")
+                status = "error"
 
             if status == "resolved":
                 results["resolved"] += 1
@@ -109,7 +122,12 @@ def main():
                   f"─────────────────────────")
             print(f"  BetID:  {bet['bet_id']}")
             print(f"  Result: {bet['result']}")
-            status = complete_pl_payout(bet)
+            try:
+                status = complete_pl_payout(bet)
+            except Exception as e:
+                print(f"[trigger] ❌ BetID {bet['bet_id']}: unexpected error -- {e}. "
+                      f"Continuing with the next row; this one will be retried next run.")
+                status = "skipped"
             pl_results[status] = pl_results.get(status, 0) + 1
             print()
     else:
@@ -137,7 +155,12 @@ def main():
             print(f"  BetID:  {bet['bet_id']}")
             print(f"  Book:   {bet['book']}")
             print(f"  Payout: {bet['payout']}")
-            status = complete_manual_payout_pl(bet)
+            try:
+                status = complete_manual_payout_pl(bet)
+            except Exception as e:
+                print(f"[trigger] ❌ BetID {bet['bet_id']}: unexpected error -- {e}. "
+                      f"Continuing with the next row; this one will be retried next run.")
+                status = "skipped"
             manual_pl_results[status] = manual_pl_results.get(status, 0) + 1
             print()
     else:
