@@ -272,6 +272,31 @@ def calculate_pl_and_payout(result: str, stake: float, odds_taken: float,
     raise ValueError(f"[resolver] Cannot calculate P/L for unrecognised result: '{result}'")
 
 
+def derive_pl_from_payout(payout: float, stake: float, fee: float, bet_category: str) -> float:
+    """
+    The inverse of calculate_pl_and_payout()'s WIN branch: given a REAL,
+    already-known Payout (entered manually because the book's settlement
+    can't be reliably computed from American odds -- see
+    config.MANUAL_PAYOUT_REQUIRED_BOOKS, e.g. Kalshi's contracts-based
+    exchange), derives P/L from it instead of computing Payout from odds.
+
+    Mirrors the same per-category relationship calculate_pl_and_payout()
+    uses on a WIN:
+      - Bonus Bet: Payout IS the profit (the token itself, not stake, is
+        what's "returned" on a win) -> P/L = Payout - fee.
+      - Every other category: Payout = stake + profit -> P/L =
+        Payout - stake - fee.
+
+    Only meaningful for a WIN (the only result where a book's nonstandard
+    settlement mechanics create genuine uncertainty -- a LOSS always
+    costs the full stake regardless of settlement quirks, so it never
+    needs manual Payout entry in the first place).
+    """
+    if bet_category == BET_CATEGORY_BONUS_BET:
+        return round(payout - fee, 2)
+    return round(payout - stake - fee, 2)
+
+
 def _american_odds_profit(stake: float, odds: float) -> float:
     """
     Converts American odds to profit on a winning bet.
