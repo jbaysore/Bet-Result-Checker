@@ -93,6 +93,23 @@ AUTOMATED_BET_TYPES = {BET_TYPE_SPREAD, BET_TYPE_MONEYLINE, BET_TYPE_TOTAL, BET_
 # resolver.calculate_pl_and_payout()'s fee_pct_on_win_only parameter.
 BOOK_FEE_TYPE_PERCENT_OF_WIN_PROFIT = "Percent Of Win Profit"
 
+# Books whose real-money WIN payout can't be reliably computed from
+# American odds at all -- not a rounding-rule difference (like
+# DraftKings' cent-truncation, handled inside resolver._american_odds_profit),
+# but a fundamentally different settlement mechanism. Kalshi is a
+# contracts-based exchange (you buy a whole number of $1-payout contracts
+# at a cents-denominated price) rather than a fixed-odds sportsbook, and
+# two real settlements (2026-06-26) came back several percent off from
+# the American-odds approximation -- too large to be cent rounding, and
+# in the OPPOSITE direction from what Kalshi's own published 7% taker-fee
+# formula (kalshiOdds.js) would predict. Rather than guess at a contract-
+# count/fee model from two data points, these books are routed to manual
+# Payout entry instead: poller._safe_calculate_pl_payout() flags the row
+# (PL_BLOCKED_PREFIX) asking for the real Payout from the book's own
+# account, and poller.complete_manual_payout_pl() derives P/L from
+# whatever Payout gets entered, once it's there.
+MANUAL_PAYOUT_REQUIRED_BOOKS = {"kalshi"}
+
 # ── Bet Categories ──────────────────────────────────────────────────
 # Matches the 6 canonical values enforced by LogBetWizard.jsx's BET_CATEGORIES
 # (Free Bet was removed -- unused, and its real payout behavior was never
