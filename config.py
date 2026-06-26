@@ -84,6 +84,15 @@ BET_TYPE_PROP       = "Prop"
 # Bet types this tool will resolve automatically
 AUTOMATED_BET_TYPES = {BET_TYPE_SPREAD, BET_TYPE_MONEYLINE, BET_TYPE_TOTAL, BET_TYPE_DRAW}
 
+# ── Book Settings "Fee Type" values ────────────────────────────────
+# Default (blank/anything else) means "flat dollar fee, entered manually
+# at logging time" -- the original, still-most-common model. This is the
+# only other value so far, for books like ProphetX whose fee is a
+# percentage of NET PROFIT, derived at settlement time rather than known
+# upfront -- see sheets_reader.get_book_fee_config() and
+# resolver.calculate_pl_and_payout()'s fee_pct_on_win_only parameter.
+BOOK_FEE_TYPE_PERCENT_OF_WIN_PROFIT = "Percent Of Win Profit"
+
 # ── Bet Categories ──────────────────────────────────────────────────
 # Matches the 6 canonical values enforced by LogBetWizard.jsx's BET_CATEGORIES
 # (Free Bet was removed -- unused, and its real payout behavior was never
@@ -160,15 +169,18 @@ ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports"
 # avoid retyping the literal header strings at every call site; it is
 # NOT a positional index map like Bets' BET_COL dict above.
 #
-# Schema (16 columns, confirmed against the live sheet 2026-06-21):
+# Schema (17 columns, confirmed against the live sheet 2026-06-23):
 # Promo ID | Book | Promo Name | Promo Type | Boost % | Reward |
 # Qualifying Cost | Bonus Amount | Status | Realized Date |
 # Realized Amount | Notes | Expiration Date/Time | Expected Reward Count |
-# Reward Timing | Token Usage Window (days)
+# Reward Timing | Token Usage Window (days) | Start Date
 #
-# The last 4 columns were added specifically to support the automated
-# Promotion Updater -- see PromotionWizard.jsx (the wizard that writes
-# new rows) for the per-promo-type applicability rules these encode.
+# Columns 13-16 were added to support the automated Promotion Updater's
+# multi-grant model (Bonus Bet/Profit Boost) -- see PromotionWizard.jsx for
+# the per-promo-type applicability rules these encode. Start Date was added
+# later, specifically for Insurance Bet's multi-day variant ("one insured
+# bet/day for N days") -- see promo_resolver.py's
+# _evaluate_multi_day_insurance.
 PROMO_COL = {
     "promo_id":              "Promo ID",
     "book":                  "Book",
@@ -186,6 +198,11 @@ PROMO_COL = {
     "expected_reward_count": "Expected Reward Count",
     "reward_timing":         "Reward Timing",
     "token_usage_window":    "Token Usage Window (days)",
+    # Anchors a multi-day Insurance Bet promo (e.g. "one insured bet/day for
+    # 10 days") -- Expected Reward Count holds the number of days, this
+    # holds day 1's date, so day N = Start Date + (N-1). Blank/unused for
+    # every other promo type, and for a single-shot Insurance Bet promo.
+    "start_date":            "Start Date",
 }
 
 PROMOTIONS_TAB = "Promotions"
@@ -217,6 +234,14 @@ PROMO_TYPE_INSURANCE_BET = BET_CATEGORY_INSURANCE_BET
 # Expected Reward Count, Reward Timing, per-token Usage Window) --
 # Bonus Bet and Profit Boost share this entire machinery, differing only
 # in how a claimed token's value is computed (see promo_resolver.py).
+#
+# Insurance Bet also supports a multi-day variant (Expected Reward Count +
+# Start Date = "one insured bet/day for N days") but deliberately does NOT
+# belong in this set -- it's day-anchored, not a FIFO pool of qualifying
+# bets, and each grant can branch into a Leg 2 refund claim depending on
+# Leg 1's own outcome. It has its own dedicated evaluator in
+# promo_resolver.py (_evaluate_multi_day_insurance), not
+# _evaluate_multi_grant_promo.
 MULTI_GRANT_PROMO_TYPES = {PROMO_TYPE_BONUS_BET, PROMO_TYPE_PROFIT_BOOST}
 
 # ── Reward Timing values ────────────────────────────────────────────
