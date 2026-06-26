@@ -1,8 +1,8 @@
 import sys
 from datetime import datetime, timezone
 import pytz
-from sheets_reader import load_pending_bets, load_unresolved_pl_bets
-from poller import poll_bet, complete_pl_payout, _parse_game_datetime
+from sheets_reader import load_pending_bets, load_unresolved_pl_bets, load_manual_payout_pending_pl_bets
+from poller import poll_bet, complete_pl_payout, complete_manual_payout_pl, _parse_game_datetime
 from config import SHEET_TAB
 
 CENTRAL = pytz.timezone("America/Chicago")
@@ -115,6 +115,34 @@ def main():
     else:
         print("[trigger] ✅ No rows need P/L/Payout completed.\n")
 
+    # ── Manual Payout → P/L Derivation: for books where the automated   ──
+    # ── odds-based formula can't be trusted (config.MANUAL_PAYOUT_      ──
+    # ── REQUIRED_BOOKS, e.g. Kalshi), this picks up rows where the user ──
+    # ── has manually typed in the real Payout from their account, and   ──
+    # ── derives P/L from it.                                            ──
+    print(f"[trigger] Checking for rows with a manually-entered Payout awaiting P/L...")
+    try:
+        manual_payout_pl = load_manual_payout_pending_pl_bets(SHEET_TAB)
+    except Exception as e:
+        print(f"[trigger] ❌ Failed to load manual-Payout P/L bets: {e}")
+        manual_payout_pl = []
+
+    manual_pl_results = {"completed": 0, "skipped": 0}
+
+    if manual_payout_pl:
+        print(f"\n[trigger] {len(manual_payout_pl)} row(s) have a manual Payout awaiting P/L...\n")
+        for i, bet in enumerate(manual_payout_pl, start=1):
+            print(f"─ Manual Payout→P/L {i}/{len(manual_payout_pl)} "
+                  f"─────────────────────────")
+            print(f"  BetID:  {bet['bet_id']}")
+            print(f"  Book:   {bet['book']}")
+            print(f"  Payout: {bet['payout']}")
+            status = complete_manual_payout_pl(bet)
+            manual_pl_results[status] = manual_pl_results.get(status, 0) + 1
+            print()
+    else:
+        print("[trigger] ✅ No rows have a manual Payout awaiting P/L.\n")
+
     # ── Summary ──────────────────────────────────────────────────
     print("=" * 60)
     print(f"  Run complete: "
@@ -124,6 +152,8 @@ def main():
     print(f"  Needs Review:   {results['needs_review']} (check ESPN via Stats page, or resolve manually)")
     print(f"  P/L Completed:  {pl_results['completed']} (Result existed, P/L/Payout filled in)")
     print(f"  P/L Skipped:    {pl_results['skipped']} (missing Fee/Boost %, or already had a value)")
+    print(f"  Manual Payout→P/L Completed: {manual_pl_results['completed']} (derived from a manually-entered Payout)")
+    print(f"  Manual Payout→P/L Skipped:  {manual_pl_results['skipped']}")
     print("=" * 60)
 
 
