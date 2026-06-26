@@ -230,6 +230,16 @@ PROMO_TYPE_DEPOSIT_BONUS = BET_CATEGORY_DEPOSIT_BONUS
 PROMO_TYPE_PROFIT_BOOST  = BET_CATEGORY_PROFIT_BOOST
 PROMO_TYPE_INSURANCE_BET = BET_CATEGORY_INSURANCE_BET
 
+# Unlike the aliases above, this Promo Type has NO matching Bet Category of
+# its own -- each day's boosted bet is still logged with
+# Bet Category = "Profit Boost" (BET_CATEGORY_PROFIT_BOOST). This Promo Type
+# only distinguishes the promo's lifecycle shape (open-ended daily reissue
+# on every loss, terminating on the first win, no fixed count or
+# expiration) from regular "Profit Boost" promos (a bounded multi-grant
+# token pool). See _evaluate_daily_profit_boost_until_win in
+# promo_resolver.py.
+PROMO_TYPE_PROFIT_BOOST_DAILY = "Profit Boost (Daily Until Win)"
+
 # Promo types with a multi-grant token model (qualifying window,
 # Expected Reward Count, Reward Timing, per-token Usage Window) --
 # Bonus Bet and Profit Boost share this entire machinery, differing only
