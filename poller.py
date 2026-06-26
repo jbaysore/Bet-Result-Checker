@@ -6,14 +6,19 @@ from config import (
     RESULT_NEEDS_REVIEW,
     RESULT_WIN,
     BET_CATEGORY_PROFIT_BOOST,
+    BET_CATEGORY_BONUS_BET,
     BOOK_FEE_TYPE_PERCENT_OF_WIN_PROFIT,
+    MANUAL_PAYOUT_REQUIRED_BOOKS,
 )
 from sources import odds_api
-from resolver import resolve, calculate_pl_and_payout
-from sheets_writer import write_result, write_pl_payout, flag_pl_blocked, clear_pl_blocked_flag
+from resolver import resolve, calculate_pl_and_payout, derive_pl_from_payout, _american_odds_profit
+from sheets_writer import (
+    write_result, write_pl_payout, write_pl_only,
+    flag_pl_blocked, clear_pl_blocked_flag, flag_payout_caution,
+)
 from sheets_reader import (
     get_promo_boost_percentage, get_book_fee_before_odds, get_book_fee_config,
-    load_unresolved_pl_bets,
+    load_unresolved_pl_bets, load_manual_payout_pending_pl_bets,
 )
 
 CENTRAL = pytz.timezone("America/Chicago")
@@ -172,6 +177,80 @@ def _shift_seconds(dt: datetime, seconds: int) -> datetime:
     return dt + timedelta(seconds=seconds)
 
 
+def complete_manual_payout_pl(bet: dict) -> str:
+    """
+    Derives and writes P/L for a single bet where Payout has been
+    manually entered (config.MANUAL_PAYOUT_REQUIRED_BOOKS, e.g. Kalshi --
+    see that constant's docstring and resolver.derive_pl_from_payout) but
+    P/L is still blank -- see sheets_reader.load_manual_payout_pending_pl_bets()
+    for how these rows are found.
+
+    Unlike complete_pl_payout(), this does NOT attempt to compute Payout
+    at all -- it's trusted as already correct, typed in by the user from
+    their real account, specifically because the American-odds formula
+    can't be relied on for this book. The only job here is the cheap,
+    certain arithmetic of turning a known Payout into P/L.
+
+    Also runs a non-blocking typo guard: if the manually-entered Payout
+    deviates from the rough American-odds estimate by more than 20%, a
+    caution note is added via flag_payout_caution() -- NOT a rejection,
+    since the manual entry is still trusted as ground truth, just a
+    "you might want to double-check this" nudge (e.g. catches a stray
+    extra digit or misplaced decimal point).
+
+    Args:
+        bet: A dict from sheets_reader.load_manual_payout_pending_pl_bets().
+
+    Returns:
+        "completed" if P/L was written. "skipped" if parsing failed or
+        the write was rejected (e.g. a race where P/L was no longer
+        blank by write time).
+    """
+    bet_id = bet.get("bet_id", "?")
+    row_idx = bet.get("row_idx")
+    result = bet.get("result")
+
+    try:
+        payout = float(str(bet["payout"]).replace("$", "").replace(",", ""))
+        stake = float(str(bet["stake"]).replace("$", "").replace(",", ""))
+        bet_category = bet.get("bet_category", "").strip()
+        fee_raw = bet.get("fee", "").strip()
+        fee = float(fee_raw.replace("$", "").replace(",", "")) if fee_raw else 0.0
+    except (KeyError, ValueError, TypeError) as e:
+        print(f"[poller] ⚠️  BetID {bet_id}: could not parse Payout/Stake/Fee for manual "
+              f"P/L derivation ({e}). Skipping.")
+        return "skipped"
+
+    if result != RESULT_WIN:
+        # A LOSS/PUSH/VOID never needed manual Payout entry in the first
+        # place (see config.MANUAL_PAYOUT_REQUIRED_BOOKS docstring) -- if
+        # one shows up here anyway (e.g. hand-edited), the standard
+        # P/L = Payout - Stake - Fee relationship is still correct, no
+        # special derivation needed.
+        pl = round(payout - stake - fee, 2)
+    else:
+        pl = derive_pl_from_payout(payout, stake, fee, bet_category)
+
+        try:
+            odds_taken = float(str(bet.get("odds_taken", "")).replace("+", ""))
+            rough_profit = _american_odds_profit(stake, odds_taken)
+            rough_payout = rough_profit if bet_category == BET_CATEGORY_BONUS_BET else stake + rough_profit
+            if rough_payout > 0 and abs(payout - rough_payout) / rough_payout > 0.20:
+                flag_payout_caution(
+                    row_idx, bet_id,
+                    f"manually-entered Payout (${payout:.2f}) differs from the rough American-odds "
+                    f"estimate (${rough_payout:.2f}) by more than 20% -- worth a quick double-check "
+                    f"for a typo, though the entered value is what's being used."
+                )
+        except (ValueError, TypeError):
+            pass  # No odds to sanity-check against -- not a blocker, just skip the caution check.
+
+    success = write_pl_only(row_idx, bet_id, pl)
+    if success:
+        clear_pl_blocked_flag(row_idx, bet_id)
+    return "completed" if success else "skipped"
+
+
 def complete_pl_payout(bet: dict) -> str:
     """
     Computes and writes P/L (and Payout, if applicable) for a single bet
@@ -240,6 +319,7 @@ def _safe_calculate_pl_payout(bet: dict, result: str) -> tuple[float | None, flo
     """
     bet_id = bet.get("bet_id", "?")
     row_idx = bet.get("row_idx")
+    book = bet.get("book", "").strip()
     try:
         stake = float(str(bet["stake"]).replace("$", "").replace(",", ""))
         odds_taken = float(str(bet["odds_taken"]).replace("+", ""))
@@ -251,13 +331,37 @@ def _safe_calculate_pl_payout(bet: dict, result: str) -> tuple[float | None, flo
         flag_pl_blocked(row_idx, bet_id, reason)
         return None, None
 
+    # Books whose real-money WIN payout can't be reliably computed from
+    # American odds at all (config.MANUAL_PAYOUT_REQUIRED_BOOKS, e.g.
+    # Kalshi's contracts-based settlement -- see that constant's
+    # docstring) -- route to manual Payout entry instead of writing a
+    # confidently wrong number. Only WIN is uncertain; LOSS always costs
+    # the full stake regardless of settlement mechanics, so it's left to
+    # the normal math below. The rough estimate is included purely as a
+    # cross-check hint for the person entering the real number, not a
+    # value to trust on its own.
+    book_lower = book.strip().lower() if isinstance(book, str) else ""
+    if book_lower in MANUAL_PAYOUT_REQUIRED_BOOKS and result == RESULT_WIN:
+        try:
+            rough_profit = _american_odds_profit(stake, odds_taken)
+            rough_estimate = f"${stake + rough_profit:.2f}" if bet_category != BET_CATEGORY_BONUS_BET else f"${rough_profit:.2f}"
+        except Exception:
+            rough_estimate = "(could not estimate)"
+        reason = (f"{book} payout can't be reliably computed from American odds (contracts-based "
+                  f"settlement, confirmed off by several percent on real bets, 2026-06-26). Enter the "
+                  f"exact Payout from your {book} account in this row's Payout column -- P/L will be "
+                  f"derived automatically once you do. Rough odds-based estimate for reference only "
+                  f"(don't enter this blindly): {rough_estimate}.")
+        print(f"[poller] ⚠️  BetID {bet_id}: {reason}")
+        flag_pl_blocked(row_idx, bet_id, reason)
+        return None, None
+
     # ProphetX-style books (Book Settings "Fee Type" = Percent Of Win
     # Profit) derive their fee from profit at settlement time -- there's
     # nothing to manually enter, so they're exempt from the "Fee is
     # required" check below entirely. Looked up before that check (not
     # after, like fee_before_odds further down) specifically so it can
     # skip it.
-    book = bet.get("book", "").strip()
     fee_config = get_book_fee_config(book) if book else {"fee_type": "", "fee_percent": None}
     is_percent_fee_book = (
         fee_config["fee_type"] == BOOK_FEE_TYPE_PERCENT_OF_WIN_PROFIT
