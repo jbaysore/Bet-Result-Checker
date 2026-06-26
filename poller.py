@@ -6,11 +6,15 @@ from config import (
     RESULT_NEEDS_REVIEW,
     RESULT_WIN,
     BET_CATEGORY_PROFIT_BOOST,
+    BOOK_FEE_TYPE_PERCENT_OF_WIN_PROFIT,
 )
 from sources import odds_api
 from resolver import resolve, calculate_pl_and_payout
 from sheets_writer import write_result, write_pl_payout, flag_pl_blocked, clear_pl_blocked_flag
-from sheets_reader import get_promo_boost_percentage, get_book_fee_before_odds, load_unresolved_pl_bets
+from sheets_reader import (
+    get_promo_boost_percentage, get_book_fee_before_odds, get_book_fee_config,
+    load_unresolved_pl_bets,
+)
 
 CENTRAL = pytz.timezone("America/Chicago")
 
@@ -247,27 +251,43 @@ def _safe_calculate_pl_payout(bet: dict, result: str) -> tuple[float | None, flo
         flag_pl_blocked(row_idx, bet_id, reason)
         return None, None
 
-    # Fee is required, even for bets logged before this field existed --
-    # treating a missing Fee as $0 would silently assume no fee was ever
-    # charged, when in reality older rows simply predate this column.
-    # Refusing to guess surfaces the gap so it gets backfilled deliberately
-    # (e.g. via the kind of balance reconciliation done on 2026-06-20),
-    # rather than quietly under-reporting P/L by an unknown amount forever.
-    fee_raw = bet.get("fee", "").strip()
-    if fee_raw == "":
-        reason = "Fee column is blank. Fill in Fee (even 0) to calculate P/L."
-        print(f"[poller] ⚠️  BetID {bet_id}: {reason} This likely predates the Fee field "
-              f"and needs to be backfilled (see your book-by-book balance reconciliation "
-              f"for known fee totals). Result will be written without P/L/Payout.")
-        flag_pl_blocked(row_idx, bet_id, reason)
-        return None, None
-    try:
-        fee = float(fee_raw.replace("$", "").replace(",", ""))
-    except ValueError:
-        reason = f"could not parse Fee value '{fee_raw}'."
-        print(f"[poller] ⚠️  BetID {bet_id}: {reason} Result will be written without P/L/Payout.")
-        flag_pl_blocked(row_idx, bet_id, reason)
-        return None, None
+    # ProphetX-style books (Book Settings "Fee Type" = Percent Of Win
+    # Profit) derive their fee from profit at settlement time -- there's
+    # nothing to manually enter, so they're exempt from the "Fee is
+    # required" check below entirely. Looked up before that check (not
+    # after, like fee_before_odds further down) specifically so it can
+    # skip it.
+    book = bet.get("book", "").strip()
+    fee_config = get_book_fee_config(book) if book else {"fee_type": "", "fee_percent": None}
+    is_percent_fee_book = (
+        fee_config["fee_type"] == BOOK_FEE_TYPE_PERCENT_OF_WIN_PROFIT
+        and fee_config["fee_percent"] is not None
+    )
+
+    if is_percent_fee_book:
+        fee = 0.0  # Real win-only fee is derived inside calculate_pl_and_payout.
+    else:
+        # Fee is required, even for bets logged before this field existed --
+        # treating a missing Fee as $0 would silently assume no fee was ever
+        # charged, when in reality older rows simply predate this column.
+        # Refusing to guess surfaces the gap so it gets backfilled deliberately
+        # (e.g. via the kind of balance reconciliation done on 2026-06-20),
+        # rather than quietly under-reporting P/L by an unknown amount forever.
+        fee_raw = bet.get("fee", "").strip()
+        if fee_raw == "":
+            reason = "Fee column is blank. Fill in Fee (even 0) to calculate P/L."
+            print(f"[poller] ⚠️  BetID {bet_id}: {reason} This likely predates the Fee field "
+                  f"and needs to be backfilled (see your book-by-book balance reconciliation "
+                  f"for known fee totals). Result will be written without P/L/Payout.")
+            flag_pl_blocked(row_idx, bet_id, reason)
+            return None, None
+        try:
+            fee = float(fee_raw.replace("$", "").replace(",", ""))
+        except ValueError:
+            reason = f"could not parse Fee value '{fee_raw}'."
+            print(f"[poller] ⚠️  BetID {bet_id}: {reason} Result will be written without P/L/Payout.")
+            flag_pl_blocked(row_idx, bet_id, reason)
+            return None, None
 
     # Profit Boost wins need the boost percentage from the linked Promotions
     # row -- fetched fresh, uncached, every time, since this only triggers
@@ -292,11 +312,14 @@ def _safe_calculate_pl_payout(bet: dict, result: str) -> tuple[float | None, flo
     # pass-through on top (the traditional sportsbook default). Fetched
     # fresh every call, same as the boost-percentage lookup above -- no
     # caching, since this only runs once per bet resolution.
-    book = bet.get("book", "").strip()
     fee_before_odds = get_book_fee_before_odds(book) if book else False
 
     try:
-        return calculate_pl_and_payout(result, stake, odds_taken, bet_category, boost_pct, fee, fee_before_odds)
+        return calculate_pl_and_payout(
+            result, stake, odds_taken, bet_category, boost_pct, fee, fee_before_odds,
+            fee_pct_on_win_only=fee_config["fee_percent"] if is_percent_fee_book else None,
+            bet_type=bet.get("bet_type", "") if is_percent_fee_book else "",
+        )
     except ValueError as e:
         reason = f"could not calculate P/L -- {e}"
         print(f"[poller] ⚠️  BetID {bet_id}: {reason}. Result will be written without P/L/Payout.")
