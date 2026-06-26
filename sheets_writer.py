@@ -263,6 +263,59 @@ def write_pl_payout(row_idx: int, bet_id: str, pl: float, payout: float | None) 
         return False
 
 
+def write_pl_only(row_idx: int, bet_id: str, pl: float) -> bool:
+    """
+    Writes ONLY the P/L cell -- the counterpart to write_pl_payout() for
+    the manual-Payout-entry flow (config.MANUAL_PAYOUT_REQUIRED_BOOKS,
+    e.g. Kalshi): by the time this runs, Payout is ALREADY filled in (the
+    user typed in the real value from their account, since it can't be
+    reliably computed from odds), so write_pl_payout()'s "both must
+    currently be blank" guard would wrongly refuse this write. This
+    function instead only requires that P/L itself is still blank --
+    Payout being non-blank is the expected, correct state here, not a
+    conflict.
+
+    Re-verifies at write time that BetID matches and P/L is still blank,
+    same race-guard reasoning as write_pl_payout().
+    """
+    idx = _bets_col_letter_lookup()
+    pl_col = idx.get("pl")
+    bet_id_col = idx.get("bet_id")
+
+    if None in (pl_col, bet_id_col):
+        print(f"[sheets_writer] ⚠️  Bets tab is missing P/L or BetID column -- "
+              f"cannot write to row {row_idx}.")
+        return False
+
+    try:
+        sheet = _get_sheet()
+
+        current_bet_id = sheet.cell(row_idx, bet_id_col).value
+        if current_bet_id != bet_id:
+            print(f"[sheets_writer] ⚠️  Row {row_idx} BetID mismatch. "
+                  f"Expected '{bet_id}', found '{current_bet_id}'. Skipping write.")
+            return False
+
+        current_pl = sheet.cell(row_idx, pl_col).value
+        if current_pl:
+            print(f"[sheets_writer] Row {row_idx} (BetID: {bet_id}) already has "
+                  f"P/L filled in ('{current_pl}'). Skipping -- never overwrite an existing value.")
+            return False
+
+        sheet.update_cells([gspread.Cell(row_idx, pl_col, pl)])
+        print(f"[sheets_writer] ✅ Row {row_idx} (BetID: {bet_id}) → P/L={pl} (derived from manually-entered Payout)")
+        return True
+
+    except gspread.exceptions.APIError as e:
+        print(f"[sheets_writer] ❌ Sheets API error writing to row {row_idx} "
+              f"(BetID: {bet_id}): {e}")
+        return False
+    except Exception as e:
+        print(f"[sheets_writer] ❌ Unexpected error writing to row {row_idx} "
+              f"(BetID: {bet_id}): {e}")
+        return False
+
+
 PL_BLOCKED_PREFIX = "⚠ P/L not calculated:"
 
 
@@ -363,6 +416,57 @@ def clear_pl_blocked_flag(row_idx: int, bet_id: str) -> bool:
 
     except Exception as e:
         print(f"[sheets_writer] ❌ Unexpected error clearing P/L-blocked flag on row "
+              f"{row_idx} (BetID: {bet_id}): {e}")
+        return False
+
+
+PAYOUT_CAUTION_PREFIX = "ℹ Payout check:"
+
+
+def flag_payout_caution(row_idx: int, bet_id: str, message: str) -> bool:
+    """
+    Appends a non-blocking "ℹ Payout check: <message>" line to Notes when
+    a manually-entered Payout (config.MANUAL_PAYOUT_REQUIRED_BOOKS flow,
+    see poller.complete_manual_payout_pl) differs significantly from the
+    rough American-odds estimate -- a typo guard (e.g. fat-fingering
+    $329.50 instead of $32.95), not a correctness claim about the manual
+    entry itself, which is trusted as ground truth from the real account.
+
+    Deliberately does NOT block the P/L write the way flag_pl_blocked()
+    does -- the whole point of manual entry is that the user's number IS
+    the answer; this just surfaces "you might want to double-check this"
+    alongside the now-filled-in P/L, same idempotent-line pattern as
+    flag_pl_blocked() (one line, replaced not duplicated, on repeat runs).
+    """
+    idx = _bets_col_letter_lookup()
+    notes_col = idx.get("notes")
+    bet_id_col = idx.get("bet_id")
+
+    if None in (notes_col, bet_id_col):
+        return False
+
+    try:
+        sheet = _get_sheet()
+
+        current_bet_id = sheet.cell(row_idx, bet_id_col).value
+        if current_bet_id != bet_id:
+            return False
+
+        existing_notes = sheet.cell(row_idx, notes_col).value or ""
+        flag_line = f"{PAYOUT_CAUTION_PREFIX} {message}"
+
+        other_lines = [
+            line for line in existing_notes.split("\n")
+            if line.strip() and not line.strip().startswith(PAYOUT_CAUTION_PREFIX)
+        ]
+        new_notes = "\n".join(other_lines + [flag_line])
+
+        sheet.update_cell(row_idx, notes_col, new_notes)
+        print(f"[sheets_writer] ℹ️  Row {row_idx} (BetID: {bet_id}) caution: {flag_line}")
+        return True
+
+    except Exception as e:
+        print(f"[sheets_writer] ❌ Unexpected error flagging payout caution on row "
               f"{row_idx} (BetID: {bet_id}): {e}")
         return False
 
