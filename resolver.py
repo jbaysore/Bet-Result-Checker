@@ -1,5 +1,5 @@
 from config import (
-    BET_TYPE_SPREAD, BET_TYPE_MONEYLINE, BET_TYPE_TOTAL, BET_TYPE_DRAW,
+    BET_TYPE_SPREAD, BET_TYPE_MONEYLINE, BET_TYPE_TOTAL, BET_TYPE_DRAW, BET_TYPE_PARLAY,
     RESULT_WIN, RESULT_LOSS, RESULT_PUSH, RESULT_VOID,
     GAME_STATUS_CANCELLED,
     PROMO_FUNDED_CATEGORIES, REAL_MONEY_CATEGORIES,
@@ -14,7 +14,9 @@ def resolve(bet: dict, game: dict) -> str:
 
     Args:
         bet:  A pending bet dict from sheets_reader.load_pending_bets()
-              Keys used: bet_type, selection, team1, team2
+              Keys used: bet_type, selection, team1, team2, sport (sport
+              is only used by Moneyline, to tell a real soccer-style Draw
+              option apart from a sport where a tie just can't happen)
         game: A final game dict from espn.get_game_result() or
               odds_api.get_game_result()
               Keys used: home_team, away_team, home_score, away_score,
@@ -41,6 +43,7 @@ def resolve(bet: dict, game: dict) -> str:
     selection = bet["selection"].strip()
     team1     = bet["team1"].strip()
     team2     = bet["team2"].strip()
+    sport     = bet.get("sport", "")
 
     home_team  = game["home_team"]
     away_team  = game["away_team"]
@@ -49,7 +52,7 @@ def resolve(bet: dict, game: dict) -> str:
 
     if bet_type == BET_TYPE_MONEYLINE:
         return _resolve_moneyline(selection, team1, team2, home_team, away_team,
-                                  home_score, away_score)
+                                  home_score, away_score, sport)
 
     elif bet_type == BET_TYPE_SPREAD:
         return _resolve_spread(selection, team1, team2, home_team, away_team,
@@ -67,7 +70,8 @@ def resolve(bet: dict, game: dict) -> str:
 
 def calculate_pl_and_payout(result: str, stake: float, odds_taken: float,
                             bet_category: str, boost_pct: float = None,
-                            fee: float = 0.0, fee_before_odds: bool = False) -> tuple[float, float | None]:
+                            fee: float = 0.0, fee_before_odds: bool = False,
+                            fee_pct_on_win_only: float = None, bet_type: str = "") -> tuple[float, float | None]:
     """
     Computes P/L and Payout for a resolved bet, given American odds and the
     bet's category (which determines whether the stake was real cash or
@@ -106,6 +110,21 @@ def calculate_pl_and_payout(result: str, stake: float, odds_taken: float,
                       Board's wager-tax FAQ) charge the fee as a separate
                       pass-through on top of normal odds math instead --
                       this is the default (False) behavior.
+        fee_pct_on_win_only: For books like ProphetX whose fee is a
+                      percentage of NET PROFIT, charged ONLY on a win
+                      (never a loss/push/void, never a parlay regardless
+                      of outcome -- confirmed via ProphetX's published fee
+                      terms, 2026-06-25). When set, this OVERRIDES `fee`
+                      entirely: forced to 0.0 for every non-WIN result and
+                      for parlay wins, and derived as
+                      round(profit * fee_pct_on_win_only / 100, 2) for a
+                      non-parlay win, since the fee isn't knowable as a
+                      fixed dollar amount until profit itself is computed
+                      (unlike every other book, where `fee` is a pre-known
+                      value entered/looked up before this function runs).
+        bet_type:     Required when fee_pct_on_win_only is set, to apply
+                      the parlay exemption (config.BET_TYPE_PARLAY).
+                      Ignored otherwise.
 
     Returns:
         (pl, payout) -- payout is None when nothing is paid out (a loss,
@@ -163,6 +182,13 @@ def calculate_pl_and_payout(result: str, stake: float, odds_taken: float,
     """
     is_promo_funded = bet_category in PROMO_FUNDED_CATEGORIES
 
+    # ProphetX-style books: force fee=0 here for every non-WIN result and
+    # for parlay wins, so callers never have to remember the exemption --
+    # the WIN branch below derives the real fee from profit once it's
+    # known, for the one case (non-parlay win) where a fee actually applies.
+    if fee_pct_on_win_only is not None and (result != RESULT_WIN or bet_type.strip() == BET_TYPE_PARLAY):
+        fee = 0.0
+
     if result == RESULT_WIN:
         effective_stake = (stake - fee) if fee_before_odds else stake
         profit = _american_odds_profit(effective_stake, odds_taken)
@@ -175,6 +201,9 @@ def calculate_pl_and_payout(result: str, stake: float, odds_taken: float,
                     "payout, since that would silently underpay this win."
                 )
             profit = round(profit * (1 + boost_pct / 100), 2)
+
+        if fee_pct_on_win_only is not None and bet_type.strip() != BET_TYPE_PARLAY:
+            fee = round(profit * (fee_pct_on_win_only / 100), 2)
 
         if fee_before_odds:
             # Fee is already reflected in effective_stake -- no separate
@@ -255,19 +284,45 @@ def _american_odds_profit(stake: float, odds: float) -> float:
 
 # ── Moneyline ─────────────────────────────────────────────────────────────────
 
+def _is_draw_possible_sport(sport: str) -> bool:
+    """
+    True for sports where Draw is a real, separately-bettable third
+    selection on the moneyline (soccer) -- mirrors the client's existing
+    THREE_WAY_KEY_PREFIXES/THREE_WAY_GROUPS heuristic in
+    odds-tool/client/src/utils/twoWaySports.js (sport_key startswith
+    "soccer_", or bare "soccer"), since there's no shared sport-profile
+    data source between this Python repo and that Node app -- the Sport
+    column's stored value (the Odds API sport_key, e.g. "soccer_epl") is
+    the only signal available here.
+    """
+    return (sport or "").strip().lower().startswith("soccer")
+
+
 def _resolve_moneyline(selection, team1, team2, home_team, away_team,
-                       home_score, away_score) -> str:
+                       home_score, away_score, sport: str = "") -> str:
     """
     Selection is a team name (Team 1 or Team 2 from sheet), or "Draw".
     For team bets, the selected team must win outright.
     For Draw bets, scores must be equal at full time.
+
+    A tied score is only a PUSH for a team selection when Draw wasn't a
+    real, separately-bettable option on this market (sports with no draw
+    possibility at all, e.g. NBA) -- when it WAS available (soccer), a
+    team bet that doesn't win is a genuine LOSS, the same as it would be
+    against any other non-winning outcome. Bug fixed 2026-06-26: a real
+    3-way soccer bet (Team1/Team2/Draw, one bet per side) ended in a draw,
+    and the two team-selection bets were incorrectly marked PUSH instead
+    of LOSS -- this function had no way to know Draw existed as its own
+    selection on that market.
     """
     # Handle three-way moneyline draw selection (common in soccer)
     if selection.strip().lower() == "draw":
         return _resolve_draw(home_score, away_score)
 
     if home_score == away_score:
-        return RESULT_PUSH
+        if not _is_draw_possible_sport(sport):
+            return RESULT_PUSH
+        return RESULT_LOSS
 
     winning_team = home_team if home_score > away_score else away_team
     bet_team = _resolve_team(selection, team1, team2, home_team, away_team)
