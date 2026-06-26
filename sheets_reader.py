@@ -7,10 +7,52 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive.readonly",
 ]
 
+_client_cache = None
+_spreadsheet_cache = None
+_tab_cache = {}
+
+
 def _get_client():
-    creds_info = get_credentials_info()
-    creds = Credentials.from_service_account_info(creds_info, scopes=SCOPES)
-    return gspread.authorize(creds)
+    """
+    Cached for the lifetime of the current process (each scheduled run is
+    a fresh process) -- see sheets_writer._get_client()'s docstring for
+    why this matters: re-authenticating on every single read call was
+    pure overhead.
+    """
+    global _client_cache
+    if _client_cache is None:
+        creds_info = get_credentials_info()
+        creds = Credentials.from_service_account_info(creds_info, scopes=SCOPES)
+        _client_cache = gspread.authorize(creds)
+    return _client_cache
+
+
+def _get_spreadsheet():
+    """
+    Cached for the lifetime of the current process -- client.open_by_key()
+    is a real network "read request" against the Sheets API quota every
+    time it's called. Every load_* function in this module used to call
+    it independently on every invocation; across a single trigger.py run
+    (load_pending_bets + load_unresolved_pl_bets + load_manual_payout_
+    pending_pl_bets, plus several sheets_writer.py calls per bet) that
+    redundancy was enough to trip 'Quota exceeded for Read requests per
+    minute per user' (confirmed 2026-06-26).
+    """
+    global _spreadsheet_cache
+    if _spreadsheet_cache is None:
+        _spreadsheet_cache = _get_client().open_by_key(SHEET_ID)
+    return _spreadsheet_cache
+
+
+def _get_tab(tab_name: str):
+    """
+    Cached per tab name for the lifetime of the current process -- same
+    reasoning as _get_spreadsheet(), one fewer redundant network call
+    per repeat read of the same tab within a single run.
+    """
+    if tab_name not in _tab_cache:
+        _tab_cache[tab_name] = _get_spreadsheet().worksheet(tab_name)
+    return _tab_cache[tab_name]
 
 
 def _resolve_bet_col_indices(headers: list[str]) -> dict[str, int | None]:
@@ -59,9 +101,7 @@ def load_pending_bets(tab_name: str) -> list[dict]:
     """
     from config import AUTOMATED_BET_TYPES
 
-    client = _get_client()
-    sheet = client.open_by_key(SHEET_ID)
-    tab = sheet.worksheet(tab_name)
+    tab = _get_tab(tab_name)
 
     rows = tab.get_all_values()
 
@@ -139,9 +179,7 @@ def load_unresolved_pl_bets(tab_name: str) -> list[dict]:
     load_pending_bets()'s output, so it can be passed straight into
     poller._safe_calculate_pl_payout() without any reshaping.
     """
-    client = _get_client()
-    sheet = client.open_by_key(SHEET_ID)
-    tab = sheet.worksheet(tab_name)
+    tab = _get_tab(tab_name)
 
     rows = tab.get_all_values()
 
@@ -215,9 +253,7 @@ def load_manual_payout_pending_pl_bets(tab_name: str) -> list[dict]:
     including "payout" (unlike load_unresolved_pl_bets(), which never
     needs it since Payout is one of the two blank fields it's filling in).
     """
-    client = _get_client()
-    sheet = client.open_by_key(SHEET_ID)
-    tab = sheet.worksheet(tab_name)
+    tab = _get_tab(tab_name)
 
     rows = tab.get_all_values()
 
@@ -290,9 +326,7 @@ def get_book_fee_before_odds(book: str) -> bool:
     wizard's Step 2 prompt is responsible for ensuring every book actually
     used gets a real answer recorded here before being usable.
     """
-    client = _get_client()
-    sheet = client.open_by_key(SHEET_ID)
-    tab = sheet.worksheet("Book Settings")
+    tab = _get_tab("Book Settings")
 
     rows = tab.get_all_values()
     if not rows:
@@ -337,9 +371,7 @@ def get_book_fee_config(book: str) -> dict:
     required" safety check in poller.py for a book that actually needs a
     manually-entered fee.
     """
-    client = _get_client()
-    sheet = client.open_by_key(SHEET_ID)
-    tab = sheet.worksheet("Book Settings")
+    tab = _get_tab("Book Settings")
 
     rows = tab.get_all_values()
     if not rows:
@@ -383,9 +415,7 @@ def get_promo_boost_percentage(promo_id: str) -> float | None:
     Boost"), or None if the promo isn't found or has no Boost % set --
     callers should treat None as "cannot resolve, do not guess."
     """
-    client = _get_client()
-    sheet = client.open_by_key(SHEET_ID)
-    tab = sheet.worksheet("Promotions")
+    tab = _get_tab("Promotions")
 
     rows = tab.get_all_values()
     if not rows:
@@ -439,9 +469,7 @@ def load_pending_promotions() -> list[dict]:
     """
     from config import PROMOTIONS_TAB, PROMO_COL, PROMO_STATUS_PENDING
 
-    client = _get_client()
-    sheet = client.open_by_key(SHEET_ID)
-    tab = sheet.worksheet(PROMOTIONS_TAB)
+    tab = _get_tab(PROMOTIONS_TAB)
 
     rows = tab.get_all_values()
     if not rows:
@@ -520,9 +548,7 @@ def load_bets_by_promo_id(tab_name: str) -> dict[str, list[dict]]:
     included here, unlike load_pending_bets() which omits them since
     they're guaranteed blank there).
     """
-    client = _get_client()
-    sheet = client.open_by_key(SHEET_ID)
-    tab = sheet.worksheet(tab_name)
+    tab = _get_tab(tab_name)
 
     rows = tab.get_all_values()
     if not rows:
