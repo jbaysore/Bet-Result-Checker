@@ -55,42 +55,48 @@ def _get_tab(tab_name: str):
     return _tab_cache[tab_name]
 
 
-def _promotions_header_diagnostics(rows: list[list[str]], context: str) -> int | None:
+def _resolve_promotions_headers_from_rows(rows: list[list[str]]) -> tuple[int, list[str]]:
     """
-    Debug helper: scan first rows of Promotions tab to locate where
-    'Promo ID' header actually lives. Returns 0-based row index or None.
+    Finds the Promotions header row by scanning for 'Promo ID'. Row 1 may be
+    blank if a spacer row was inserted above headers during a manual reorder.
+    Returns (0-based header row index, header cell list).
     """
     import json
     import time
 
-    snapshot = []
-    promo_id_row = None
-    for i, row in enumerate(rows[:8]):
-        stripped = [c.strip() for c in row]
-        info = {"sheet_row": i + 1, "len": len(row), "preview": stripped[:20]}
-        if "Promo ID" in stripped:
-            promo_id_row = i
-            info["has_promo_id_header"] = True
-        snapshot.append(info)
+    header_row_idx = 0
+    for i, row in enumerate(rows[:10]):
+        if "Promo ID" in [c.strip() for c in row]:
+            header_row_idx = i
+            break
 
-    print(f"[sheets_reader] Promotions diagnostics ({context}): {json.dumps(snapshot)}")
+    headers = rows[header_row_idx] if rows else []
 
     # #region agent log
     try:
         with open("debug-2f3712.log", "a", encoding="utf-8") as f:
             f.write(json.dumps({
                 "sessionId": "2f3712",
+                "runId": "post-fix",
                 "hypothesisId": "H1",
-                "location": "sheets_reader.py:_promotions_header_diagnostics",
-                "message": context,
-                "data": {"snapshot": snapshot, "promo_id_row": promo_id_row},
+                "location": "sheets_reader.py:_resolve_promotions_headers_from_rows",
+                "message": "resolved promotions header row",
+                "data": {
+                    "header_row_idx": header_row_idx,
+                    "sheet_row": header_row_idx + 1,
+                    "headers_preview": [c.strip() for c in headers[:20]],
+                },
                 "timestamp": int(time.time() * 1000),
             }) + "\n")
     except OSError:
         pass
     # #endregion
 
-    return promo_id_row
+    if header_row_idx > 0:
+        print(f"[sheets_reader] Promotions header row detected on sheet row "
+              f"{header_row_idx + 1} (row 1 is blank or not the header row).")
+
+    return header_row_idx, headers
 
 
 def _resolve_bet_col_indices(headers: list[str]) -> dict[str, int | None]:
@@ -460,14 +466,11 @@ def get_promo_boost_percentage(promo_id: str) -> float | None:
         print("[sheets_reader] get_promo_boost_percentage: Promotions tab returned zero rows.")
         return None
 
-    headers = rows[0]
+    header_row_idx, headers = _resolve_promotions_headers_from_rows(rows)
     try:
         idx_promo_id = headers.index("Promo ID")
         idx_boost_pct = headers.index("Boost %")
     except ValueError:
-        # #region agent log
-        _promotions_header_diagnostics(rows, "get_promo_boost_percentage")
-        # #endregion
         # "Boost %" column doesn't exist yet in the sheet -- print the
         # ACTUAL header row so a header-name mismatch (typo, extra
         # space, different casing) is immediately visible in the log
@@ -476,7 +479,7 @@ def get_promo_boost_percentage(promo_id: str) -> float | None:
               f"header not found in Promotions tab. Actual headers: {headers!r}")
         return None
 
-    for row in rows[1:]:
+    for row in rows[header_row_idx + 1:]:
         if len(row) <= max(idx_promo_id, idx_boost_pct):
             # Google Sheets trims trailing blank cells from get_all_values()
             # -- a row this short means every cell from here to the end
@@ -505,7 +508,7 @@ def get_promo_boost_percentage(promo_id: str) -> float | None:
     # Loop completed with no row matching promo_id -- print every Promo ID
     # actually seen in the sheet, so a string-format mismatch (whitespace,
     # type coercion, wrong ID entirely) is immediately diagnosable.
-    seen_ids = [row[idx_promo_id] for row in rows[1:] if len(row) > idx_promo_id]
+    seen_ids = [row[idx_promo_id] for row in rows[header_row_idx + 1:] if len(row) > idx_promo_id]
     print(f"[sheets_reader] get_promo_boost_percentage: Promo ID {promo_id!r} not found "
           f"in Promotions tab. Promo IDs present: {seen_ids!r}")
     return None
@@ -544,7 +547,7 @@ def load_pending_promotions() -> list[dict]:
     if not rows:
         return []
 
-    headers = rows[0]
+    header_row_idx, headers = _resolve_promotions_headers_from_rows(rows)
     col_idx = {}
     for key, header_name in PROMO_COL.items():
         try:
@@ -558,9 +561,6 @@ def load_pending_promotions() -> list[dict]:
                   f"column '{header_name}' -- continuing without it.")
 
     if "promo_id" not in col_idx or "status" not in col_idx:
-        # #region agent log
-        _promotions_header_diagnostics(rows, "load_pending_promotions")
-        # #endregion
         raise RuntimeError(
             "[sheets_reader] Promotions tab is missing 'Promo ID' or 'Status' "
             "column entirely -- cannot proceed."
@@ -573,7 +573,8 @@ def load_pending_promotions() -> list[dict]:
         return row[idx].strip()
 
     pending = []
-    for row_idx, row in enumerate(rows[1:], start=2):  # row 1 is header
+    data_start_row = header_row_idx + 2  # 1-based sheet row of first data row
+    for row_idx, row in enumerate(rows[header_row_idx + 1:], start=data_start_row):
         status = cell(row, "status")
         if status != PROMO_STATUS_PENDING:
             continue
