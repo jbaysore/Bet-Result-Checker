@@ -73,7 +73,8 @@ def resolve(bet: dict, game: dict) -> str:
 def calculate_pl_and_payout(result: str, stake: float, odds_taken: float,
                             bet_category: str, boost_pct: float = None,
                             fee: float = 0.0, fee_before_odds: bool = False,
-                            fee_pct_on_win_only: float = None, bet_type: str = "") -> tuple[float, float | None]:
+                            fee_pct_on_win_only: float = None, bet_type: str = "",
+                            fee_pct_on_win_stake: float = None) -> tuple[float, float | None]:
     """
     Computes P/L and Payout for a resolved bet, given American odds and the
     bet's category (which determines whether the stake was real cash or
@@ -127,6 +128,17 @@ def calculate_pl_and_payout(result: str, stake: float, odds_taken: float,
         bet_type:     Required when fee_pct_on_win_only is set, to apply
                       the parlay exemption (config.BET_TYPE_PARLAY).
                       Ignored otherwise.
+        fee_pct_on_win_stake: For books like BetOpenly whose fee is a
+                      percentage of STAKE (not profit, unlike
+                      fee_pct_on_win_only), charged ONLY on a win (never a
+                      loss/push/void -- confirmed for BetOpenly, 2026-06-26).
+                      No parlay exemption assumed here (unconfirmed for
+                      BetOpenly, unlike ProphetX's explicitly-published
+                      carve-out) -- applies on every non-parlay AND parlay
+                      win alike unless this assumption is corrected. When
+                      set, this OVERRIDES `fee` entirely: forced to 0.0 for
+                      every non-WIN result, derived as
+                      round(stake * fee_pct_on_win_stake / 100, 2) on a win.
 
     Returns:
         (pl, payout) -- payout is None when nothing is paid out (a loss,
@@ -190,6 +202,11 @@ def calculate_pl_and_payout(result: str, stake: float, odds_taken: float,
     # known, for the one case (non-parlay win) where a fee actually applies.
     if fee_pct_on_win_only is not None and (result != RESULT_WIN or bet_type.strip() == BET_TYPE_PARLAY):
         fee = 0.0
+    # BetOpenly-style books: same force-to-zero on every non-WIN result,
+    # but no parlay exemption (unconfirmed for BetOpenly) -- see
+    # fee_pct_on_win_stake's docstring above.
+    if fee_pct_on_win_stake is not None and result != RESULT_WIN:
+        fee = 0.0
 
     if result == RESULT_WIN:
         effective_stake = (stake - fee) if fee_before_odds else stake
@@ -206,6 +223,9 @@ def calculate_pl_and_payout(result: str, stake: float, odds_taken: float,
 
         if fee_pct_on_win_only is not None and bet_type.strip() != BET_TYPE_PARLAY:
             fee = round(profit * (fee_pct_on_win_only / 100), 2)
+
+        if fee_pct_on_win_stake is not None:
+            fee = round(stake * (fee_pct_on_win_stake / 100), 2)
 
         if fee_before_odds:
             # Fee is already reflected in effective_stake -- no separate
