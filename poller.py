@@ -8,6 +8,7 @@ from config import (
     BET_CATEGORY_PROFIT_BOOST,
     BET_CATEGORY_BONUS_BET,
     BOOK_FEE_TYPE_PERCENT_OF_WIN_PROFIT,
+    BOOK_FEE_TYPE_PERCENT_OF_STAKE_ON_WIN,
     MANUAL_PAYOUT_REQUIRED_BOOKS,
 )
 from sources import odds_api
@@ -357,18 +358,26 @@ def _safe_calculate_pl_payout(bet: dict, result: str) -> tuple[float | None, flo
         return None, None
 
     # ProphetX-style books (Book Settings "Fee Type" = Percent Of Win
-    # Profit) derive their fee from profit at settlement time -- there's
-    # nothing to manually enter, so they're exempt from the "Fee is
-    # required" check below entirely. Looked up before that check (not
-    # after, like fee_before_odds further down) specifically so it can
-    # skip it.
+    # Profit) and BetOpenly-style books (Fee Type = Percent Of Stake On
+    # Win) derive their fee at settlement time -- there's nothing to
+    # manually enter, so they're exempt from the "Fee is required" check
+    # below entirely. Looked up before that check (not after, like
+    # fee_before_odds further down) specifically so it can skip it. The
+    # two are mutually exclusive per book (a book's Fee Type is one value),
+    # kept as separate flags rather than one boolean so the correct
+    # resolver parameter (fee_pct_on_win_only vs fee_pct_on_win_stake) gets
+    # passed below without conflating the two formulas.
     fee_config = get_book_fee_config(book) if book else {"fee_type": "", "fee_percent": None}
-    is_percent_fee_book = (
+    is_win_profit_fee_book = (
         fee_config["fee_type"] == BOOK_FEE_TYPE_PERCENT_OF_WIN_PROFIT
         and fee_config["fee_percent"] is not None
     )
+    is_win_stake_fee_book = (
+        fee_config["fee_type"] == BOOK_FEE_TYPE_PERCENT_OF_STAKE_ON_WIN
+        and fee_config["fee_percent"] is not None
+    )
 
-    if is_percent_fee_book:
+    if is_win_profit_fee_book or is_win_stake_fee_book:
         fee = 0.0  # Real win-only fee is derived inside calculate_pl_and_payout.
     else:
         # Fee is required, even for bets logged before this field existed --
@@ -421,8 +430,9 @@ def _safe_calculate_pl_payout(bet: dict, result: str) -> tuple[float | None, flo
     try:
         return calculate_pl_and_payout(
             result, stake, odds_taken, bet_category, boost_pct, fee, fee_before_odds,
-            fee_pct_on_win_only=fee_config["fee_percent"] if is_percent_fee_book else None,
-            bet_type=bet.get("bet_type", "") if is_percent_fee_book else "",
+            fee_pct_on_win_only=fee_config["fee_percent"] if is_win_profit_fee_book else None,
+            bet_type=bet.get("bet_type", "") if is_win_profit_fee_book else "",
+            fee_pct_on_win_stake=fee_config["fee_percent"] if is_win_stake_fee_book else None,
         )
     except ValueError as e:
         reason = f"could not calculate P/L -- {e}"
