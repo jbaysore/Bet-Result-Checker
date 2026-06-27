@@ -55,6 +55,44 @@ def _get_tab(tab_name: str):
     return _tab_cache[tab_name]
 
 
+def _promotions_header_diagnostics(rows: list[list[str]], context: str) -> int | None:
+    """
+    Debug helper: scan first rows of Promotions tab to locate where
+    'Promo ID' header actually lives. Returns 0-based row index or None.
+    """
+    import json
+    import time
+
+    snapshot = []
+    promo_id_row = None
+    for i, row in enumerate(rows[:8]):
+        stripped = [c.strip() for c in row]
+        info = {"sheet_row": i + 1, "len": len(row), "preview": stripped[:20]}
+        if "Promo ID" in stripped:
+            promo_id_row = i
+            info["has_promo_id_header"] = True
+        snapshot.append(info)
+
+    print(f"[sheets_reader] Promotions diagnostics ({context}): {json.dumps(snapshot)}")
+
+    # #region agent log
+    try:
+        with open("debug-2f3712.log", "a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "sessionId": "2f3712",
+                "hypothesisId": "H1",
+                "location": "sheets_reader.py:_promotions_header_diagnostics",
+                "message": context,
+                "data": {"snapshot": snapshot, "promo_id_row": promo_id_row},
+                "timestamp": int(time.time() * 1000),
+            }) + "\n")
+    except OSError:
+        pass
+    # #endregion
+
+    return promo_id_row
+
+
 def _resolve_bet_col_indices(headers: list[str]) -> dict[str, int | None]:
     """
     Maps config.BET_COL logical keys to 0-based column indices against the
@@ -427,6 +465,9 @@ def get_promo_boost_percentage(promo_id: str) -> float | None:
         idx_promo_id = headers.index("Promo ID")
         idx_boost_pct = headers.index("Boost %")
     except ValueError:
+        # #region agent log
+        _promotions_header_diagnostics(rows, "get_promo_boost_percentage")
+        # #endregion
         # "Boost %" column doesn't exist yet in the sheet -- print the
         # ACTUAL header row so a header-name mismatch (typo, extra
         # space, different casing) is immediately visible in the log
@@ -517,6 +558,9 @@ def load_pending_promotions() -> list[dict]:
                   f"column '{header_name}' -- continuing without it.")
 
     if "promo_id" not in col_idx or "status" not in col_idx:
+        # #region agent log
+        _promotions_header_diagnostics(rows, "load_pending_promotions")
+        # #endregion
         raise RuntimeError(
             "[sheets_reader] Promotions tab is missing 'Promo ID' or 'Status' "
             "column entirely -- cannot proceed."
