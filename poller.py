@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import re
 import pytz
 from config import (
     POLL_START_BUFFER_SECONDS,
@@ -158,17 +159,48 @@ def _parse_game_datetime(game_date: str, game_start: str) -> datetime | None:
     """
     Parses the sheet's date and time columns into a timezone-aware datetime.
 
-    Expected formats:
-        game_date:  "M/D/YYYY"  e.g. "5/30/2026" or "11/3/2025"
-        game_start: "H:MM:SS AM/PM"  e.g. "4:10:00 AM" or "2:00:00 PM"
+    Supported formats (matches odds-tool Log Bet Wizard + backfillClosingOdds):
+        game_date:  "M/D/YYYY" or "YYYY-MM-DD"
+        game_start: "H:MM:SS AM/PM", "H:MM AM/PM", or 24h "HH:MM" / "HH:MM:SS"
 
     Returns a Central-timezone-aware datetime, or None if parsing fails.
     """
+    date_raw = (game_date or "").strip()
+    time_raw = (game_start or "").strip()
+    if not date_raw or not time_raw:
+        return None
+
     try:
-        dt_str = f"{game_date.strip()} {game_start.strip()}"
-        dt_naive = datetime.strptime(dt_str, "%m/%d/%Y %I:%M:%S %p")
+        if "-" in date_raw:
+            year, month, day = map(int, date_raw.split("-"))
+        elif "/" in date_raw:
+            month, day, year = map(int, date_raw.split("/"))
+        else:
+            raise ValueError("unrecognized date format")
+
+        time_match = re.match(
+            r"^(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?$",
+            time_raw,
+            re.IGNORECASE,
+        )
+        if not time_match:
+            raise ValueError("unrecognized time format")
+
+        hour = int(time_match.group(1))
+        minute = int(time_match.group(2))
+        second = int(time_match.group(3) or 0)
+        ampm = time_match.group(4)
+
+        if ampm:
+            ampm = ampm.upper()
+            if ampm == "PM" and hour != 12:
+                hour += 12
+            elif ampm == "AM" and hour == 12:
+                hour = 0
+
+        dt_naive = datetime(year, month, day, hour, minute, second)
         return CENTRAL.localize(dt_naive)
-    except ValueError as e:
+    except (ValueError, TypeError) as e:
         print(f"[poller] Could not parse datetime '{game_date} {game_start}': {e}")
         return None
 
