@@ -529,9 +529,11 @@ def _promo_col_letter_lookup():
     reordered, as long as the header names themselves don't change.
     """
     from config import PROMO_COL
+    from sheets_reader import _resolve_promotions_headers_from_rows
 
     sheet = _get_promotions_sheet()
-    headers = sheet.row_values(1)
+    rows = sheet.get_all_values()
+    _, headers = _resolve_promotions_headers_from_rows(rows)
 
     idx = {}
     for key, header_name in PROMO_COL.items():
