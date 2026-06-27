@@ -1,277 +1,642 @@
-import os
-import json
-from dotenv import load_dotenv
+import gspread
+from google.oauth2.service_account import Credentials
+from config import SHEET_ID, get_credentials_info
 
-load_dotenv()
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive.readonly",
+]
 
-# ── Google Sheets ────────────────────────────────────────────────
-SHEET_ID = os.getenv("SHEET_ID")
-SHEET_TAB = os.getenv("SHEET_TAB", "Bets")
-
-# Locally: GOOGLE_APPLICATION_CREDENTIALS points to a file path.
-# In GitHub Actions: GOOGLE_APPLICATION_CREDENTIALS_JSON holds the raw JSON
-# content, injected directly from the SERVICE_ACCOUNT_JSON repo secret.
-CREDENTIALS_PATH = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-CREDENTIALS_JSON = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+_client_cache = None
+_spreadsheet_cache = None
+_tab_cache = {}
 
 
-def get_credentials_info() -> dict:
+def _get_client():
     """
-    Returns the service account credentials as a dict, regardless of
-    whether they came from a local file (dev) or an injected secret (GitHub Actions).
+    Cached for the lifetime of the current process (each scheduled run is
+    a fresh process) -- see sheets_writer._get_client()'s docstring for
+    why this matters: re-authenticating on every single read call was
+    pure overhead.
     """
-    if CREDENTIALS_JSON:
-        return json.loads(CREDENTIALS_JSON)
-    if CREDENTIALS_PATH:
-        with open(CREDENTIALS_PATH, "r") as f:
-            return json.load(f)
-    raise RuntimeError(
-        "No credentials found. Set GOOGLE_APPLICATION_CREDENTIALS (local file path) "
-        "or GOOGLE_APPLICATION_CREDENTIALS_JSON (raw JSON, used in GitHub Actions)."
-    )
+    global _client_cache
+    if _client_cache is None:
+        creds_info = get_credentials_info()
+        creds = Credentials.from_service_account_info(creds_info, scopes=SCOPES)
+        _client_cache = gspread.authorize(creds)
+    return _client_cache
 
 
-# ── Odds API ─────────────────────────────────────────────────────
-ODDS_API_KEY = os.getenv("ODDS_API_KEY")
-ODDS_API_BASE = "https://api.the-odds-api.com/v4"
+def _get_spreadsheet():
+    """
+    Cached for the lifetime of the current process -- client.open_by_key()
+    is a real network "read request" against the Sheets API quota every
+    time it's called. Every load_* function in this module used to call
+    it independently on every invocation; across a single trigger.py run
+    (load_pending_bets + load_unresolved_pl_bets + load_manual_payout_
+    pending_pl_bets, plus several sheets_writer.py calls per bet) that
+    redundancy was enough to trip 'Quota exceeded for Read requests per
+    minute per user' (confirmed 2026-06-26).
+    """
+    global _spreadsheet_cache
+    if _spreadsheet_cache is None:
+        _spreadsheet_cache = _get_client().open_by_key(SHEET_ID)
+    return _spreadsheet_cache
 
-# ── Bets tab column headers ─────────────────────────────────────────
-# Read by HEADER NAME, not a fixed index dict -- matches the Promotions
-# tab convention (PROMO_COL). Resolves against the live sheet header row
-# at read/write time so columns may be reordered freely.
-#
-# Schema: BetID | Date Placed | Book | Sport | Team 1 | Team 2 |
-#         Game Date | Game Start Time | Selection | Bet Type |
-#         OddsTaken | DecimalOddsTaken | ClosingOdds | DecimalClosingOdds |
-#         CLV | Stake | Fee | Bet Category | Promo ID | Result | Payout |
-#         P/L | Running P/L | Notes
-BET_COL = {
-    "bet_id":          "BetID",
-    "date_placed":     "Date Placed",
-    "book":            "Book",
-    "sport":           "Sport",
-    "team1":           "Team 1",
-    "team2":           "Team 2",
-    "game_date":       "Game Date",
-    "game_start":      "Game Start Time",
-    "selection":       "Selection",
-    "bet_type":        "Bet Type",
-    "odds_taken":      "OddsTaken",
-    "decimal_odds":    "DecimalOddsTaken",
-    "closing_odds":    "ClosingOdds",
-    "decimal_closing": "DecimalClosingOdds",
-    "clv":             "CLV",
-    "stake":           "Stake",
-    "fee":             "Fee",
-    "bet_category":    "Bet Category",
-    "promo_id":        "Promo ID",
-    "result":          "Result",
-    "payout":          "Payout",
-    "pl":              "P/L",
-    "running_pl":      "Running P/L",
-    "notes":           "Notes",
-}
 
-# ── Bet types ─────────────────────────────────────────────────────
-# Values as they appear in your Sheet's Bet Type column
-BET_TYPE_SPREAD     = "Spread"
-BET_TYPE_MONEYLINE  = "Moneyline"
-BET_TYPE_TOTAL      = "Total"
-BET_TYPE_DRAW       = "Draw"
-BET_TYPE_PARLAY     = "Parlay"
-BET_TYPE_PROP       = "Prop"
+def _get_tab(tab_name: str):
+    """
+    Cached per tab name for the lifetime of the current process -- same
+    reasoning as _get_spreadsheet(), one fewer redundant network call
+    per repeat read of the same tab within a single run.
+    """
+    if tab_name not in _tab_cache:
+        _tab_cache[tab_name] = _get_spreadsheet().worksheet(tab_name)
+    return _tab_cache[tab_name]
 
-# Bet types this tool will resolve automatically
-AUTOMATED_BET_TYPES = {BET_TYPE_SPREAD, BET_TYPE_MONEYLINE, BET_TYPE_TOTAL, BET_TYPE_DRAW}
 
-# ── Book Settings "Fee Type" values ────────────────────────────────
-# Default (blank/anything else) means "flat dollar fee, entered manually
-# at logging time" -- the original, still-most-common model. This is the
-# only other value so far, for books like ProphetX whose fee is a
-# percentage of NET PROFIT, derived at settlement time rather than known
-# upfront -- see sheets_reader.get_book_fee_config() and
-# resolver.calculate_pl_and_payout()'s fee_pct_on_win_only parameter.
-BOOK_FEE_TYPE_PERCENT_OF_WIN_PROFIT = "Percent Of Win Profit"
+def _resolve_promotions_headers_from_rows(rows: list[list[str]]) -> tuple[int, list[str]]:
+    """
+    Finds the Promotions header row by scanning for 'Promo ID'. Row 1 may be
+    blank if a spacer row was inserted above headers during a manual reorder.
+    Returns (0-based header row index, header cell list).
+    """
+    header_row_idx = 0
+    for i, row in enumerate(rows[:10]):
+        if "Promo ID" in [c.strip() for c in row]:
+            header_row_idx = i
+            break
 
-# Books whose real-money WIN payout can't be reliably computed from
-# American odds at all -- not a rounding-rule difference (like
-# DraftKings' cent-truncation, handled inside resolver._american_odds_profit),
-# but a fundamentally different settlement mechanism. Kalshi is a
-# contracts-based exchange (you buy a whole number of $1-payout contracts
-# at a cents-denominated price) rather than a fixed-odds sportsbook, and
-# two real settlements (2026-06-26) came back several percent off from
-# the American-odds approximation -- too large to be cent rounding, and
-# in the OPPOSITE direction from what Kalshi's own published 7% taker-fee
-# formula (kalshiOdds.js) would predict. Rather than guess at a contract-
-# count/fee model from two data points, these books are routed to manual
-# Payout entry instead: poller._safe_calculate_pl_payout() flags the row
-# (PL_BLOCKED_PREFIX) asking for the real Payout from the book's own
-# account, and poller.complete_manual_payout_pl() derives P/L from
-# whatever Payout gets entered, once it's there.
-MANUAL_PAYOUT_REQUIRED_BOOKS = {"kalshi"}
+    headers = rows[header_row_idx] if rows else []
 
-# ── Bet Categories ──────────────────────────────────────────────────
-# Matches the 6 canonical values enforced by LogBetWizard.jsx's BET_CATEGORIES
-# (Free Bet was removed -- unused, and its real payout behavior was never
-# validated against an actual promo).
-BET_CATEGORY_QUALIFYING     = "Qualifying Bet"
-BET_CATEGORY_DEPOSIT_BONUS  = "Deposit Bonus"
-BET_CATEGORY_BONUS_BET      = "Bonus Bet"
-BET_CATEGORY_PROFIT_BOOST   = "Profit Boost"
-BET_CATEGORY_STANDARD       = "Standard"
-BET_CATEGORY_INSURANCE_BET  = "Insurance Bet"
+    if header_row_idx > 0:
+        print(f"[sheets_reader] Promotions header row detected on sheet row "
+              f"{header_row_idx + 1} (row 1 is blank or not the header row).")
 
-# Categories where the stake itself is bonus/promotional credit, not real
-# cash -- a loss costs nothing (P/L = 0), and a void returns no Payout
-# (there was no real money to give back).
-PROMO_FUNDED_CATEGORIES = {BET_CATEGORY_BONUS_BET, BET_CATEGORY_DEPOSIT_BONUS}
+    return header_row_idx, headers
 
-# Categories where real cash is at risk regardless of the promo label
-# attached -- a loss costs the full stake (P/L = -stake), and a void
-# returns the stake as Payout. Profit Boost and Insurance Bet both fall
-# here: the promo affects odds or provides a separate refund credit, but
-# the wagered stake itself was genuinely your money.
-REAL_MONEY_CATEGORIES = {BET_CATEGORY_STANDARD, BET_CATEGORY_QUALIFYING,
-                          BET_CATEGORY_PROFIT_BOOST, BET_CATEGORY_INSURANCE_BET}
 
-# ── Result values ─────────────────────────────────────────────────
-RESULT_WIN   = "WIN"
-RESULT_LOSS  = "LOSS"
-RESULT_PUSH  = "PUSH"
-RESULT_VOID  = "VOID"        # written when a game is cancelled/postponed and never played
-RESULT_NEEDS_REVIEW = "NEEDS_REVIEW"  # written when Odds API never returned a final
-                                       # score well past game time -- distinct from
-                                       # PENDING: this specifically means "check ESPN
-                                       # for cancellation via the Stats page" before
-                                       # falling back to full manual review. See the
-                                       # Log Bet Wizard's Step 3 design notes -- ESPN is
-                                       # only ever consulted here, on this rare path, via
-                                       # a human-confirmed live lookup, never automatically
-                                       # and never via a cached/stored sport->league mapping.
-RESULT_PENDING = "PENDING"  # written when a NEEDS_REVIEW check finds nothing useful
-                             # (or is skipped) -- fully manual review from here
+def _resolve_bet_col_indices(headers: list[str]) -> dict[str, int | None]:
+    """
+    Maps config.BET_COL logical keys to 0-based column indices against the
+    live Bets tab header row. Missing headers are omitted (None) rather
+    than failing the whole read.
+    """
+    from config import BET_COL
 
-# ── Game status values ────────────────────────────────────────────
-# Contract that any upstream game-result source (ESPN, Odds API, etc.)
-# must translate its own status fields into before passing a game dict
-# to resolver.resolve(). Keeps resolver.py independent of any one
-# data source's specific status vocabulary.
-GAME_STATUS_FINAL     = "final"      # game completed normally, scores are official
-GAME_STATUS_CANCELLED = "cancelled"  # game was cancelled or postponed and will not be played
+    col_idx: dict[str, int | None] = {}
+    for key, header_name in BET_COL.items():
+        try:
+            col_idx[key] = headers.index(header_name)
+        except ValueError:
+            col_idx[key] = None
+            print(f"[sheets_reader] ⚠️  Bets tab is missing expected "
+                  f"column '{header_name}' -- continuing without it.")
+    return col_idx
 
-# ── Polling settings ──────────────────────────────────────────────
-POLL_INTERVAL_SECONDS = 1800       # 30 minutes between polls
-POLL_START_BUFFER_SECONDS = 1800   # start polling 30 min after scheduled game start
-POLL_MAX_DURATION_SECONDS = 21600  # give up after 6 hours, write PENDING
 
-# ── ESPN API ──────────────────────────────────────────────────────
-ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports"
+def _pad_bet_row(row: list, col_idx: dict[str, int | None]) -> list:
+    valid = [i for i in col_idx.values() if i is not None]
+    if not valid:
+        return row
+    while len(row) <= max(valid):
+        row.append("")
+    return row
 
-# NOTE: this is no longer used by poll_bet() (which is Odds-API-only as of
-# today) or by sheets_reader.py (load_sport_map() was removed -- it read a
-# sport->ESPN-league mapping from the "Name References" sheet that nothing
-# calls anymore). ESPN is still used, but only via server.js's
-# /api/bet-review/check-espn endpoint for the Stats page's manual review
-# flow, which does live league discovery per-request and never reads a
-# stored mapping from this sheet or anywhere else.
+
+def _bet_cell(row: list, col_idx: dict, key: str) -> str:
+    idx = col_idx.get(key)
+    if idx is None or idx >= len(row):
+        return ""
+    return row[idx].strip()
+
+
+def load_pending_bets(tab_name: str) -> list[dict]:
+    """
+    Reads the Bets tab and returns all rows where:
+      - Result column is blank
+      - Bet type is in the automated set
+      - Game date/time is in the past (checked by the poller, not here)
+
+    Returns a list of dicts keyed by column name.
+    """
+    from config import AUTOMATED_BET_TYPES
+
+    tab = _get_tab(tab_name)
+
+    rows = tab.get_all_values()
+
+    if not rows:
+        return []
+
+    headers = rows[0]
+    col = _resolve_bet_col_indices(headers)
+    if col.get("result") is None or col.get("bet_id") is None:
+        raise RuntimeError(
+            "[sheets_reader] Bets tab is missing 'BetID' or 'Result' "
+            "column entirely -- cannot proceed."
+        )
+
+    pending = []
+    for row_idx, row in enumerate(rows[1:], start=2):  # row 1 is header
+        row = _pad_bet_row(row, col)
+
+        result = _bet_cell(row, col, "result")
+        bet_type = _bet_cell(row, col, "bet_type")
+
+        if result:
+            continue  # already resolved
+
+        if bet_type not in AUTOMATED_BET_TYPES:
+            continue  # parlay, prop — skip
+
+        pending.append({
+            "row_idx":     row_idx,
+            "bet_id":      _bet_cell(row, col, "bet_id"),
+            "sport":       _bet_cell(row, col, "sport"),
+            "book":        _bet_cell(row, col, "book"),
+            "team1":       _bet_cell(row, col, "team1"),
+            "team2":       _bet_cell(row, col, "team2"),
+            "game_date":   _bet_cell(row, col, "game_date"),
+            "game_start":  _bet_cell(row, col, "game_start"),
+            "selection":   _bet_cell(row, col, "selection"),
+            "bet_type":    bet_type,
+            "odds_taken":  _bet_cell(row, col, "odds_taken"),
+            "stake":       _bet_cell(row, col, "stake"),
+            "fee":         _bet_cell(row, col, "fee"),
+            "bet_category": _bet_cell(row, col, "bet_category"),
+            "promo_id":    _bet_cell(row, col, "promo_id"),
+        })
+
+    return pending
+
+
+def load_unresolved_pl_bets(tab_name: str) -> list[dict]:
+    """
+    Reads the Bets tab and returns all rows where:
+      - Result is already filled in (WIN/LOSS/PUSH/VOID -- a real outcome,
+        not NEEDS_REVIEW or blank)
+      - P/L AND Payout are BOTH currently blank
+
+    This covers any row where a result was set without going through
+    poll_bet() -- most commonly a manual fix (e.g. resolving a
+    NEEDS_REVIEW bet by hand after checking ESPN yourself) where the
+    person filled in Result but didn't compute P/L/Payout themselves.
+
+    Deliberately does NOT restrict by bet type the way load_pending_bets()
+    does for AUTOMATED_BET_TYPES -- confirmed against real Parlay data
+    (BetID 11) that calculate_pl_and_payout() only needs OddsTaken/Stake/
+    Fee to already be correct; it doesn't care whether those numbers
+    represent one leg or a parlay's combined odds. Determining WHICH
+    outcome won is a separate problem this tool never touches, since
+    Result is already given by the time a row reaches this function.
+
+    Only fills genuine gaps -- if a row already has a P/L or Payout value
+    (even one that might be wrong by today's rules), it's left alone,
+    never overwritten. This intentionally mirrors load_pending_bets()'s
+    "don't touch what's already settled" caution.
+
+    Returns a list of dicts keyed by column name, same shape as
+    load_pending_bets()'s output, so it can be passed straight into
+    poller._safe_calculate_pl_payout() without any reshaping.
+    """
+    tab = _get_tab(tab_name)
+
+    rows = tab.get_all_values()
+
+    if not rows:
+        return []
+
+    headers = rows[0]
+    col = _resolve_bet_col_indices(headers)
+    if col.get("result") is None or col.get("bet_id") is None:
+        raise RuntimeError(
+            "[sheets_reader] Bets tab is missing 'BetID' or 'Result' "
+            "column entirely -- cannot proceed."
+        )
+
+    unresolved = []
+    for row_idx, row in enumerate(rows[1:], start=2):  # row 1 is header
+        row = _pad_bet_row(row, col)
+
+        result = _bet_cell(row, col, "result")
+        pl = _bet_cell(row, col, "pl")
+        payout = _bet_cell(row, col, "payout")
+
+        if not result:
+            continue  # no result yet -- this is load_pending_bets()'s job, not this one
+        if result == "NEEDS_REVIEW":
+            continue  # not a real outcome yet, nothing to compute
+        if pl or payout:
+            continue  # already has at least one value -- never overwrite
+
+        unresolved.append({
+            "row_idx":     row_idx,
+            "bet_id":      _bet_cell(row, col, "bet_id"),
+            "sport":       _bet_cell(row, col, "sport"),
+            "book":        _bet_cell(row, col, "book"),
+            "team1":       _bet_cell(row, col, "team1"),
+            "team2":       _bet_cell(row, col, "team2"),
+            "game_date":   _bet_cell(row, col, "game_date"),
+            "game_start":  _bet_cell(row, col, "game_start"),
+            "selection":   _bet_cell(row, col, "selection"),
+            "bet_type":    _bet_cell(row, col, "bet_type"),
+            "odds_taken":  _bet_cell(row, col, "odds_taken"),
+            "stake":       _bet_cell(row, col, "stake"),
+            "fee":         _bet_cell(row, col, "fee"),
+            "bet_category": _bet_cell(row, col, "bet_category"),
+            "promo_id":    _bet_cell(row, col, "promo_id"),
+            "result":      result,
+        })
+
+    return unresolved
+
+
+def load_manual_payout_pending_pl_bets(tab_name: str) -> list[dict]:
+    """
+    Reads the Bets tab and returns all rows where:
+      - Result is already filled in (WIN/LOSS/PUSH/VOID -- a real outcome,
+        not NEEDS_REVIEW or blank)
+      - Payout is filled in, but P/L is currently blank
+
+    This is the manual-entry counterpart to load_unresolved_pl_bets()
+    (which only fires when BOTH P/L and Payout are blank): for books in
+    config.MANUAL_PAYOUT_REQUIRED_BOOKS (e.g. Kalshi, whose contracts-
+    based settlement can't be reliably derived from American odds --
+    see resolver.derive_pl_from_payout's docstring), poller flags the row
+    asking the user to type in the real Payout from their account. Once
+    they do, THIS function is what notices Payout has shown up with P/L
+    still blank, so poller.complete_manual_payout_pl() can derive P/L
+    from it on the next scheduled run -- no separate "I filled it in"
+    signal needed beyond the Payout cell itself being non-blank.
+
+    Returns a dict shape compatible with poller.complete_manual_payout_pl(),
+    including "payout" (unlike load_unresolved_pl_bets(), which never
+    needs it since Payout is one of the two blank fields it's filling in).
+    """
+    tab = _get_tab(tab_name)
+
+    rows = tab.get_all_values()
+
+    if not rows:
+        return []
+
+    headers = rows[0]
+    col = _resolve_bet_col_indices(headers)
+    if col.get("result") is None or col.get("bet_id") is None:
+        raise RuntimeError(
+            "[sheets_reader] Bets tab is missing 'BetID' or 'Result' "
+            "column entirely -- cannot proceed."
+        )
+
+    pending = []
+    for row_idx, row in enumerate(rows[1:], start=2):  # row 1 is header
+        row = _pad_bet_row(row, col)
+
+        result = _bet_cell(row, col, "result")
+        pl = _bet_cell(row, col, "pl")
+        payout = _bet_cell(row, col, "payout")
+
+        if not result or result == "NEEDS_REVIEW":
+            continue
+        if pl:
+            continue  # already has a P/L value -- never overwrite
+        if not payout:
+            continue  # nothing manually entered yet -- still waiting
+
+        pending.append({
+            "row_idx":      row_idx,
+            "bet_id":       _bet_cell(row, col, "bet_id"),
+            "book":         _bet_cell(row, col, "book"),
+            "odds_taken":   _bet_cell(row, col, "odds_taken"),
+            "stake":        _bet_cell(row, col, "stake"),
+            "fee":          _bet_cell(row, col, "fee"),
+            "bet_category": _bet_cell(row, col, "bet_category"),
+            "payout":       payout,
+            "result":       result,
+        })
+
+    return pending
+
+
+def get_book_fee_before_odds(book: str) -> bool:
+    """
+    Looks up whether `book` deducts its per-bet fee from the stake BEFORE
+    profit/payout is calculated from odds, from the "Book Settings" tab
+    (Book | Refunds Fee On Void | Fee Before Odds).
+
+    Confirmed by reconciling two real Polymarket bets against Polymarket's
+    own quoted "to win" figures on 2026-06-20: Polymarket computes profit
+    using (stake - fee) as the effective wagered amount, not the full
+    stake, with no separate fee subtraction afterward (unlike traditional
+    sportsbooks, where the fee is a flat pass-through charge layered on
+    top of normal odds math -- confirmed for Caesars via Illinois Gaming
+    Board's wager-tax FAQ). This is a genuinely different payout mechanic,
+    not a minor adjustment, so it's modeled as its own per-book flag
+    rather than folded into the existing fee-on-void column.
+
+    Reads fresh every call, same as get_promo_boost_percentage and the
+    fee-on-void check in sheets_writer.py -- no caching, since correctness
+    matters far more than the small latency cost for what should be a
+    rare, deliberate lookup (once per book, effectively, since this tab
+    rarely changes).
+
+    Returns False (the traditional-sportsbook default) if the book isn't
+    found in the tab, or the column doesn't exist yet -- conservative,
+    since assuming the WRONG mechanic would silently corrupt P/L, and the
+    wizard's Step 2 prompt is responsible for ensuring every book actually
+    used gets a real answer recorded here before being usable.
+    """
+    tab = _get_tab("Book Settings")
+
+    rows = tab.get_all_values()
+    if not rows:
+        return False
+
+    headers = rows[0]
+    try:
+        idx_book = headers.index("Book")
+        idx_flag = headers.index("Fee Before Odds")
+    except ValueError:
+        return False
+
+    for row in rows[1:]:
+        if len(row) <= max(idx_book, idx_flag):
+            continue
+        if row[idx_book].strip().lower() == book.strip().lower():
+            return row[idx_flag].strip().upper() == "TRUE"
+
+    return False
+
+
+def get_book_fee_config(book: str) -> dict:
+    """
+    Looks up a book's fee TYPE and rate from the "Book Settings" tab
+    (Book | ... | Fee Type | Fee Percent), added for ProphetX-style books
+    whose fee is a percentage of NET PROFIT charged only on a win (never a
+    loss, never a parlay -- see resolver.calculate_pl_and_payout's
+    fee_pct_on_win_only parameter), rather than a flat dollar amount
+    entered/known at logging time like every other book.
+
+    Deliberately a SEPARATE function from get_book_fee_before_odds() above
+    rather than folding this into it or replacing it -- those other call
+    sites (promo_trigger.py, promo_resolver.py) only ever need the
+    Fee Before Odds boolean, and giving them a dict they'd have to unpack
+    for one field would be pure churn for no benefit.
+
+    Returns {"fee_type": "", "fee_percent": None} (i.e. "use the normal
+    flat-fee path") if the book isn't found, or either column doesn't
+    exist yet -- same conservative-default reasoning as
+    get_book_fee_before_odds(): an unrecognised fee type should never be
+    silently treated as automated, since that would skip the "Fee is
+    required" safety check in poller.py for a book that actually needs a
+    manually-entered fee.
+    """
+    tab = _get_tab("Book Settings")
+
+    rows = tab.get_all_values()
+    if not rows:
+        return {"fee_type": "", "fee_percent": None}
+
+    headers = rows[0]
+    try:
+        idx_book = headers.index("Book")
+        idx_type = headers.index("Fee Type")
+        idx_pct = headers.index("Fee Percent")
+    except ValueError:
+        return {"fee_type": "", "fee_percent": None}
+
+    for row in rows[1:]:
+        if len(row) <= max(idx_book, idx_type, idx_pct):
+            continue
+        if row[idx_book].strip().lower() == book.strip().lower():
+            fee_type = row[idx_type].strip()
+            try:
+                fee_percent = float(row[idx_pct]) if row[idx_pct].strip() else None
+            except ValueError:
+                fee_percent = None
+            return {"fee_type": fee_type, "fee_percent": fee_percent}
+
+    return {"fee_type": "", "fee_percent": None}
+
+
+def get_promo_boost_percentage(promo_id: str) -> float | None:
+    """
+    Looks up the Boost % for a given Promo ID from the Promotions tab.
+    Reads fresh every call -- no caching -- since this is only ever called
+    for the rare case of resolving a winning Profit Boost bet, where
+    correctness matters more than the small added latency of a live read.
+
+    Reads by header name rather than a fixed column index (unlike
+    load_pending_bets' Bets-tab reads), since nothing else in this project
+    assumes a fixed column layout for the Promotions tab -- the Node side
+    (server.js) already reads it the same way.
+
+    Returns the boost percentage as a float (e.g. 100.0 for "100% Profit
+    Boost"), or None if the promo isn't found or has no Boost % set --
+    callers should treat None as "cannot resolve, do not guess."
+    """
+    tab = _get_tab("Promotions")
+
+    rows = tab.get_all_values()
+    if not rows:
+        print("[sheets_reader] get_promo_boost_percentage: Promotions tab returned zero rows.")
+        return None
+
+    header_row_idx, headers = _resolve_promotions_headers_from_rows(rows)
+    try:
+        idx_promo_id = headers.index("Promo ID")
+        idx_boost_pct = headers.index("Boost %")
+    except ValueError:
+        # "Boost %" column doesn't exist yet in the sheet -- print the
+        # ACTUAL header row so a header-name mismatch (typo, extra
+        # space, different casing) is immediately visible in the log
+        # instead of silently looking identical to "promo not found".
+        print(f"[sheets_reader] get_promo_boost_percentage: 'Promo ID' or 'Boost %' "
+              f"header not found in Promotions tab. Actual headers: {headers!r}")
+        return None
+
+    for row in rows[header_row_idx + 1:]:
+        if len(row) <= max(idx_promo_id, idx_boost_pct):
+            # Google Sheets trims trailing blank cells from get_all_values()
+            # -- a row this short means every cell from here to the end
+            # (including, possibly, Promo ID or Boost % itself) was blank
+            # on the actual sheet. Logged so this doesn't look identical
+            # to "Promo ID just isn't on this row at all".
+            if len(row) > idx_promo_id and row[idx_promo_id].strip() == str(promo_id).strip():
+                print(f"[sheets_reader] get_promo_boost_percentage: row for Promo ID "
+                      f"'{promo_id}' is too short to contain a Boost % cell ({len(row)} "
+                      f"cells, Boost % is column index {idx_boost_pct}) -- the cell is "
+                      f"either genuinely blank or trimmed by the Sheets API. Treating as blank.")
+            continue
+        if row[idx_promo_id].strip() == str(promo_id).strip():
+            raw = row[idx_boost_pct].strip()
+            if not raw:
+                print(f"[sheets_reader] get_promo_boost_percentage: found Promo ID "
+                      f"'{promo_id}' but its Boost % cell is blank.")
+                return None
+            try:
+                return float(raw.replace("%", "").strip())
+            except ValueError:
+                print(f"[sheets_reader] get_promo_boost_percentage: found Promo ID "
+                      f"'{promo_id}' but could not parse Boost % value {raw!r} as a number.")
+                return None
+
+    # Loop completed with no row matching promo_id -- print every Promo ID
+    # actually seen in the sheet, so a string-format mismatch (whitespace,
+    # type coercion, wrong ID entirely) is immediately diagnosable.
+    seen_ids = [row[idx_promo_id] for row in rows[header_row_idx + 1:] if len(row) > idx_promo_id]
+    print(f"[sheets_reader] get_promo_boost_percentage: Promo ID {promo_id!r} not found "
+          f"in Promotions tab. Promo IDs present: {seen_ids!r}")
+    return None
+
+    return None
 
 
 # ════════════════════════════════════════════════════════════════════
-# ── Promotions tab (Promotion Updater) ──────────────────────────────
+# ── Promotion Updater reads ─────────────────────────────────────────
 # ════════════════════════════════════════════════════════════════════
-# Read by HEADER NAME, not a fixed COL index dict -- matches the existing
-# convention already established in sheets_reader.py's
-# get_promo_boost_percentage() ("nothing else in this project assumes a
-# fixed column layout for the Promotions tab"). This dict exists only to
-# avoid retyping the literal header strings at every call site; it is
-# NOT a positional index map like Bets' BET_COL dict above.
-#
-# Schema (17 columns, confirmed against the live sheet 2026-06-23):
-# Promo ID | Book | Promo Name | Promo Type | Boost % | Reward |
-# Qualifying Cost | Bonus Amount | Status | Realized Date |
-# Realized Amount | Notes | Expiration Date/Time | Expected Reward Count |
-# Reward Timing | Token Usage Window (days) | Start Date
-#
-# Columns 13-16 were added to support the automated Promotion Updater's
-# multi-grant model (Bonus Bet/Profit Boost) -- see PromotionWizard.jsx for
-# the per-promo-type applicability rules these encode. Start Date was added
-# later, specifically for Insurance Bet's multi-day variant ("one insured
-# bet/day for N days") -- see promo_resolver.py's
-# _evaluate_multi_day_insurance.
-PROMO_COL = {
-    "promo_id":              "Promo ID",
-    "book":                  "Book",
-    "promo_name":            "Promo Name",
-    "promo_type":            "Promo Type",
-    "boost_pct":             "Boost %",
-    "reward":                "Reward",
-    "qualifying_cost":       "Qualifying Cost",
-    "bonus_amount":          "Bonus Amount",
-    "status":                "Status",
-    "realized_date":         "Realized Date",
-    "realized_amount":       "Realized Amount",
-    "notes":                 "Notes",
-    "expiration_date":       "Expiration Date/Time",
-    "expected_reward_count": "Expected Reward Count",
-    "reward_timing":         "Reward Timing",
-    "token_usage_window":    "Token Usage Window (days)",
-    # Anchors a multi-day Insurance Bet promo (e.g. "one insured bet/day for
-    # 10 days") -- Expected Reward Count holds the number of days, this
-    # holds day 1's date, so day N = Start Date + (N-1). Blank/unused for
-    # every other promo type, and for a single-shot Insurance Bet promo.
-    "start_date":            "Start Date",
-}
 
-PROMOTIONS_TAB = "Promotions"
+def load_pending_promotions() -> list[dict]:
+    """
+    Reads the Promotions tab and returns every row where Status is
+    currently "Pending" -- the only rows the Promotion Updater needs to
+    look at, since Realized/Unused are terminal and (per the established
+    "never overwrite an existing value" convention used throughout this
+    project) are never revisited.
 
-# ── Promotion Status values ─────────────────────────────────────────
-PROMO_STATUS_PENDING  = "Pending"
-PROMO_STATUS_REALIZED = "Realized"
-# Distinct from a $0 Realized promo: Unused means the qualifying window
-# expired with ZERO qualifying activity ever linked -- "I forgot this
-# existed," not "I did it and it paid nothing." Confirmed as a required
-# distinction during the Promotion Updater design conversation
-# (2026-06-21).
-PROMO_STATUS_UNUSED   = "Unused"
+    Reads by HEADER NAME via config.PROMO_COL, matching the existing
+    get_promo_boost_percentage() convention -- the Promotions tab's
+    column layout is not assumed fixed; reads by header name via BET_COL.
 
-# ── Promo Type values ───────────────────────────────────────────────
-# Deliberately the SAME string values as the corresponding
-# BET_CATEGORY_* constants above (Promo Type on a Promotions row and Bet
-# Category on its linked Bets rows are written identically by design --
-# e.g. a "Bonus Bet" promo's reward bets are logged with
-# Bet Category = "Bonus Bet"). Aliased here under PROMO_TYPE_* names
-# purely for readability at Promotion Updater call sites, not because
-# the values actually differ.
-PROMO_TYPE_BONUS_BET     = BET_CATEGORY_BONUS_BET
-PROMO_TYPE_DEPOSIT_BONUS = BET_CATEGORY_DEPOSIT_BONUS
-PROMO_TYPE_PROFIT_BOOST  = BET_CATEGORY_PROFIT_BOOST
-PROMO_TYPE_INSURANCE_BET = BET_CATEGORY_INSURANCE_BET
+    Returns a list of dicts keyed by the same logical names as
+    config.PROMO_COL (promo_id, book, promo_type, expiration_date, etc.),
+    plus "row_idx" (1-based, for writing back later). Numeric/date
+    fields are returned as raw stripped strings -- parsing into actual
+    numbers/dates is promo_resolver.py's job, kept separate so this
+    function stays a thin, honest read with no business logic.
+    """
+    from config import PROMOTIONS_TAB, PROMO_COL, PROMO_STATUS_PENDING
 
-# Unlike the aliases above, this Promo Type has NO matching Bet Category of
-# its own -- each day's boosted bet is still logged with
-# Bet Category = "Profit Boost" (BET_CATEGORY_PROFIT_BOOST). This Promo Type
-# only distinguishes the promo's lifecycle shape (open-ended daily reissue
-# on every loss, terminating on the first win, no fixed count or
-# expiration) from regular "Profit Boost" promos (a bounded multi-grant
-# token pool). See _evaluate_daily_profit_boost_until_win in
-# promo_resolver.py.
-PROMO_TYPE_PROFIT_BOOST_DAILY = "Profit Boost (Daily Until Win)"
+    tab = _get_tab(PROMOTIONS_TAB)
 
-# Promo types with a multi-grant token model (qualifying window,
-# Expected Reward Count, Reward Timing, per-token Usage Window) --
-# Bonus Bet and Profit Boost share this entire machinery, differing only
-# in how a claimed token's value is computed (see promo_resolver.py).
-#
-# Insurance Bet also supports a multi-day variant (Expected Reward Count +
-# Start Date = "one insured bet/day for N days") but deliberately does NOT
-# belong in this set -- it's day-anchored, not a FIFO pool of qualifying
-# bets, and each grant can branch into a Leg 2 refund claim depending on
-# Leg 1's own outcome. It has its own dedicated evaluator in
-# promo_resolver.py (_evaluate_multi_day_insurance), not
-# _evaluate_multi_grant_promo.
-MULTI_GRANT_PROMO_TYPES = {PROMO_TYPE_BONUS_BET, PROMO_TYPE_PROFIT_BOOST}
+    rows = tab.get_all_values()
+    if not rows:
+        return []
 
-# ── Reward Timing values ────────────────────────────────────────────
-# Matches PromotionWizard.jsx's REWARD_TIMING_OPTIONS exactly.
-REWARD_TIMING_PER_QUALIFYING_BET = "Per Qualifying Bet"
-REWARD_TIMING_END_OF_WINDOW      = "End of Window"
+    header_row_idx, headers = _resolve_promotions_headers_from_rows(rows)
+    col_idx = {}
+    for key, header_name in PROMO_COL.items():
+        try:
+            col_idx[key] = headers.index(header_name)
+        except ValueError:
+            # Column doesn't exist in the live sheet yet -- leave it out
+            # of col_idx rather than failing the whole read. Code further
+            # down the pipeline (promo_resolver.py) treats a missing key
+            # the same as a blank value for that field.
+            print(f"[sheets_reader] ⚠️  Promotions tab is missing expected "
+                  f"column '{header_name}' -- continuing without it.")
+
+    if "promo_id" not in col_idx or "status" not in col_idx:
+        raise RuntimeError(
+            "[sheets_reader] Promotions tab is missing 'Promo ID' or 'Status' "
+            "column entirely -- cannot proceed."
+        )
+
+    def cell(row, key):
+        idx = col_idx.get(key)
+        if idx is None or idx >= len(row):
+            return ""
+        return row[idx].strip()
+
+    pending = []
+    data_start_row = header_row_idx + 2  # 1-based sheet row of first data row
+    for row_idx, row in enumerate(rows[header_row_idx + 1:], start=data_start_row):
+        status = cell(row, "status")
+        if status != PROMO_STATUS_PENDING:
+            continue
+
+        pending.append({
+            "row_idx":              row_idx,
+            "promo_id":             cell(row, "promo_id"),
+            "book":                 cell(row, "book"),
+            "promo_name":           cell(row, "promo_name"),
+            "promo_type":           cell(row, "promo_type"),
+            "boost_pct":            cell(row, "boost_pct"),
+            "reward":               cell(row, "reward"),
+            "qualifying_cost":      cell(row, "qualifying_cost"),
+            "bonus_amount":         cell(row, "bonus_amount"),
+            "status":               status,
+            "notes":                cell(row, "notes"),
+            "expiration_date":      cell(row, "expiration_date"),
+            "expected_reward_count":cell(row, "expected_reward_count"),
+            "reward_timing":        cell(row, "reward_timing"),
+            "token_usage_window":   cell(row, "token_usage_window"),
+            "start_date":           cell(row, "start_date"),
+        })
+
+    return pending
+
+
+def load_bets_by_promo_id(tab_name: str) -> dict[str, list[dict]]:
+    """
+    Reads the ENTIRE Bets tab once and groups every row that has a
+    non-blank Promo ID, keyed by that Promo ID. Built for the Promotion
+    Updater, which needs to evaluate potentially many Pending promos per
+    run -- reading the whole tab once and grouping in memory is far
+    cheaper than a separate Sheets API read per promo.
+
+    Unlike load_pending_bets(), this is NOT filtered by Result, Bet Type,
+    or anything else -- it returns every linked row in whatever state
+    it's currently in (settled or not), since the Promotion Updater's
+    logic (promo_resolver.py) needs to see unsettled reward bets too, to
+    know it must keep waiting rather than finalize prematurely.
+
+    Returns: {promo_id: [bet_dict, ...]}, each bet_dict containing every
+    column this project's Bets tab has, keyed by the same names
+    load_pending_bets() uses, plus "result"/"pl"/"payout" (always
+    included here, unlike load_pending_bets() which omits them since
+    they're guaranteed blank there).
+    """
+    tab = _get_tab(tab_name)
+
+    rows = tab.get_all_values()
+    if not rows:
+        return {}
+
+    headers = rows[0]
+    col = _resolve_bet_col_indices(headers)
+    if col.get("promo_id") is None:
+        raise RuntimeError(
+            "[sheets_reader] Bets tab is missing 'Promo ID' column entirely "
+            "-- cannot proceed."
+        )
+
+    grouped: dict[str, list[dict]] = {}
+
+    for row_idx, row in enumerate(rows[1:], start=2):  # row 1 is header
+        row = _pad_bet_row(row, col)
+
+        promo_id = _bet_cell(row, col, "promo_id")
+        if not promo_id:
+            continue
+
+        bet = {
+            "row_idx":      row_idx,
+            "bet_id":       _bet_cell(row, col, "bet_id"),
+            "date_placed":  _bet_cell(row, col, "date_placed"),
+            "book":         _bet_cell(row, col, "book"),
+            "sport":        _bet_cell(row, col, "sport"),
+            "stake":        _bet_cell(row, col, "stake"),
+            "fee":          _bet_cell(row, col, "fee"),
+            "bet_category": _bet_cell(row, col, "bet_category"),
+            "promo_id":     promo_id,
+            "result":       _bet_cell(row, col, "result"),
+            "payout":       _bet_cell(row, col, "payout"),
+            "pl":           _bet_cell(row, col, "pl"),
+            "odds_taken":   _bet_cell(row, col, "odds_taken"),
+        }
+
+        grouped.setdefault(promo_id, []).append(bet)
+
+    return grouped
