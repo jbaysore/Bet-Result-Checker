@@ -102,12 +102,12 @@ from resolver import calculate_pl_and_payout
         ),
         pytest.param(
             "WIN", "Standard", 100, -110, 0, False, None,
-            None, 1.0, "", 89.9, 190.9,
-            id="betopenly_win_1pct_of_stake",
+            1.0, None, "Moneyline", 89.99, 190.9,
+            id="betopenly_win_1pct_of_profit",
         ),
         pytest.param(
             "LOSS", "Standard", 100, -110, 0, False, None,
-            None, 1.0, "", -100.0, None,
+            1.0, None, "", -100.0, None,
             id="betopenly_loss_no_fee",
         ),
         pytest.param(

@@ -94,8 +94,9 @@ AUTOMATED_BET_TYPES = {BET_TYPE_SPREAD, BET_TYPE_MONEYLINE, BET_TYPE_TOTAL, BET_
 BOOK_FEE_TYPE_PERCENT_OF_WIN_PROFIT = "Percent Of Win Profit"
 
 # Same win-only shape as BOOK_FEE_TYPE_PERCENT_OF_WIN_PROFIT, but the fee is
-# a percentage of STAKE, not profit -- confirmed for BetOpenly, 2026-06-26:
-# 1% of total amount staked, charged only on a win, at settlement. See
+# a percentage of STAKE, not profit (reserved for books that use that model;
+# BetOpenly uses BOOK_FEE_TYPE_PERCENT_OF_WIN_PROFIT at 1% per their public
+# "1% if you win" / commission-on-winnings terms). See
 # resolver.calculate_pl_and_payout()'s fee_pct_on_win_stake parameter.
 BOOK_FEE_TYPE_PERCENT_OF_STAKE_ON_WIN = "Percent Of Stake On Win"
 

@@ -128,14 +128,12 @@ def calculate_pl_and_payout(result: str, stake: float, odds_taken: float,
         bet_type:     Required when fee_pct_on_win_only is set, to apply
                       the parlay exemption (config.BET_TYPE_PARLAY).
                       Ignored otherwise.
-        fee_pct_on_win_stake: For books like BetOpenly whose fee is a
-                      percentage of STAKE (not profit, unlike
-                      fee_pct_on_win_only), charged ONLY on a win (never a
-                      loss/push/void -- confirmed for BetOpenly, 2026-06-26).
-                      No parlay exemption assumed here (unconfirmed for
-                      BetOpenly, unlike ProphetX's explicitly-published
-                      carve-out) -- applies on every non-parlay AND parlay
-                      win alike unless this assumption is corrected. When
+        fee_pct_on_win_stake: For books whose fee is a percentage of STAKE
+                      (not profit, unlike fee_pct_on_win_only), charged ONLY
+                      on a win (never a loss/push/void). No parlay exemption
+                      (unlike ProphetX's published carve-out for
+                      fee_pct_on_win_only) -- applies on parlay and
+                      non-parlay wins alike. When
                       set, this OVERRIDES `fee` entirely: forced to 0.0 for
                       every non-WIN result, derived as
                       round(stake * fee_pct_on_win_stake / 100, 2) on a win.
@@ -202,9 +200,8 @@ def calculate_pl_and_payout(result: str, stake: float, odds_taken: float,
     # known, for the one case (non-parlay win) where a fee actually applies.
     if fee_pct_on_win_only is not None and (result != RESULT_WIN or bet_type.strip() == BET_TYPE_PARLAY):
         fee = 0.0
-    # BetOpenly-style books: same force-to-zero on every non-WIN result,
-    # but no parlay exemption (unconfirmed for BetOpenly) -- see
-    # fee_pct_on_win_stake's docstring above.
+    # Stake-on-win books: force fee=0 on every non-WIN result; no parlay
+    # exemption -- see fee_pct_on_win_stake's docstring above.
     if fee_pct_on_win_stake is not None and result != RESULT_WIN:
         fee = 0.0
 
