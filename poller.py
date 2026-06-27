@@ -391,7 +391,7 @@ def _safe_calculate_pl_payout(bet: dict, result: str) -> tuple[float | None, flo
 
     # Win-only percent-fee books (Book Settings "Fee Type" = Percent Of Win
     # Profit or Percent Of Stake On Win) derive their fee at settlement time
-    -- there's nothing to
+    # -- there's nothing to
     # manually enter, so they're exempt from the "Fee is required" check
     # below entirely. Looked up before that check (not after, like
     # fee_before_odds further down) specifically so it can skip it. The
