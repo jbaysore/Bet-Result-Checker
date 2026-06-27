@@ -9,8 +9,40 @@ SCOPES = [
 
 
 _client_cache = None
+_spreadsheet_cache = None
 _sheet_cache = None
 _col_idx_cache = None
+_promo_sheet_cache = None
+_promo_col_idx_cache = None
+_book_refunds_cache = None
+
+
+def _cell_at(row: list[str], col_1based: int) -> str:
+    """Return stripped cell value from a row_values() result, or '' if short."""
+    idx = col_1based - 1
+    if idx < 0 or idx >= len(row):
+        return ""
+    return str(row[idx]).strip()
+
+
+def _bet_id_matches(row: list[str], bet_id_col: int, bet_id: str) -> bool:
+    current = _cell_at(row, bet_id_col)
+    return str(current) == str(bet_id)
+
+
+def _promo_id_matches(row: list[str], promo_id_col: int, promo_id: str) -> bool:
+    current = _cell_at(row, promo_id_col)
+    return current == str(promo_id).strip()
+
+
+def _read_bet_row(sheet, row_idx: int) -> list[str]:
+    """One Sheets API read for the full Bets row."""
+    return sheet.row_values(row_idx)
+
+
+def _read_promo_row(sheet, row_idx: int) -> list[str]:
+    """One Sheets API read for the full Promotions row."""
+    return sheet.row_values(row_idx)
 
 
 def _get_client():
@@ -28,6 +60,14 @@ def _get_client():
     return _client_cache
 
 
+def _get_spreadsheet():
+    """Cached spreadsheet handle shared by Bets, Promotions, and Book Settings."""
+    global _spreadsheet_cache
+    if _spreadsheet_cache is None:
+        _spreadsheet_cache = _get_client().open_by_key(SHEET_ID)
+    return _spreadsheet_cache
+
+
 def _get_sheet():
     """
     Cached for the lifetime of the current process. Every writer function
@@ -42,9 +82,7 @@ def _get_sheet():
     """
     global _sheet_cache
     if _sheet_cache is None:
-        client = _get_client()
-        spreadsheet = client.open_by_key(SHEET_ID)
-        _sheet_cache = spreadsheet.worksheet(SHEET_TAB)
+        _sheet_cache = _get_spreadsheet().worksheet(SHEET_TAB)
     return _sheet_cache
 
 
@@ -92,29 +130,30 @@ def _get_book_refunds_fee_on_void(book: str) -> bool:
     the wizard prompts for every new book before it can be used to log a
     bet, but a missing entry is safer treated as "don't know, leave it
     alone" than as "assume refunded."
+
+    Cached for the process lifetime -- one Book Settings read per run.
     """
-    client = _get_client()
-    sheet = client.open_by_key(SHEET_ID)
-    tab = sheet.worksheet("Book Settings")
+    global _book_refunds_cache
+    if _book_refunds_cache is None:
+        tab = _get_spreadsheet().worksheet("Book Settings")
+        rows = tab.get_all_values()
+        mapping: dict[str, bool] = {}
+        if rows:
+            headers = rows[0]
+            try:
+                idx_book = headers.index("Book")
+                idx_refunds = headers.index("Refunds Fee On Void")
+                for row in rows[1:]:
+                    if len(row) <= max(idx_book, idx_refunds):
+                        continue
+                    name = row[idx_book].strip().lower()
+                    if name:
+                        mapping[name] = row[idx_refunds].strip().upper() == "TRUE"
+            except ValueError:
+                pass
+        _book_refunds_cache = mapping
 
-    rows = tab.get_all_values()
-    if not rows:
-        return False
-
-    headers = rows[0]
-    try:
-        idx_book = headers.index("Book")
-        idx_refunds = headers.index("Refunds Fee On Void")
-    except ValueError:
-        return False
-
-    for row in rows[1:]:
-        if len(row) <= max(idx_book, idx_refunds):
-            continue
-        if row[idx_book].strip().lower() == book.strip().lower():
-            return row[idx_refunds].strip().upper() == "TRUE"
-
-    return False
+    return _book_refunds_cache.get(book.strip().lower(), False)
 
 
 def write_result(row_idx: int, result: str, bet_id: str, book: str = None,
@@ -170,17 +209,15 @@ def write_result(row_idx: int, result: str, bet_id: str, book: str = None,
 
     try:
         sheet = _get_sheet()
+        row = _read_bet_row(sheet, row_idx)
 
-        # Safety check — verify the BetID in this row matches before writing
-        current_bet_id = sheet.cell(row_idx, bet_id_col).value
-
-        if current_bet_id != bet_id:
+        if not _bet_id_matches(row, bet_id_col, bet_id):
+            current_bet_id = _cell_at(row, bet_id_col)
             print(f"[sheets_writer] ⚠️  Row {row_idx} BetID mismatch. "
                   f"Expected '{bet_id}', found '{current_bet_id}'. Skipping write.")
             return False
 
-        # Check result isn't already filled (safety guard against double writes)
-        current_result = sheet.cell(row_idx, result_col).value
+        current_result = _cell_at(row, result_col)
         if current_result:
             print(f"[sheets_writer] Row {row_idx} (BetID: {bet_id}) already has "
                   f"result '{current_result}'. Skipping.")
@@ -267,15 +304,16 @@ def write_pl_payout(row_idx: int, bet_id: str, pl: float, payout: float | None) 
 
     try:
         sheet = _get_sheet()
+        row = _read_bet_row(sheet, row_idx)
 
-        current_bet_id = sheet.cell(row_idx, bet_id_col).value
-        if current_bet_id != bet_id:
+        if not _bet_id_matches(row, bet_id_col, bet_id):
+            current_bet_id = _cell_at(row, bet_id_col)
             print(f"[sheets_writer] ⚠️  Row {row_idx} BetID mismatch. "
                   f"Expected '{bet_id}', found '{current_bet_id}'. Skipping write.")
             return False
 
-        current_pl = sheet.cell(row_idx, pl_col).value
-        current_payout = sheet.cell(row_idx, payout_col).value
+        current_pl = _cell_at(row, pl_col)
+        current_payout = _cell_at(row, payout_col)
         if current_pl or current_payout:
             print(f"[sheets_writer] Row {row_idx} (BetID: {bet_id}) already has "
                   f"P/L and/or Payout filled in (P/L='{current_pl}', Payout='{current_payout}'). "
@@ -327,14 +365,15 @@ def write_pl_only(row_idx: int, bet_id: str, pl: float) -> bool:
 
     try:
         sheet = _get_sheet()
+        row = _read_bet_row(sheet, row_idx)
 
-        current_bet_id = sheet.cell(row_idx, bet_id_col).value
-        if current_bet_id != bet_id:
+        if not _bet_id_matches(row, bet_id_col, bet_id):
+            current_bet_id = _cell_at(row, bet_id_col)
             print(f"[sheets_writer] ⚠️  Row {row_idx} BetID mismatch. "
                   f"Expected '{bet_id}', found '{current_bet_id}'. Skipping write.")
             return False
 
-        current_pl = sheet.cell(row_idx, pl_col).value
+        current_pl = _cell_at(row, pl_col)
         if current_pl:
             print(f"[sheets_writer] Row {row_idx} (BetID: {bet_id}) already has "
                   f"P/L filled in ('{current_pl}'). Skipping -- never overwrite an existing value.")
@@ -388,14 +427,15 @@ def flag_pl_blocked(row_idx: int, bet_id: str, reason: str) -> bool:
 
     try:
         sheet = _get_sheet()
+        row = _read_bet_row(sheet, row_idx)
 
-        current_bet_id = sheet.cell(row_idx, bet_id_col).value
-        if current_bet_id != bet_id:
+        if not _bet_id_matches(row, bet_id_col, bet_id):
+            current_bet_id = _cell_at(row, bet_id_col)
             print(f"[sheets_writer] ⚠️  Row {row_idx} BetID mismatch. "
                   f"Expected '{bet_id}', found '{current_bet_id}'. Skipping Notes flag.")
             return False
 
-        existing_notes = sheet.cell(row_idx, notes_col).value or ""
+        existing_notes = _cell_at(row, notes_col)
         flag_line = f"{PL_BLOCKED_PREFIX} {reason}"
 
         other_lines = [
@@ -435,12 +475,12 @@ def clear_pl_blocked_flag(row_idx: int, bet_id: str) -> bool:
 
     try:
         sheet = _get_sheet()
+        row = _read_bet_row(sheet, row_idx)
 
-        current_bet_id = sheet.cell(row_idx, bet_id_col).value
-        if current_bet_id != bet_id:
+        if not _bet_id_matches(row, bet_id_col, bet_id):
             return False
 
-        existing_notes = sheet.cell(row_idx, notes_col).value or ""
+        existing_notes = _cell_at(row, notes_col)
         if PL_BLOCKED_PREFIX not in existing_notes:
             return True  # nothing to clear
 
@@ -485,12 +525,12 @@ def flag_payout_caution(row_idx: int, bet_id: str, message: str) -> bool:
 
     try:
         sheet = _get_sheet()
+        row = _read_bet_row(sheet, row_idx)
 
-        current_bet_id = sheet.cell(row_idx, bet_id_col).value
-        if current_bet_id != bet_id:
+        if not _bet_id_matches(row, bet_id_col, bet_id):
             return False
 
-        existing_notes = sheet.cell(row_idx, notes_col).value or ""
+        existing_notes = _cell_at(row, notes_col)
         flag_line = f"{PAYOUT_CAUTION_PREFIX} {message}"
 
         other_lines = [
@@ -514,20 +554,23 @@ def flag_payout_caution(row_idx: int, bet_id: str, message: str) -> bool:
 # ════════════════════════════════════════════════════════════════════
 
 def _get_promotions_sheet():
-    from config import PROMOTIONS_TAB
-    client = _get_client()
-    spreadsheet = client.open_by_key(SHEET_ID)
-    return spreadsheet.worksheet(PROMOTIONS_TAB)
+    global _promo_sheet_cache
+    if _promo_sheet_cache is None:
+        from config import PROMOTIONS_TAB
+        _promo_sheet_cache = _get_spreadsheet().worksheet(PROMOTIONS_TAB)
+    return _promo_sheet_cache
 
 
 def _promo_col_letter_lookup():
     """
     Resolves config.PROMO_COL's header names to actual 1-based column
-    indices against the LIVE sheet, the same on-demand approach
-    get_promo_boost_percentage() already uses, rather than assuming a
-    fixed position -- so this keeps working even if columns are
-    reordered, as long as the header names themselves don't change.
+    indices against the LIVE sheet. Cached for the process lifetime --
+    one Promotions tab read per run instead of one per write.
     """
+    global _promo_col_idx_cache
+    if _promo_col_idx_cache is not None:
+        return _promo_col_idx_cache
+
     from config import PROMO_COL
     from sheets_reader import _resolve_promotions_headers_from_rows
 
@@ -541,6 +584,7 @@ def _promo_col_letter_lookup():
             idx[key] = headers.index(header_name) + 1  # gspread is 1-based
         except ValueError:
             idx[key] = None
+    _promo_col_idx_cache = idx
     return idx
 
 
@@ -579,14 +623,15 @@ def write_promo_qualifying_cost(row_idx: int, promo_id: str, qualifying_cost: fl
 
     try:
         sheet = _get_promotions_sheet()
+        row = _read_promo_row(sheet, row_idx)
 
-        current_promo_id = sheet.cell(row_idx, promo_id_col).value
-        if str(current_promo_id).strip() != str(promo_id).strip():
+        if not _promo_id_matches(row, promo_id_col, promo_id):
+            current_promo_id = _cell_at(row, promo_id_col)
             print(f"[sheets_writer] ⚠️  Promotions row {row_idx} Promo ID mismatch. "
                   f"Expected '{promo_id}', found '{current_promo_id}'. Skipping write.")
             return False
 
-        current_qc = sheet.cell(row_idx, qc_col).value
+        current_qc = _cell_at(row, qc_col)
         if current_qc:
             print(f"[sheets_writer] Promotions row {row_idx} (Promo ID: {promo_id}) "
                   f"already has Qualifying Cost '{current_qc}'. Skipping -- "
@@ -663,15 +708,16 @@ def write_promo_resolution(row_idx: int, promo_id: str, status: str,
 
     try:
         sheet = _get_promotions_sheet()
+        row = _read_promo_row(sheet, row_idx)
 
-        current_promo_id = sheet.cell(row_idx, promo_id_col).value
-        if str(current_promo_id).strip() != str(promo_id).strip():
+        if not _promo_id_matches(row, promo_id_col, promo_id):
+            current_promo_id = _cell_at(row, promo_id_col)
             print(f"[sheets_writer] ⚠️  Promotions row {row_idx} Promo ID mismatch. "
                   f"Expected '{promo_id}', found '{current_promo_id}'. Skipping write.")
             return False
 
-        current_status = sheet.cell(row_idx, status_col).value
-        if str(current_status).strip() != PROMO_STATUS_PENDING:
+        current_status = _cell_at(row, status_col)
+        if current_status != PROMO_STATUS_PENDING:
             print(f"[sheets_writer] Promotions row {row_idx} (Promo ID: {promo_id}) "
                   f"Status is already '{current_status}', not Pending. Skipping -- "
                   f"never overwrite a terminal state.")
