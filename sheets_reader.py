@@ -419,6 +419,7 @@ def get_promo_boost_percentage(promo_id: str) -> float | None:
 
     rows = tab.get_all_values()
     if not rows:
+        print("[sheets_reader] get_promo_boost_percentage: Promotions tab returned zero rows.")
         return None
 
     headers = rows[0]
@@ -426,20 +427,47 @@ def get_promo_boost_percentage(promo_id: str) -> float | None:
         idx_promo_id = headers.index("Promo ID")
         idx_boost_pct = headers.index("Boost %")
     except ValueError:
-        # "Boost %" column doesn't exist yet in the sheet
+        # "Boost %" column doesn't exist yet in the sheet -- print the
+        # ACTUAL header row so a header-name mismatch (typo, extra
+        # space, different casing) is immediately visible in the log
+        # instead of silently looking identical to "promo not found".
+        print(f"[sheets_reader] get_promo_boost_percentage: 'Promo ID' or 'Boost %' "
+              f"header not found in Promotions tab. Actual headers: {headers!r}")
         return None
 
     for row in rows[1:]:
         if len(row) <= max(idx_promo_id, idx_boost_pct):
+            # Google Sheets trims trailing blank cells from get_all_values()
+            # -- a row this short means every cell from here to the end
+            # (including, possibly, Promo ID or Boost % itself) was blank
+            # on the actual sheet. Logged so this doesn't look identical
+            # to "Promo ID just isn't on this row at all".
+            if len(row) > idx_promo_id and row[idx_promo_id].strip() == str(promo_id).strip():
+                print(f"[sheets_reader] get_promo_boost_percentage: row for Promo ID "
+                      f"'{promo_id}' is too short to contain a Boost % cell ({len(row)} "
+                      f"cells, Boost % is column index {idx_boost_pct}) -- the cell is "
+                      f"either genuinely blank or trimmed by the Sheets API. Treating as blank.")
             continue
         if row[idx_promo_id].strip() == str(promo_id).strip():
             raw = row[idx_boost_pct].strip()
             if not raw:
+                print(f"[sheets_reader] get_promo_boost_percentage: found Promo ID "
+                      f"'{promo_id}' but its Boost % cell is blank.")
                 return None
             try:
                 return float(raw.replace("%", "").strip())
             except ValueError:
+                print(f"[sheets_reader] get_promo_boost_percentage: found Promo ID "
+                      f"'{promo_id}' but could not parse Boost % value {raw!r} as a number.")
                 return None
+
+    # Loop completed with no row matching promo_id -- print every Promo ID
+    # actually seen in the sheet, so a string-format mismatch (whitespace,
+    # type coercion, wrong ID entirely) is immediately diagnosable.
+    seen_ids = [row[idx_promo_id] for row in rows[1:] if len(row) > idx_promo_id]
+    print(f"[sheets_reader] get_promo_boost_percentage: Promo ID {promo_id!r} not found "
+          f"in Promotions tab. Promo IDs present: {seen_ids!r}")
+    return None
 
     return None
 
