@@ -1,0 +1,698 @@
+import gspread
+from google.oauth2.service_account import Credentials
+from config import SHEET_ID, SHEET_TAB, RESULT_VOID, get_credentials_info
+
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive.readonly",
+]
+
+
+_client_cache = None
+_sheet_cache = None
+_col_idx_cache = None
+
+
+def _get_client():
+    """
+    Cached for the lifetime of the current process (each scheduled run is
+    a fresh process, so there's no cross-run staleness risk) -- re-running
+    Credentials.from_service_account_info()/gspread.authorize() on every
+    single flag/write call was pure overhead, never actually needed.
+    """
+    global _client_cache
+    if _client_cache is None:
+        creds_info = get_credentials_info()
+        creds = Credentials.from_service_account_info(creds_info, scopes=SCOPES)
+        _client_cache = gspread.authorize(creds)
+    return _client_cache
+
+
+def _get_sheet():
+    """
+    Cached for the lifetime of the current process. Every writer function
+    in this module used to call this on every single invocation, each
+    doing a full client.open_by_key() spreadsheet-metadata fetch (a real
+    network "read request" against the Sheets API quota) -- across a
+    handful of bets needing several flag/write calls each, this was
+    enough to trip 'Quota exceeded for Read requests per minute per user'
+    (confirmed 2026-06-26, a run crashed mid-batch on exactly this).
+    Caching means only the FIRST call in a run pays for the fetch; every
+    later call in the same run reuses the same worksheet object.
+    """
+    global _sheet_cache
+    if _sheet_cache is None:
+        client = _get_client()
+        spreadsheet = client.open_by_key(SHEET_ID)
+        _sheet_cache = spreadsheet.worksheet(SHEET_TAB)
+    return _sheet_cache
+
+
+def _bets_col_letter_lookup():
+    """
+    Resolves config.BET_COL header names to actual 1-based column indices
+    against the LIVE Bets sheet header row, so columns may be reordered.
+
+    Cached for the lifetime of the current process -- the header row
+    can't meaningfully change mid-run, so re-fetching it (a separate
+    network read) on every single flag/write call was the other half of
+    the redundant-API-call problem _get_sheet()'s docstring describes.
+    """
+    global _col_idx_cache
+    if _col_idx_cache is not None:
+        return _col_idx_cache
+
+    from config import BET_COL
+
+    sheet = _get_sheet()
+    headers = sheet.row_values(1)
+
+    idx = {}
+    for key, header_name in BET_COL.items():
+        try:
+            idx[key] = headers.index(header_name) + 1  # gspread is 1-based
+        except ValueError:
+            idx[key] = None
+    _col_idx_cache = idx
+    return idx
+
+
+def _get_book_refunds_fee_on_void(book: str) -> bool:
+    """
+    Looks up whether `book` refunds its per-bet fee when a bet resolves to
+    VOID, from the "Book Settings" tab (Book | Refunds Fee On Void). This
+    tab is the only storage shared between this Python GitHub Actions
+    workflow and the Node Log Bet Wizard (no shared filesystem -- a
+    GitHub Actions runner has no persistent disk between runs), and is
+    written ONLY by the wizard's Step 2
+    prompt, never hand-edited, so the TRUE/FALSE literal is reliable here.
+
+    Returns False (conservative default: do NOT zero the fee) if the book
+    isn't found in the tab at all -- this should be rare in practice since
+    the wizard prompts for every new book before it can be used to log a
+    bet, but a missing entry is safer treated as "don't know, leave it
+    alone" than as "assume refunded."
+    """
+    client = _get_client()
+    sheet = client.open_by_key(SHEET_ID)
+    tab = sheet.worksheet("Book Settings")
+
+    rows = tab.get_all_values()
+    if not rows:
+        return False
+
+    headers = rows[0]
+    try:
+        idx_book = headers.index("Book")
+        idx_refunds = headers.index("Refunds Fee On Void")
+    except ValueError:
+        return False
+
+    for row in rows[1:]:
+        if len(row) <= max(idx_book, idx_refunds):
+            continue
+        if row[idx_book].strip().lower() == book.strip().lower():
+            return row[idx_refunds].strip().upper() == "TRUE"
+
+    return False
+
+
+def write_result(row_idx: int, result: str, bet_id: str, book: str = None,
+                  pl: float = None, payout: float = None) -> bool:
+    """
+    Writes a result value to the Result column for a specific row, and
+    optionally writes P/L and Payout alongside it in the same call.
+
+    Args:
+        row_idx:  1-based row index in the sheet (as returned by sheets_reader)
+        result:   One of "WIN", "LOSS", "PUSH", "VOID", "PENDING"
+        bet_id:   Used only for logging — confirms we're writing to the right row
+        book:     The book this bet was placed with. Required to correctly
+                  zero Fee on a VOID write (see below) -- if omitted, Fee
+                  is left untouched even on VOID, since the policy can't
+                  be checked without knowing which book this is.
+        pl:       P/L value to write (from resolver.calculate_pl_and_payout).
+                  None means "don't touch the P/L column" — used for PENDING,
+                  which isn't a real financial outcome.
+        payout:   Payout value to write. None means "don't touch the Payout
+                  column" (used for PENDING, and also for any real result
+                  where no payout is due — a loss, or a promo-funded void).
+
+    When result is VOID, the Fee column is zeroed in the same batched
+    write, but ONLY if `book` is provided AND that book's "Book Settings"
+    entry says it refunds the fee on void. This is genuinely per-book --
+    confirmed Caesars refunds the fee on void, Polymarket does not.
+    Zeroing it unconditionally for every book was an earlier, incorrect
+    assumption that this revises. The P/L calculation already ignores fee
+    entirely for VOID regardless of what's stored (see
+    resolver.calculate_pl_and_payout) -- this Fee-column correction is a
+    data-integrity step, not a money-correctness one, keeping the Fee
+    column an accurate historical record so future fee reconciliation
+    doesn't sum in phantom, already-refunded charges for books that
+    actually refund them, while correctly leaving the Fee in place for
+    books (like Polymarket) that keep it regardless.
+
+    Returns:
+        True if write succeeded, False if it failed.
+    """
+    idx = _bets_col_letter_lookup()
+    result_col = idx.get("result")
+    payout_col = idx.get("payout")
+    pl_col     = idx.get("pl")
+    fee_col    = idx.get("fee")
+    bet_id_col = idx.get("bet_id")
+
+    if None in (result_col, payout_col, pl_col, fee_col, bet_id_col):
+        print(f"[sheets_writer] ⚠️  Bets tab is missing one or more required "
+              f"columns (BetID, Result, Payout, P/L, Fee) -- cannot write "
+              f"to row {row_idx}.")
+        return False
+
+    try:
+        sheet = _get_sheet()
+
+        # Safety check — verify the BetID in this row matches before writing
+        current_bet_id = sheet.cell(row_idx, bet_id_col).value
+
+        if current_bet_id != bet_id:
+            print(f"[sheets_writer] ⚠️  Row {row_idx} BetID mismatch. "
+                  f"Expected '{bet_id}', found '{current_bet_id}'. Skipping write.")
+            return False
+
+        # Check result isn't already filled (safety guard against double writes)
+        current_result = sheet.cell(row_idx, result_col).value
+        if current_result:
+            print(f"[sheets_writer] Row {row_idx} (BetID: {bet_id}) already has "
+                  f"result '{current_result}'. Skipping.")
+            return False
+
+        zero_fee = False
+        if result == RESULT_VOID and book:
+            zero_fee = _get_book_refunds_fee_on_void(book)
+
+        # Build a batch update so Result, P/L, Payout, and (when applicable)
+        # Fee land together in one API call rather than several separate
+        # writes -- avoids a window where a row could show a Result with
+        # stale/missing P/L if the process were interrupted partway.
+        cell_list = [gspread.Cell(row_idx, result_col, result)]
+        if pl is not None:
+            cell_list.append(gspread.Cell(row_idx, pl_col, pl))
+        if payout is not None:
+            cell_list.append(gspread.Cell(row_idx, payout_col, payout))
+        if zero_fee:
+            cell_list.append(gspread.Cell(row_idx, fee_col, 0))
+
+        sheet.update_cells(cell_list)
+        print(f"[sheets_writer] ✅ Row {row_idx} (BetID: {bet_id}) → {result}"
+              f"{f', P/L={pl}' if pl is not None else ''}"
+              f"{f', Payout={payout}' if payout is not None else ''}"
+              f"{', Fee=0 (voided, book refunds fee)' if zero_fee else ''}")
+        return True
+
+    except gspread.exceptions.APIError as e:
+        print(f"[sheets_writer] ❌ Sheets API error writing to row {row_idx} "
+              f"(BetID: {bet_id}): {e}")
+        return False
+    except Exception as e:
+        print(f"[sheets_writer] ❌ Unexpected error writing to row {row_idx} "
+              f"(BetID: {bet_id}): {e}")
+        return False
+
+
+def write_pl_payout(row_idx: int, bet_id: str, pl: float, payout: float | None) -> bool:
+    """
+    Writes P/L (and optionally Payout) to a row that already has a Result
+    -- used by the P/L/Payout Completion tool to fill in rows where a
+    Result was set without going through write_result() (most commonly:
+    you resolved a NEEDS_REVIEW bet by hand and typed in Result yourself,
+    without computing P/L/Payout).
+
+    Unlike write_result(), this does NOT touch the Result column at all,
+    and does NOT zero Fee on VOID (that already happened, if applicable,
+    whenever Result was originally set -- this function only ever runs
+    on rows where P/L/Payout are currently blank, which by definition
+    means write_result() never ran on this row to do that zeroing; if the
+    fee genuinely needs zeroing for a manually-VOIDed row, that's a
+    separate, manual fix, not something this function should guess at).
+
+    Re-verifies at write time (not just at the read time that selected
+    this row) that BetID matches AND that P/L/Payout are still both
+    blank -- guards against a race where you manually filled in a value
+    between when this row was read and when this write actually happens.
+
+    Args:
+        row_idx:  1-based row index in the sheet
+        bet_id:   Used to confirm we're writing to the right row
+        pl:       P/L value to write. Required (not Optional) -- unlike
+                  write_result(), this function's entire purpose is
+                  writing a real P/L value, so a None here would be a
+                  caller bug, not a legitimate "don't touch" signal.
+        payout:   Payout value to write, or None if no payout is due
+                  (a loss, or a promo-funded void) -- in that case only
+                  P/L is written, Payout is correctly left blank.
+
+    Returns:
+        True if write succeeded, False if it failed or was skipped
+        (BetID mismatch, or P/L/Payout were no longer both blank).
+    """
+    idx = _bets_col_letter_lookup()
+    pl_col     = idx.get("pl")
+    payout_col = idx.get("payout")
+    bet_id_col = idx.get("bet_id")
+
+    if None in (pl_col, payout_col, bet_id_col):
+        print(f"[sheets_writer] ⚠️  Bets tab is missing one or more required "
+              f"columns (BetID, P/L, Payout) -- cannot write to row {row_idx}.")
+        return False
+
+    try:
+        sheet = _get_sheet()
+
+        current_bet_id = sheet.cell(row_idx, bet_id_col).value
+        if current_bet_id != bet_id:
+            print(f"[sheets_writer] ⚠️  Row {row_idx} BetID mismatch. "
+                  f"Expected '{bet_id}', found '{current_bet_id}'. Skipping write.")
+            return False
+
+        current_pl = sheet.cell(row_idx, pl_col).value
+        current_payout = sheet.cell(row_idx, payout_col).value
+        if current_pl or current_payout:
+            print(f"[sheets_writer] Row {row_idx} (BetID: {bet_id}) already has "
+                  f"P/L and/or Payout filled in (P/L='{current_pl}', Payout='{current_payout}'). "
+                  f"Skipping -- never overwrite an existing value.")
+            return False
+
+        cell_list = [gspread.Cell(row_idx, pl_col, pl)]
+        if payout is not None:
+            cell_list.append(gspread.Cell(row_idx, payout_col, payout))
+
+        sheet.update_cells(cell_list)
+        print(f"[sheets_writer] ✅ Row {row_idx} (BetID: {bet_id}) → P/L={pl}"
+              f"{f', Payout={payout}' if payout is not None else ''}")
+        return True
+
+    except gspread.exceptions.APIError as e:
+        print(f"[sheets_writer] ❌ Sheets API error writing to row {row_idx} "
+              f"(BetID: {bet_id}): {e}")
+        return False
+    except Exception as e:
+        print(f"[sheets_writer] ❌ Unexpected error writing to row {row_idx} "
+              f"(BetID: {bet_id}): {e}")
+        return False
+
+
+def write_pl_only(row_idx: int, bet_id: str, pl: float) -> bool:
+    """
+    Writes ONLY the P/L cell -- the counterpart to write_pl_payout() for
+    the manual-Payout-entry flow (config.MANUAL_PAYOUT_REQUIRED_BOOKS,
+    e.g. Kalshi): by the time this runs, Payout is ALREADY filled in (the
+    user typed in the real value from their account, since it can't be
+    reliably computed from odds), so write_pl_payout()'s "both must
+    currently be blank" guard would wrongly refuse this write. This
+    function instead only requires that P/L itself is still blank --
+    Payout being non-blank is the expected, correct state here, not a
+    conflict.
+
+    Re-verifies at write time that BetID matches and P/L is still blank,
+    same race-guard reasoning as write_pl_payout().
+    """
+    idx = _bets_col_letter_lookup()
+    pl_col = idx.get("pl")
+    bet_id_col = idx.get("bet_id")
+
+    if None in (pl_col, bet_id_col):
+        print(f"[sheets_writer] ⚠️  Bets tab is missing P/L or BetID column -- "
+              f"cannot write to row {row_idx}.")
+        return False
+
+    try:
+        sheet = _get_sheet()
+
+        current_bet_id = sheet.cell(row_idx, bet_id_col).value
+        if current_bet_id != bet_id:
+            print(f"[sheets_writer] ⚠️  Row {row_idx} BetID mismatch. "
+                  f"Expected '{bet_id}', found '{current_bet_id}'. Skipping write.")
+            return False
+
+        current_pl = sheet.cell(row_idx, pl_col).value
+        if current_pl:
+            print(f"[sheets_writer] Row {row_idx} (BetID: {bet_id}) already has "
+                  f"P/L filled in ('{current_pl}'). Skipping -- never overwrite an existing value.")
+            return False
+
+        sheet.update_cells([gspread.Cell(row_idx, pl_col, pl)])
+        print(f"[sheets_writer] ✅ Row {row_idx} (BetID: {bet_id}) → P/L={pl} (derived from manually-entered Payout)")
+        return True
+
+    except gspread.exceptions.APIError as e:
+        print(f"[sheets_writer] ❌ Sheets API error writing to row {row_idx} "
+              f"(BetID: {bet_id}): {e}")
+        return False
+    except Exception as e:
+        print(f"[sheets_writer] ❌ Unexpected error writing to row {row_idx} "
+              f"(BetID: {bet_id}): {e}")
+        return False
+
+
+PL_BLOCKED_PREFIX = "⚠ P/L not calculated:"
+
+
+def flag_pl_blocked(row_idx: int, bet_id: str, reason: str) -> bool:
+    """
+    Appends a visible "⚠ P/L not calculated: <reason>" line to the Notes
+    column when complete_pl_payout()/poll_bet() has to skip P/L because
+    something's missing (most commonly a blank Fee -- see
+    poller._safe_calculate_pl_payout). Without this, a skip was only ever
+    printed to the script's own console log, which nobody watches between
+    scheduled runs -- the bet's Result would just look correctly settled
+    with a silently-blank P/L and no visible explanation anywhere on the
+    sheet itself.
+
+    Idempotent: if Notes already contains a PL_BLOCKED_PREFIX line, it's
+    replaced rather than duplicated (the reason can change between runs --
+    e.g. Fee gets filled in but a different field is now the blocker --
+    and re-appending every run would spam Notes on a bet that's skipped
+    repeatedly over weeks).
+
+    Does NOT touch Result, P/L, or Payout -- purely an informational note,
+    safe to call every time a skip happens.
+    """
+    idx = _bets_col_letter_lookup()
+    notes_col = idx.get("notes")
+    bet_id_col = idx.get("bet_id")
+
+    if None in (notes_col, bet_id_col):
+        print(f"[sheets_writer] ⚠️  Bets tab is missing Notes/BetID column -- "
+              f"cannot flag row {row_idx} as P/L-blocked.")
+        return False
+
+    try:
+        sheet = _get_sheet()
+
+        current_bet_id = sheet.cell(row_idx, bet_id_col).value
+        if current_bet_id != bet_id:
+            print(f"[sheets_writer] ⚠️  Row {row_idx} BetID mismatch. "
+                  f"Expected '{bet_id}', found '{current_bet_id}'. Skipping Notes flag.")
+            return False
+
+        existing_notes = sheet.cell(row_idx, notes_col).value or ""
+        flag_line = f"{PL_BLOCKED_PREFIX} {reason}"
+
+        other_lines = [
+            line for line in existing_notes.split("\n")
+            if line.strip() and not line.strip().startswith(PL_BLOCKED_PREFIX)
+        ]
+        new_notes = "\n".join(other_lines + [flag_line])
+
+        sheet.update_cell(row_idx, notes_col, new_notes)
+        print(f"[sheets_writer] 🚩 Row {row_idx} (BetID: {bet_id}) flagged: {flag_line}")
+        return True
+
+    except gspread.exceptions.APIError as e:
+        print(f"[sheets_writer] ❌ Sheets API error flagging row {row_idx} "
+              f"(BetID: {bet_id}): {e}")
+        return False
+    except Exception as e:
+        print(f"[sheets_writer] ❌ Unexpected error flagging row {row_idx} "
+              f"(BetID: {bet_id}): {e}")
+        return False
+
+
+def clear_pl_blocked_flag(row_idx: int, bet_id: str) -> bool:
+    """
+    Removes a previously-written flag_pl_blocked() line from Notes, once
+    P/L has actually been computed successfully -- called right after a
+    successful write_pl_payout() so the flag doesn't sit there forever
+    looking like P/L is still missing after it's been filled in.
+    Leaves any other Notes content untouched.
+    """
+    idx = _bets_col_letter_lookup()
+    notes_col = idx.get("notes")
+    bet_id_col = idx.get("bet_id")
+
+    if None in (notes_col, bet_id_col):
+        return False
+
+    try:
+        sheet = _get_sheet()
+
+        current_bet_id = sheet.cell(row_idx, bet_id_col).value
+        if current_bet_id != bet_id:
+            return False
+
+        existing_notes = sheet.cell(row_idx, notes_col).value or ""
+        if PL_BLOCKED_PREFIX not in existing_notes:
+            return True  # nothing to clear
+
+        other_lines = [
+            line for line in existing_notes.split("\n")
+            if line.strip() and not line.strip().startswith(PL_BLOCKED_PREFIX)
+        ]
+        sheet.update_cell(row_idx, notes_col, "\n".join(other_lines))
+        print(f"[sheets_writer] ✅ Row {row_idx} (BetID: {bet_id}) P/L-blocked flag cleared.")
+        return True
+
+    except Exception as e:
+        print(f"[sheets_writer] ❌ Unexpected error clearing P/L-blocked flag on row "
+              f"{row_idx} (BetID: {bet_id}): {e}")
+        return False
+
+
+PAYOUT_CAUTION_PREFIX = "ℹ Payout check:"
+
+
+def flag_payout_caution(row_idx: int, bet_id: str, message: str) -> bool:
+    """
+    Appends a non-blocking "ℹ Payout check: <message>" line to Notes when
+    a manually-entered Payout (config.MANUAL_PAYOUT_REQUIRED_BOOKS flow,
+    see poller.complete_manual_payout_pl) differs significantly from the
+    rough American-odds estimate -- a typo guard (e.g. fat-fingering
+    $329.50 instead of $32.95), not a correctness claim about the manual
+    entry itself, which is trusted as ground truth from the real account.
+
+    Deliberately does NOT block the P/L write the way flag_pl_blocked()
+    does -- the whole point of manual entry is that the user's number IS
+    the answer; this just surfaces "you might want to double-check this"
+    alongside the now-filled-in P/L, same idempotent-line pattern as
+    flag_pl_blocked() (one line, replaced not duplicated, on repeat runs).
+    """
+    idx = _bets_col_letter_lookup()
+    notes_col = idx.get("notes")
+    bet_id_col = idx.get("bet_id")
+
+    if None in (notes_col, bet_id_col):
+        return False
+
+    try:
+        sheet = _get_sheet()
+
+        current_bet_id = sheet.cell(row_idx, bet_id_col).value
+        if current_bet_id != bet_id:
+            return False
+
+        existing_notes = sheet.cell(row_idx, notes_col).value or ""
+        flag_line = f"{PAYOUT_CAUTION_PREFIX} {message}"
+
+        other_lines = [
+            line for line in existing_notes.split("\n")
+            if line.strip() and not line.strip().startswith(PAYOUT_CAUTION_PREFIX)
+        ]
+        new_notes = "\n".join(other_lines + [flag_line])
+
+        sheet.update_cell(row_idx, notes_col, new_notes)
+        print(f"[sheets_writer] ℹ️  Row {row_idx} (BetID: {bet_id}) caution: {flag_line}")
+        return True
+
+    except Exception as e:
+        print(f"[sheets_writer] ❌ Unexpected error flagging payout caution on row "
+              f"{row_idx} (BetID: {bet_id}): {e}")
+        return False
+
+
+# ════════════════════════════════════════════════════════════════════
+# ── Promotion Updater writes ────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════════
+
+def _get_promotions_sheet():
+    from config import PROMOTIONS_TAB
+    client = _get_client()
+    spreadsheet = client.open_by_key(SHEET_ID)
+    return spreadsheet.worksheet(PROMOTIONS_TAB)
+
+
+def _promo_col_letter_lookup():
+    """
+    Resolves config.PROMO_COL's header names to actual 1-based column
+    indices against the LIVE sheet, the same on-demand approach
+    get_promo_boost_percentage() already uses, rather than assuming a
+    fixed position -- so this keeps working even if columns are
+    reordered, as long as the header names themselves don't change.
+    """
+    from config import PROMO_COL
+    from sheets_reader import _resolve_promotions_headers_from_rows
+
+    sheet = _get_promotions_sheet()
+    rows = sheet.get_all_values()
+    _, headers = _resolve_promotions_headers_from_rows(rows)
+
+    idx = {}
+    for key, header_name in PROMO_COL.items():
+        try:
+            idx[key] = headers.index(header_name) + 1  # gspread is 1-based
+        except ValueError:
+            idx[key] = None
+    return idx
+
+
+def write_promo_qualifying_cost(row_idx: int, promo_id: str, qualifying_cost: float) -> bool:
+    """
+    Backfills the Qualifying Cost cell for a Promotions row, ONLY if it's
+    currently blank -- never overwrites an existing value, same
+    "never overwrite" convention as write_pl_payout().
+
+    This is intentionally a separate, narrower write than
+    write_promo_resolution() below: Qualifying Cost can become knowable
+    (the qualifying window has closed, so the set of linked Qualifying
+    Bet rows is final and stable) well before the REST of the promo can
+    be finalized (reward tokens might still be unclaimed or unsettled).
+    Filling it in as soon as it's stable, rather than waiting for full
+    resolution, means Bonus Net Value figures elsewhere in the project
+    aren't needlessly stuck at $0 for weeks while a slow-resolving token
+    bet is pending.
+
+    Re-verifies BetID-equivalent identity (Promo ID) and blankness at
+    write time, not just read time, guarding against the same kind of
+    race write_pl_payout() guards against.
+
+    Returns:
+        True if written, False if skipped (Promo ID mismatch, cell
+        already had a value, or the column doesn't exist in the sheet).
+    """
+    idx = _promo_col_letter_lookup()
+    promo_id_col = idx.get("promo_id")
+    qc_col = idx.get("qualifying_cost")
+
+    if promo_id_col is None or qc_col is None:
+        print(f"[sheets_writer] ⚠️  Promotions tab is missing 'Promo ID' or "
+              f"'Qualifying Cost' column -- cannot write to row {row_idx}.")
+        return False
+
+    try:
+        sheet = _get_promotions_sheet()
+
+        current_promo_id = sheet.cell(row_idx, promo_id_col).value
+        if str(current_promo_id).strip() != str(promo_id).strip():
+            print(f"[sheets_writer] ⚠️  Promotions row {row_idx} Promo ID mismatch. "
+                  f"Expected '{promo_id}', found '{current_promo_id}'. Skipping write.")
+            return False
+
+        current_qc = sheet.cell(row_idx, qc_col).value
+        if current_qc:
+            print(f"[sheets_writer] Promotions row {row_idx} (Promo ID: {promo_id}) "
+                  f"already has Qualifying Cost '{current_qc}'. Skipping -- "
+                  f"never overwrite an existing value.")
+            return False
+
+        sheet.update_cell(row_idx, qc_col, qualifying_cost)
+        print(f"[sheets_writer] ✅ Promotions row {row_idx} (Promo ID: {promo_id}) "
+              f"→ Qualifying Cost={qualifying_cost}")
+        return True
+
+    except gspread.exceptions.APIError as e:
+        print(f"[sheets_writer] ❌ Sheets API error writing Qualifying Cost to "
+              f"Promotions row {row_idx} (Promo ID: {promo_id}): {e}")
+        return False
+    except Exception as e:
+        print(f"[sheets_writer] ❌ Unexpected error writing Qualifying Cost to "
+              f"Promotions row {row_idx} (Promo ID: {promo_id}): {e}")
+        return False
+
+
+def write_promo_resolution(row_idx: int, promo_id: str, status: str,
+                            realized_date: str, realized_amount: float) -> bool:
+    """
+    Finalizes a Promotions row -- writes Status, Realized Date, and
+    Realized Amount together in one batched call. Used for BOTH terminal
+    outcomes: a real Realized close-out (status="Realized", whatever the
+    computed dollar amount is, including a legitimate $0), and the
+    Unused close-out (status="Unused", realized_amount=0, for a
+    qualifying window that expired with zero linked activity).
+
+    Guards against double-writes the same way write_result() does for
+    Bets rows: re-verifies Promo ID matches AND that Status is still
+    "Pending" at write time, not just at whatever earlier point this
+    row was read -- since this script could in principle run again
+    before a previous run's write is reflected back, or someone could
+    have hand-edited the row in between.
+
+    Args:
+        row_idx:         1-based row index in the Promotions sheet
+        promo_id:        Used to confirm we're writing to the right row
+        status:          config.PROMO_STATUS_REALIZED or
+                          config.PROMO_STATUS_UNUSED -- never PENDING,
+                          since this function's entire purpose is closing
+                          a promo out.
+        realized_date:   ISO date string (YYYY-MM-DD) for when this was
+                          finalized.
+        realized_amount: The final dollar value. 0 is a fully legitimate
+                          value here (a $0 Realized promo is different
+                          from Unused -- see config.PROMO_STATUS_UNUSED's
+                          docstring) and must NOT be treated as "no
+                          value provided."
+
+    Returns:
+        True if written, False if skipped (Promo ID mismatch, Status was
+        no longer "Pending", or a required column is missing).
+    """
+    from config import PROMO_STATUS_PENDING
+
+    idx = _promo_col_letter_lookup()
+    promo_id_col = idx.get("promo_id")
+    status_col = idx.get("status")
+    realized_date_col = idx.get("realized_date")
+    realized_amount_col = idx.get("realized_amount")
+
+    missing = [name for name, col in [
+        ("Promo ID", promo_id_col), ("Status", status_col),
+        ("Realized Date", realized_date_col), ("Realized Amount", realized_amount_col)
+    ] if col is None]
+    if missing:
+        print(f"[sheets_writer] ⚠️  Promotions tab is missing column(s) "
+              f"{missing} -- cannot write resolution to row {row_idx}.")
+        return False
+
+    try:
+        sheet = _get_promotions_sheet()
+
+        current_promo_id = sheet.cell(row_idx, promo_id_col).value
+        if str(current_promo_id).strip() != str(promo_id).strip():
+            print(f"[sheets_writer] ⚠️  Promotions row {row_idx} Promo ID mismatch. "
+                  f"Expected '{promo_id}', found '{current_promo_id}'. Skipping write.")
+            return False
+
+        current_status = sheet.cell(row_idx, status_col).value
+        if str(current_status).strip() != PROMO_STATUS_PENDING:
+            print(f"[sheets_writer] Promotions row {row_idx} (Promo ID: {promo_id}) "
+                  f"Status is already '{current_status}', not Pending. Skipping -- "
+                  f"never overwrite a terminal state.")
+            return False
+
+        cell_list = [
+            gspread.Cell(row_idx, status_col, status),
+            gspread.Cell(row_idx, realized_date_col, realized_date),
+            gspread.Cell(row_idx, realized_amount_col, realized_amount),
+        ]
+        sheet.update_cells(cell_list)
+        print(f"[sheets_writer] ✅ Promotions row {row_idx} (Promo ID: {promo_id}) "
+              f"→ Status={status}, Realized Date={realized_date}, "
+              f"Realized Amount={realized_amount}")
+        return True
+
+    except gspread.exceptions.APIError as e:
+        print(f"[sheets_writer] ❌ Sheets API error writing resolution to "
+              f"Promotions row {row_idx} (Promo ID: {promo_id}): {e}")
+        return False
+    except Exception as e:
+        print(f"[sheets_writer] ❌ Unexpected error writing resolution to "
+              f"Promotions row {row_idx} (Promo ID: {promo_id}): {e}")
+        return False
