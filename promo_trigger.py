@@ -5,7 +5,10 @@ import pytz
 from sheets_reader import load_pending_promotions, load_bets_by_promo_id, get_book_fee_before_odds
 from sheets_writer import write_promo_qualifying_cost, write_promo_resolution
 from promo_resolver import evaluate_promo
-from config import SHEET_TAB, PROMO_TYPE_PROFIT_BOOST, BET_CATEGORY_PROFIT_BOOST
+from config import (
+    SHEET_TAB, PROMO_TYPE_PROFIT_BOOST, PROMO_TYPE_PROFIT_BOOST_DAILY,
+    BET_CATEGORY_PROFIT_BOOST,
+)
 
 CENTRAL = pytz.timezone("America/Chicago")
 
@@ -45,10 +48,10 @@ def main():
         sys.exit(1)
 
     # ── Cache Book Settings' Fee Before Odds flag per book ───────
-    # Only ever needed for Profit Boost (its token value requires
-    # recomputing an unboosted P/L baseline using the SAME fee mechanic
-    # the real bet used) -- looked up lazily, once per book actually
-    # encountered, rather than reading every book up front.
+    # Only ever needed for Profit Boost and Profit Boost (Daily Until Win)
+    # (token value requires recomputing an unboosted P/L baseline using
+    # the SAME fee mechanic the real bet used) -- looked up lazily, once
+    # per book actually encountered, rather than reading every book up front.
     fee_before_odds_cache = {}
 
     def get_fee_before_odds_cached(book: str) -> bool:
@@ -75,7 +78,7 @@ def main():
         print(f"  Linked bets: {len(linked_bets)}")
 
         fee_before_odds_lookup = None
-        if promo_type == PROMO_TYPE_PROFIT_BOOST:
+        if promo_type in (PROMO_TYPE_PROFIT_BOOST, PROMO_TYPE_PROFIT_BOOST_DAILY):
             # Build {book: bool} only for the books actually appearing
             # among this promo's linked Profit Boost reward bets --
             # normally just one (the promo's own book), but built from

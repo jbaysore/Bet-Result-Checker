@@ -154,6 +154,59 @@ def test_profit_boost_token_value_is_boost_delta():
     assert verdict["finalize"]["realized_amount"] == pytest.approx(90.9, abs=0.01)
 
 
+def test_profit_boost_daily_token_value_is_boost_delta():
+    promo = make_promo(
+        promo_type=PROMO_TYPE_PROFIT_BOOST_DAILY,
+        start_date="2026-06-01",
+        boost_pct="100",
+    )
+    bets = [
+        make_bet(
+            bet_id="11",
+            bet_category=BET_CATEGORY_PROFIT_BOOST,
+            date_placed="2026-06-01",
+            result="WIN",
+            stake="100",
+            odds_taken="-110",
+            fee="0",
+            pl="181.8",
+        ),
+    ]
+    verdict = evaluate_promo(
+        promo, bets, date(2026, 6, 15), fee_before_odds_lookup={"draftkings": False}
+    )
+    assert verdict["finalize"]["status"] == PROMO_STATUS_REALIZED
+    assert verdict["finalize"]["realized_amount"] == pytest.approx(90.9, abs=0.01)
+
+
+def test_profit_boost_daily_fee_before_odds_affects_token_value():
+    promo = make_promo(
+        promo_type=PROMO_TYPE_PROFIT_BOOST_DAILY,
+        start_date="2026-06-01",
+        boost_pct="100",
+    )
+    bets = [
+        make_bet(
+            bet_id="11",
+            book="polymarket",
+            bet_category=BET_CATEGORY_PROFIT_BOOST,
+            date_placed="2026-06-01",
+            result="WIN",
+            stake="51.24",
+            odds_taken="-200",
+            fee="1.08",
+            pl="50.16",
+        ),
+    ]
+    verdict_wrong = evaluate_promo(promo, bets, date(2026, 6, 15), fee_before_odds_lookup={})
+    verdict_right = evaluate_promo(
+        promo, bets, date(2026, 6, 15), fee_before_odds_lookup={"polymarket": True}
+    )
+    assert verdict_wrong["finalize"]["realized_amount"] == pytest.approx(25.62, abs=0.01)
+    assert verdict_right["finalize"]["realized_amount"] == pytest.approx(25.08, abs=0.01)
+    assert verdict_wrong["finalize"]["realized_amount"] != verdict_right["finalize"]["realized_amount"]
+
+
 # ── Deposit Bonus ────────────────────────────────────────────────────────
 
 

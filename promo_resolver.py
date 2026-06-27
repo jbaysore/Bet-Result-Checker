@@ -811,8 +811,8 @@ def evaluate_promo(promo: dict, linked_bets: list[dict], today: date,
         forfeiture sub-case (accepted gap, see
         evaluate_insurance_bet_promo's docstring)
 
-    fee_before_odds_lookup is only consulted for Profit Boost; pass {}
-    or None for any other type.
+    fee_before_odds_lookup is only consulted for Profit Boost and Profit
+    Boost (Daily Until Win); pass {} or None for any other type.
 
     An unrecognised Promo Type (shouldn't happen given the wizard's
     fixed PROMO_TYPES list, but Sheets data can always be hand-edited)
