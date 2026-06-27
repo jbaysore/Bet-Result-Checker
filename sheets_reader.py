@@ -376,7 +376,12 @@ def get_book_fee_config(book: str) -> dict:
     whose fee is a percentage of NET PROFIT charged only on a win (never a
     loss, never a parlay -- see resolver.calculate_pl_and_payout's
     fee_pct_on_win_only parameter), rather than a flat dollar amount
-    entered/known at logging time like every other book.
+    entered/known at logging time like every other book. Also covers
+    BetOpenly-style books (Fee Type = "Percent Of Stake On Win",
+    config.BOOK_FEE_TYPE_PERCENT_OF_STAKE_ON_WIN) whose fee is a percentage
+    of STAKE instead of profit, but otherwise the same win-only shape --
+    this function just returns whichever fee_type string is in the sheet,
+    agnostic to which formula it maps to; poller.py decides that.
 
     Deliberately a SEPARATE function from get_book_fee_before_odds() above
     rather than folding this into it or replacing it -- those other call
