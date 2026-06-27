@@ -61,9 +61,6 @@ def _resolve_promotions_headers_from_rows(rows: list[list[str]]) -> tuple[int, l
     blank if a spacer row was inserted above headers during a manual reorder.
     Returns (0-based header row index, header cell list).
     """
-    import json
-    import time
-
     header_row_idx = 0
     for i, row in enumerate(rows[:10]):
         if "Promo ID" in [c.strip() for c in row]:
@@ -71,26 +68,6 @@ def _resolve_promotions_headers_from_rows(rows: list[list[str]]) -> tuple[int, l
             break
 
     headers = rows[header_row_idx] if rows else []
-
-    # #region agent log
-    try:
-        with open("debug-2f3712.log", "a", encoding="utf-8") as f:
-            f.write(json.dumps({
-                "sessionId": "2f3712",
-                "runId": "post-fix",
-                "hypothesisId": "H1",
-                "location": "sheets_reader.py:_resolve_promotions_headers_from_rows",
-                "message": "resolved promotions header row",
-                "data": {
-                    "header_row_idx": header_row_idx,
-                    "sheet_row": header_row_idx + 1,
-                    "headers_preview": [c.strip() for c in headers[:20]],
-                },
-                "timestamp": int(time.time() * 1000),
-            }) + "\n")
-    except OSError:
-        pass
-    # #endregion
 
     if header_row_idx > 0:
         print(f"[sheets_reader] Promotions header row detected on sheet row "
