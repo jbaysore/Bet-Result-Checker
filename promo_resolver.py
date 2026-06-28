@@ -493,7 +493,15 @@ def _evaluate_single_day_insurance(promo: dict, linked_bets: list[dict], today: 
         }
 
     stake = _safe_float(leg1["stake"])
-    cap = float(promo["bonus_amount"]) if promo["bonus_amount"] else None
+    # Bonus Amount is stored as a currency string (e.g. "$100.00") -- strip
+    # the formatting before parsing, same convention used everywhere else
+    # a money field is read (e.g. poller.py's Fee parsing). _safe_float()
+    # alone isn't enough here: it swallows a ValueError into its default
+    # (0.0), which would silently cap every refund at $0 instead of failing
+    # loudly -- confirmed 2026-06-27, this exact bug crashed the run instead
+    # since the raw float() call raised first.
+    bonus_amount_raw = (promo["bonus_amount"] or "").replace("$", "").replace(",", "").strip()
+    cap = float(bonus_amount_raw) if bonus_amount_raw else None
     refund = min(stake, cap) if cap is not None else stake
 
     log.append(f"Leg 1 (BetID {leg1['bet_id']}) lost -- refund of {refund} triggered as "
@@ -572,7 +580,10 @@ def _evaluate_multi_day_insurance(promo: dict, linked_bets: list[dict], today: d
     hand-edited).
     """
     log = []
-    cap = float(promo["bonus_amount"]) if promo.get("bonus_amount") else None
+    # Same currency-string-stripping fix as _evaluate_single_day_insurance --
+    # see that function's comment for why _safe_float() alone isn't safe here.
+    bonus_amount_raw = (promo.get("bonus_amount") or "").replace("$", "").replace(",", "").strip()
+    cap = float(bonus_amount_raw) if bonus_amount_raw else None
 
     insured_bets = sorted(
         [b for b in linked_bets if b["bet_category"] == BET_CATEGORY_INSURANCE_BET],
