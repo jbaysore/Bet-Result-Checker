@@ -10,6 +10,28 @@ SCOPES = [
 _client_cache = None
 _spreadsheet_cache = None
 _tab_cache = {}
+_book_settings_rows_cache = None
+_promotions_rows_cache = None
+
+
+def _get_book_settings_rows() -> list:
+    """Process-lifetime cache for Book Settings tab rows. Safe because each
+    GitHub Actions run is a fresh process and Book Settings doesn't change
+    mid-run."""
+    global _book_settings_rows_cache
+    if _book_settings_rows_cache is None:
+        _book_settings_rows_cache = _get_tab("Book Settings").get_all_values()
+    return _book_settings_rows_cache
+
+
+def _get_promotions_rows() -> list:
+    """Process-lifetime cache for Promotions tab rows. Safe because each
+    GitHub Actions run is a fresh process and Promotions data doesn't change
+    mid-run."""
+    global _promotions_rows_cache
+    if _promotions_rows_cache is None:
+        _promotions_rows_cache = _get_tab("Promotions").get_all_values()
+    return _promotions_rows_cache
 
 
 def _get_client():
@@ -335,11 +357,9 @@ def get_book_fee_before_odds(book: str) -> bool:
     not a minor adjustment, so it's modeled as its own per-book flag
     rather than folded into the existing fee-on-void column.
 
-    Reads fresh every call, same as get_promo_boost_percentage and the
-    fee-on-void check in sheets_writer.py -- no caching, since correctness
-    matters far more than the small latency cost for what should be a
-    rare, deliberate lookup (once per book, effectively, since this tab
-    rarely changes).
+    Uses a process-lifetime cache for Book Settings rows -- safe because
+    each GitHub Actions run is a fresh process and Book Settings doesn't
+    change mid-run.
 
     Returns False (the traditional-sportsbook default) if the book isn't
     found in the tab, or the column doesn't exist yet -- conservative,
@@ -347,9 +367,7 @@ def get_book_fee_before_odds(book: str) -> bool:
     wizard's Step 2 prompt is responsible for ensuring every book actually
     used gets a real answer recorded here before being usable.
     """
-    tab = _get_tab("Book Settings")
-
-    rows = tab.get_all_values()
+    rows = _get_book_settings_rows()
     if not rows:
         return False
 
@@ -397,9 +415,7 @@ def get_book_fee_config(book: str) -> dict:
     required" safety check in poller.py for a book that actually needs a
     manually-entered fee.
     """
-    tab = _get_tab("Book Settings")
-
-    rows = tab.get_all_values()
+    rows = _get_book_settings_rows()
     if not rows:
         return {"fee_type": "", "fee_percent": None}
 
@@ -428,9 +444,9 @@ def get_book_fee_config(book: str) -> dict:
 def get_promo_boost_percentage(promo_id: str) -> float | None:
     """
     Looks up the Boost % for a given Promo ID from the Promotions tab.
-    Reads fresh every call -- no caching -- since this is only ever called
-    for the rare case of resolving a winning Profit Boost bet, where
-    correctness matters more than the small added latency of a live read.
+    Uses a process-lifetime cache for Promotions rows -- safe because each
+    GitHub Actions run is a fresh process and Promotions data doesn't
+    change mid-run.
 
     Reads by header name rather than a fixed column index (unlike
     load_pending_bets' Bets-tab reads), since nothing else in this project
@@ -441,9 +457,7 @@ def get_promo_boost_percentage(promo_id: str) -> float | None:
     Boost"), or None if the promo isn't found or has no Boost % set --
     callers should treat None as "cannot resolve, do not guess."
     """
-    tab = _get_tab("Promotions")
-
-    rows = tab.get_all_values()
+    rows = _get_promotions_rows()
     if not rows:
         print("[sheets_reader] get_promo_boost_percentage: Promotions tab returned zero rows.")
         return None
