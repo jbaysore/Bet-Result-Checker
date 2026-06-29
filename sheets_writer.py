@@ -393,6 +393,77 @@ def write_pl_only(row_idx: int, bet_id: str, pl: float) -> bool:
         return False
 
 
+def write_closing_odds(row_idx: int, bet_id: str,
+                       closing_odds: str,
+                       decimal_closing: float | None,
+                       clv: float | None) -> bool:
+    """
+    Writes ClosingOdds, DecimalClosingOdds, and CLV to a bet row atomically.
+
+    Only writes if ClosingOdds is still blank at write time — guards against
+    a race where the cell was filled between the read pass and this write.
+    DecimalClosingOdds and CLV are optional (written only when not None).
+
+    Args:
+        row_idx:         1-based row index
+        bet_id:          Used to confirm we're writing to the right row
+        closing_odds:    American odds string, e.g. "-110" or "+150"
+        decimal_closing: Decimal conversion, e.g. 1.909
+        clv:             Sheet-format CLV (divided by 100), e.g. 0.0543
+
+    Returns:
+        True if write succeeded, False if skipped or failed.
+    """
+    idx = _bets_col_letter_lookup()
+    closing_col  = idx.get("closing_odds")
+    decimal_col  = idx.get("decimal_closing")
+    clv_col      = idx.get("clv")
+    bet_id_col   = idx.get("bet_id")
+
+    if None in (closing_col, bet_id_col):
+        print(f"[sheets_writer] ⚠️  Bets tab is missing ClosingOdds or BetID column -- "
+              f"cannot write closing odds to row {row_idx}.")
+        return False
+
+    try:
+        sheet = _get_sheet()
+        row = _read_bet_row(sheet, row_idx)
+
+        if not _bet_id_matches(row, bet_id_col, bet_id):
+            current_bet_id = _cell_at(row, bet_id_col)
+            print(f"[sheets_writer] ⚠️  Row {row_idx} BetID mismatch. "
+                  f"Expected '{bet_id}', found '{current_bet_id}'. Skipping closing odds write.")
+            return False
+
+        current_closing = _cell_at(row, closing_col)
+        if current_closing:
+            print(f"[sheets_writer] Row {row_idx} (BetID: {bet_id}) already has "
+                  f"ClosingOdds ('{current_closing}'). Skipping.")
+            return False
+
+        cells = [gspread.Cell(row_idx, closing_col, closing_odds)]
+        if decimal_closing is not None and decimal_col is not None:
+            cells.append(gspread.Cell(row_idx, decimal_col, decimal_closing))
+        if clv is not None and clv_col is not None:
+            cells.append(gspread.Cell(row_idx, clv_col, clv))
+
+        sheet.update_cells(cells)
+        print(f"[sheets_writer] ✅ Row {row_idx} (BetID: {bet_id}) → "
+              f"ClosingOdds={closing_odds}"
+              f"{f', DecimalClosing={decimal_closing}' if decimal_closing is not None else ''}"
+              f"{f', CLV={clv}' if clv is not None else ''}")
+        return True
+
+    except gspread.exceptions.APIError as e:
+        print(f"[sheets_writer] ❌ Sheets API error writing closing odds to row {row_idx} "
+              f"(BetID: {bet_id}): {e}")
+        return False
+    except Exception as e:
+        print(f"[sheets_writer] ❌ Unexpected error writing closing odds to row {row_idx} "
+              f"(BetID: {bet_id}): {e}")
+        return False
+
+
 PL_BLOCKED_PREFIX = "⚠ P/L not calculated:"
 
 

@@ -341,6 +341,74 @@ def load_manual_payout_pending_pl_bets(tab_name: str) -> list[dict]:
     return pending
 
 
+def load_bets_needing_closing_odds(tab_name: str) -> list[dict]:
+    """
+    Reads the Bets tab and returns all rows where:
+      - ClosingOdds column is blank
+      - Bet type is in AUTOMATED_BET_TYPES (Spread, Moneyline, Total, Draw)
+      - Result is not NEEDS_REVIEW (those need human review first)
+
+    Covers both pending and already-resolved bets — a WIN/LOSS bet still
+    needs its closing odds captured for CLV analysis. Game-time filtering
+    (only fetch for games that have already started) is done in trigger.py,
+    same pattern as the pending-bets pass.
+
+    Returns a list of dicts with the fields needed by closing_odds.fetch_closing_odds().
+    """
+    from config import AUTOMATED_BET_TYPES, RESULT_NEEDS_REVIEW
+
+    tab = _get_tab(tab_name)
+    rows = tab.get_all_values()
+
+    if not rows:
+        return []
+
+    headers = rows[0]
+    col = _resolve_bet_col_indices(headers)
+    if col.get("bet_id") is None:
+        raise RuntimeError(
+            "[sheets_reader] Bets tab is missing 'BetID' column -- cannot proceed."
+        )
+
+    if col.get("closing_odds") is None:
+        print("[sheets_reader] ⚠️  Bets tab is missing 'ClosingOdds' column -- "
+              "closing odds pass will find nothing to do.")
+        return []
+
+    bets = []
+    for row_idx, row in enumerate(rows[1:], start=2):
+        row = _pad_bet_row(row, col)
+
+        bet_type = _bet_cell(row, col, "bet_type")
+        if bet_type not in AUTOMATED_BET_TYPES:
+            continue
+
+        result = _bet_cell(row, col, "result")
+        if result == RESULT_NEEDS_REVIEW:
+            continue  # needs human review before closing odds are useful
+
+        closing_odds = _bet_cell(row, col, "closing_odds")
+        if closing_odds:
+            continue  # already captured
+
+        bets.append({
+            "row_idx":    row_idx,
+            "bet_id":     _bet_cell(row, col, "bet_id"),
+            "sport":      _bet_cell(row, col, "sport"),
+            "book":       _bet_cell(row, col, "book"),
+            "team1":      _bet_cell(row, col, "team1"),
+            "team2":      _bet_cell(row, col, "team2"),
+            "game_date":  _bet_cell(row, col, "game_date"),
+            "game_start": _bet_cell(row, col, "game_start"),
+            "selection":  _bet_cell(row, col, "selection"),
+            "bet_type":   bet_type,
+            "odds_taken": _bet_cell(row, col, "odds_taken"),
+            "result":     result,
+        })
+
+    return bets
+
+
 def get_book_fee_before_odds(book: str) -> bool:
     """
     Looks up whether `book` deducts its per-bet fee from the stake BEFORE

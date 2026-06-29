@@ -1,9 +1,14 @@
 import sys
 from datetime import datetime, timezone
 import pytz
-from sheets_reader import load_pending_bets, load_unresolved_pl_bets, load_manual_payout_pending_pl_bets
+from sheets_reader import (
+    load_pending_bets, load_unresolved_pl_bets, load_manual_payout_pending_pl_bets,
+    load_bets_needing_closing_odds,
+)
 from poller import poll_bet, complete_pl_payout, complete_manual_payout_pl, _parse_game_datetime
-from config import SHEET_TAB
+from closing_odds import fetch_closing_odds
+from sheets_writer import write_closing_odds
+from config import SHEET_TAB, RESULT_VOID
 
 CENTRAL = pytz.timezone("America/Chicago")
 
@@ -166,6 +171,75 @@ def main():
     else:
         print("[trigger] ✅ No rows have a manual Payout awaiting P/L.\n")
 
+    # ── Closing Odds: fetch historical closing lines for bets whose ──
+    # ── games have started and ClosingOdds is still blank.         ──
+    print(f"[trigger] Checking for bets needing closing odds...")
+    try:
+        closing_bets = load_bets_needing_closing_odds(SHEET_TAB)
+    except Exception as e:
+        print(f"[trigger] ❌ Failed to load bets needing closing odds: {e}")
+        closing_bets = []
+
+    closing_results = {"captured": 0, "skipped": 0}
+
+    if closing_bets:
+        # Filter to games that have already started — same pattern as the
+        # pending-bets pass above.
+        now_utc = datetime.now(timezone.utc)
+        ready_closing = []
+        for bet in closing_bets:
+            game_dt = _parse_game_datetime(bet["game_date"], bet["game_start"])
+            if game_dt is None:
+                continue
+            if game_dt.astimezone(timezone.utc).replace(tzinfo=timezone.utc) <= now_utc:
+                ready_closing.append(bet)
+
+        if ready_closing:
+            print(f"\n[trigger] {len(ready_closing)} bet(s) need closing odds captured...\n")
+            for i, bet in enumerate(ready_closing, start=1):
+                print(f"─ Closing Odds {i}/{len(ready_closing)} "
+                      f"─────────────────────────────────")
+                print(f"  BetID:  {bet['bet_id']}")
+                print(f"  Game:   {bet['team1']} vs {bet['team2']}")
+                print(f"  Book:   {bet['book']}")
+                try:
+                    # VOID bets never had a real closing line — mirror odds-tool
+                    # backfill (no Odds API call).
+                    if (bet.get("result") or "").strip().upper() == RESULT_VOID:
+                        success = write_closing_odds(
+                            bet["row_idx"], bet["bet_id"], "VOID", None, None,
+                        )
+                        if success:
+                            closing_results["captured"] += 1
+                        else:
+                            closing_results["skipped"] += 1
+                        print()
+                        continue
+
+                    result = fetch_closing_odds(bet)
+                    if result["closing_odds"] is not None:
+                        success = write_closing_odds(
+                            bet["row_idx"], bet["bet_id"],
+                            result["closing_odds"],
+                            result["decimal_closing"],
+                            result["clv"],
+                        )
+                        if success:
+                            closing_results["captured"] += 1
+                        else:
+                            closing_results["skipped"] += 1
+                    else:
+                        closing_results["skipped"] += 1
+                except Exception as e:
+                    print(f"[trigger] ❌ BetID {bet['bet_id']}: unexpected error -- {e}. "
+                          f"Will retry next run.")
+                    closing_results["skipped"] += 1
+                print()
+        else:
+            print("[trigger] ✅ No started games need closing odds this run.\n")
+    else:
+        print("[trigger] ✅ No bets need closing odds.\n")
+
     # ── Summary ──────────────────────────────────────────────────
     print("=" * 60)
     print(f"  Run complete: "
@@ -177,6 +251,8 @@ def main():
     print(f"  P/L Skipped:    {pl_results['skipped']} (missing Fee/Boost %, or already had a value)")
     print(f"  Manual Payout→P/L Completed: {manual_pl_results['completed']} (derived from a manually-entered Payout)")
     print(f"  Manual Payout→P/L Skipped:  {manual_pl_results['skipped']}")
+    print(f"  Closing Odds Captured: {closing_results['captured']}")
+    print(f"  Closing Odds Skipped:  {closing_results['skipped']} (game not in snapshot, or unsupported bet type)")
     print("=" * 60)
 
 

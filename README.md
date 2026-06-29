@@ -7,7 +7,7 @@ Profit Boost percentages, and Polymarket's share-based payout mechanic.
 
 ## What it does, in order
 
-Each run (`trigger.py`) does three passes over the `Bets` tab:
+Each run (`trigger.py`) does four work passes over the `Bets` tab, then prints a summary:
 
 1. **Resolve pending bets** — for every row with a blank `Result` and a game
    that's already started (+ a buffer), check the Odds API once for a final
@@ -23,7 +23,14 @@ Each run (`trigger.py`) does three passes over the `Bets` tab:
    those in using the same calculation as step 1. Never overwrites a row
    that already has a value in either column.
 
-3. Print a summary of what happened in each pass.
+3. **Manual Payout → P/L** — for books in `MANUAL_PAYOUT_REQUIRED_BOOKS`
+   (e.g. Kalshi), derive P/L from a manually-entered `Payout` column.
+
+4. **Capture closing odds** — for started games with a blank `ClosingOdds`
+   column, fetch a historical Odds API snapshot at 1 minute before recorded
+   game start (same approach as the odds-tool Historical Odds Checker).
+   Writes `ClosingOdds`, `DecimalClosingOdds`, and `CLV`. `VOID` results
+   get `ClosingOdds = VOID` with no API call. Skips `NEEDS_REVIEW` rows.
 
 ## Promotion Updater
 
@@ -45,8 +52,8 @@ This runs as a GitHub Actions workflow (`.github/workflows/bet-result-checker.ym
 (manual/API trigger only) and is triggered externally every 30 minutes by
 [cron-job.org](https://cron-job.org), which calls GitHub's REST API to fire
 the workflow. Each triggered run executes **both** `trigger.py` and
-`promo_trigger.py`. This mirrors the same setup used by the separate Closing
-Odds Importer project.
+`promo_trigger.py`. Closing odds are captured inside `trigger.py` (pass 4)
+— you no longer need a separate Betting-Tracker repo for that.
 
 A separate workflow (`.github/workflows/promotion-updater.yml`) exists only
 for manually re-running the promotion updater on its own from the Actions tab.
@@ -69,14 +76,15 @@ parallel every 30 minutes anyway, re-reading the same bets from scratch.
 
 | File | Purpose |
 |---|---|
-| `trigger.py` | Entry point for bet resolution. Loads pending bets, calls `poller.py` for each, then runs the P/L completion pass. |
+| `trigger.py` | Entry point for bet resolution. Loads pending bets, calls `poller.py` for each, runs P/L completion, manual-payout P/L, and closing odds passes. |
+| `closing_odds.py` | Historical Odds API client for closing-line capture (ports odds-tool `backfillClosingOdds.js`). |
 | `promo_trigger.py` | Entry point for promotion finalization. Loads Pending promos, evaluates each via `promo_resolver.py`, writes Qualifying Cost and resolution fields. |
 | `poller.py` | Core logic: `poll_bet()` (resolve one bet), `complete_pl_payout()` (fill in P/L/Payout for an already-resolved bet). |
 | `promo_resolver.py` | Pure decision logic for whether a Pending promo can be finalized and with what Realized Amount. |
 | `tests/` | pytest suite for `resolver.py` and `promo_resolver.py` (run via `pytest`). |
 | `resolver.py` | Pure calculation functions: `resolve()` (WIN/LOSS/PUSH/VOID from a final score), `calculate_pl_and_payout()` (the actual money math, category/fee/boost/Polymarket-aware). |
 | `sheets_reader.py` | All reads from Google Sheets (pending bets, unresolved P/L rows, pending promos, Book Settings' fee policies). |
-| `sheets_writer.py` | All writes to Google Sheets (`write_result`, `write_pl_payout`, promo fields), each with a Promo ID / BetID safety check before writing. |
+| `sheets_writer.py` | All writes to Google Sheets (`write_result`, `write_pl_payout`, `write_closing_odds`, promo fields), each with a Promo ID / BetID safety check before writing. |
 | `config.py` | Constants, column mapping, environment variable loading. |
 | `sources/odds_api.py` | The Odds API client used to fetch final scores. |
 
