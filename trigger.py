@@ -172,7 +172,7 @@ def main():
           f"{datetime.now(CENTRAL).strftime('%m/%d/%Y %I:%M:%S %p CT')}")
     print(f"  Resolved:       {results['resolved']}")
     print(f"  Still pending:  {results['still_pending']} (not final yet -- next scheduled run will check again)")
-    print(f"  Needs Review:   {results['needs_review']} (check ESPN via Stats page, or resolve manually)")
+    print(f"  Needs Review:   {results['needs_review']} (check result via notification bell, or resolve manually)")
     print(f"  P/L Completed:  {pl_results['completed']} (Result existed, P/L/Payout filled in)")
     print(f"  P/L Skipped:    {pl_results['skipped']} (missing Fee/Boost %, or already had a value)")
     print(f"  Manual Payout→P/L Completed: {manual_pl_results['completed']} (derived from a manually-entered Payout)")

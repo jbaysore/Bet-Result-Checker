@@ -41,7 +41,7 @@ def get_game_result(sport_key: str, team1: str, team2: str) -> dict | None:
 
     params = {
         "apiKey":        ODDS_API_KEY,
-        "daysFrom":      3,   # look back up to 3 days for completed games
+        "daysFrom":      7,   # look back up to 7 days for completed games
         "dateFormat":    "iso",
     }
 

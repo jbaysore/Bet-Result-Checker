@@ -15,7 +15,7 @@ Each run (`trigger.py`) does three passes over the `Bets` tab:
    been more than ~6.5 hours since the game started with no final score,
    write `NEEDS_REVIEW` instead of leaving it stuck — this usually means
    the game was cancelled/postponed (Odds API can't see that), and is
-   meant to be resolved via the app's "Check ESPN" flow on the Stats page.
+   meant to be resolved via the app's "Check result" flow in the notification bell.
 
 2. **Complete P/L and Payout** — for any row that has a `Result` but is
    missing both `P/L` and `Payout` (most commonly: a `NEEDS_REVIEW` bet you

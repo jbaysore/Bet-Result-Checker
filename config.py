@@ -147,14 +147,11 @@ RESULT_LOSS  = "LOSS"
 RESULT_PUSH  = "PUSH"
 RESULT_VOID  = "VOID"        # written when a game is cancelled/postponed and never played
 RESULT_NEEDS_REVIEW = "NEEDS_REVIEW"  # written when Odds API never returned a final
-                                       # score well past game time -- distinct from
-                                       # PENDING: this specifically means "check ESPN
-                                       # for cancellation via the Stats page" before
-                                       # falling back to full manual review. See the
-                                       # Log Bet Wizard's Step 3 design notes -- ESPN is
-                                       # only ever consulted here, on this rare path, via
-                                       # a human-confirmed live lookup, never automatically
-                                       # and never via a cached/stored sport->league mapping.
+                                       # score well past game time -- use the odds-tool
+                                       # notification bell (Check result) before full
+                                       # manual review. Odds API scores first; ESPN
+                                       # for cancellations; apply WIN/LOSS/PUSH/VOID
+                                       # from the bell when confirmed.
 RESULT_PENDING = "PENDING"  # written when a NEEDS_REVIEW check finds nothing useful
                              # (or is skipped) -- fully manual review from here
 
@@ -169,7 +166,7 @@ GAME_STATUS_CANCELLED = "cancelled"  # game was cancelled or postponed and will 
 # ── Polling settings ──────────────────────────────────────────────
 POLL_INTERVAL_SECONDS = 1800       # 30 minutes between polls
 POLL_START_BUFFER_SECONDS = 1800   # start polling 30 min after scheduled game start
-POLL_MAX_DURATION_SECONDS = 21600  # give up after 6 hours, write PENDING
+POLL_MAX_DURATION_SECONDS = 21600  # give up after 6 hours, write NEEDS_REVIEW
 
 # ── ESPN API ──────────────────────────────────────────────────────
 ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports"
@@ -177,10 +174,9 @@ ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports"
 # NOTE: this is no longer used by poll_bet() (which is Odds-API-only as of
 # today) or by sheets_reader.py (load_sport_map() was removed -- it read a
 # sport->ESPN-league mapping from the "Name References" sheet that nothing
-# calls anymore). ESPN is still used, but only via server.js's
-# /api/bet-review/check-espn endpoint for the Stats page's manual review
-# flow, which does live league discovery per-request and never reads a
-# stored mapping from this sheet or anywhere else.
+# calls anymore). ESPN is still used via odds-tool's
+# /api/bet-review/check-status endpoint (notification bell), which tries
+# Odds API scores first and falls back to ESPN for cancellations.
 
 
 # ════════════════════════════════════════════════════════════════════
