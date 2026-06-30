@@ -5,6 +5,8 @@ from config import ODDS_API_KEY, ODDS_API_BASE
 # once per pending bet; on a busy NFL Sunday that's many identical API calls
 # without this cache.
 _scores_cache: dict[str, list] = {}
+_active_sports_cache: set[str] | None = None
+_no_scores_feed: set[str] = set()
 
 
 def get_game_result(sport_key: str, team1: str, team2: str) -> dict | None:
@@ -88,10 +90,55 @@ def get_game_result(sport_key: str, team1: str, team2: str) -> dict | None:
     return None
 
 
+def fetch_active_sport_keys() -> set[str] | None:
+    """
+    Returns the set of in-season sport keys from GET /sports (free — no quota).
+    Returns None if the lookup fails so callers can fall back to a direct request.
+    """
+    global _active_sports_cache
+    if _active_sports_cache is not None:
+        return _active_sports_cache
+
+    url = f"{ODDS_API_BASE}/sports"
+    try:
+        response = requests.get(url, params={"apiKey": ODDS_API_KEY}, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+    except (requests.RequestException, ValueError) as e:
+        print(f"[odds_api] Could not fetch active sports list: {e}")
+        return None
+
+    if not isinstance(data, list):
+        print("[odds_api] Unexpected /sports response format.")
+        return None
+
+    _active_sports_cache = {
+        s["key"] for s in data
+        if isinstance(s, dict) and s.get("key") and s.get("active")
+    }
+    return _active_sports_cache
+
+
+def sport_has_odds_feed(sport_key: str) -> bool:
+    """True when sport_key is currently in-season on The Odds API."""
+    active = fetch_active_sport_keys()
+    if active is None:
+        return True  # unknown — let the paid endpoint decide
+    return sport_key in active
+
+
 def _fetch_scores(sport_key: str) -> list | None:
     """Fetches and caches the full /scores payload for a sport (one credit per sport per run)."""
     if sport_key in _scores_cache:
         return _scores_cache[sport_key]
+    if sport_key in _no_scores_feed:
+        return None
+
+    if not sport_has_odds_feed(sport_key):
+        print(f"[odds_api] Sport '{sport_key}' is not currently active on The Odds API "
+              f"(no /scores feed). Use the notification bell to check ESPN manually.")
+        _no_scores_feed.add(sport_key)
+        return None
 
     url = f"{ODDS_API_BASE}/sports/{sport_key}/scores"
 

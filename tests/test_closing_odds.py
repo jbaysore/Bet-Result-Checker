@@ -1,5 +1,7 @@
 """Unit tests for closing_odds.py — no API or Sheets credentials required."""
 
+from unittest.mock import patch
+
 from closing_odds import (
     parse_selection,
     find_event,
@@ -9,7 +11,10 @@ from closing_odds import (
     calc_clv,
     clv_for_sheet,
     region_for_book_key,
+    fetch_closing_odds,
+    is_exchange_book,
 )
+from config import CLOSING_ODDS_MANUAL_REQUIRED, CLOSING_ODDS_SPORT_NOT_ON_API
 
 
 def test_region_for_book_key():
@@ -67,3 +72,43 @@ def test_clv_math():
     clv_pct = calc_clv(dec_taken, dec_close)
     assert clv_pct is not None
     assert clv_for_sheet(clv_pct) == round(clv_pct / 100, 6)
+
+
+def test_is_exchange_book():
+    assert is_exchange_book("kalshi")
+    assert not is_exchange_book("fanatics")
+
+
+@patch("closing_odds.sport_has_odds_feed", return_value=True)
+def test_fetch_closing_odds_skips_kalshi_without_api(_mock_feed):
+    result = fetch_closing_odds({
+        "bet_id": "103",
+        "sport": "soccer_fifa_world_cup",
+        "book": "kalshi",
+        "team1": "Argentina",
+        "team2": "Jordan",
+        "game_date": "6/15/2026",
+        "game_start": "2:00 PM",
+        "bet_type": "Moneyline",
+        "selection": "Argentina",
+        "odds_taken": "-150",
+    })
+    assert result["error"] == CLOSING_ODDS_MANUAL_REQUIRED
+    assert result["closing_odds"] is None
+
+
+@patch("closing_odds.sport_has_odds_feed", return_value=False)
+def test_fetch_closing_odds_skips_inactive_sport(_mock_feed):
+    result = fetch_closing_odds({
+        "bet_id": "99",
+        "sport": "soccer_fifa_world_cup",
+        "book": "fanatics",
+        "team1": "Argentina",
+        "team2": "Jordan",
+        "game_date": "6/15/2026",
+        "game_start": "2:00 PM",
+        "bet_type": "Moneyline",
+        "selection": "Argentina",
+        "odds_taken": "-150",
+    })
+    assert result["error"] == CLOSING_ODDS_SPORT_NOT_ON_API

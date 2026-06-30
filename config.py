@@ -162,6 +162,12 @@ RESULT_PENDING = "PENDING"  # written when a NEEDS_REVIEW check finds nothing us
 CLOSING_ODDS_GAME_NOT_FOUND      = "GAME NOT FOUND"
 CLOSING_ODDS_BOOK_NOT_FOUND      = "BOOK NOT FOUND"
 CLOSING_ODDS_SELECTION_NOT_FOUND = "SELECTION NOT FOUND"
+# Exchange / direct-feed books (Kalshi, etc.) are not on The Odds API historical
+# endpoint — closing line must be entered manually from the book's own UI.
+CLOSING_ODDS_MANUAL_REQUIRED     = "MANUAL ENTRY"
+# Sport key on the bet row is not in The Odds API's current in-season list
+# (e.g. soccer_fifa_world_cup between tournaments).
+CLOSING_ODDS_SPORT_NOT_ON_API    = "SPORT NOT ON API"
 
 # ── Game status values ────────────────────────────────────────────
 # Contract that any upstream game-result source (ESPN, Odds API, etc.)

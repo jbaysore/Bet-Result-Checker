@@ -17,9 +17,12 @@ from datetime import timedelta, timezone
 from config import (
     ODDS_API_KEY, ODDS_API_BASE,
     BET_TYPE_MONEYLINE, BET_TYPE_SPREAD, BET_TYPE_TOTAL, BET_TYPE_DRAW,
-    CLOSING_ODDS_GAME_NOT_FOUND, CLOSING_ODDS_BOOK_NOT_FOUND, CLOSING_ODDS_SELECTION_NOT_FOUND,
+    CLOSING_ODDS_GAME_NOT_FOUND, CLOSING_ODDS_BOOK_NOT_FOUND,
+    CLOSING_ODDS_SELECTION_NOT_FOUND, CLOSING_ODDS_MANUAL_REQUIRED,
+    CLOSING_ODDS_SPORT_NOT_ON_API,
 )
 from poller import _parse_game_datetime
+from sources.odds_api import sport_has_odds_feed
 
 # One historical snapshot per (sport, timestamp, book, market) per process —
 # multiple bets on the same game/book reuse the same API response.
@@ -36,6 +39,11 @@ _US2_KEYS = {
     "hardrockbet", "hardrockbet_az", "hardrockbet_fl",
     "hardrockbet_oh", "rebet",
 }
+
+
+def is_exchange_book(book_key: str) -> bool:
+    """Exchange / prediction-market books are not on The Odds API historical feed."""
+    return (book_key or "").strip().lower() in _EXCHANGE_KEYS
 
 
 def region_for_book_key(book_key: str) -> str:
@@ -207,7 +215,8 @@ def _fetch_historical_snapshot(sport: str, date_iso: str, book_key: str,
                 print("[closing_odds] Invalid API key.")
                 return None
             if resp.status_code == 422:
-                print(f"[closing_odds] Sport key '{sport}' not recognised.")
+                print(f"[closing_odds] Sport key '{sport}' not active or not recognised "
+                      f"by the historical endpoint.")
                 return None
             if resp.status_code == 429:
                 print("[closing_odds] Odds API quota exceeded.")
@@ -266,6 +275,19 @@ def fetch_closing_odds(bet: dict) -> dict:
 
     def _permanent(code):
         return {"closing_odds": None, "decimal_closing": None, "clv": None, "error": code}
+
+    # Exchange books (Kalshi, etc.) price via their own API in odds-tool — never
+    # present on The Odds API historical endpoint. Skip the paid call entirely.
+    if is_exchange_book(book):
+        print(f"[closing_odds] BetID {bet_id}: book '{book}' is not on The Odds API "
+              f"historical feed — enter closing odds manually from {book}.")
+        return _permanent(CLOSING_ODDS_MANUAL_REQUIRED)
+
+    if not sport_has_odds_feed(sport):
+        print(f"[closing_odds] BetID {bet_id}: sport '{sport}' is not currently "
+              f"active on The Odds API — enter closing odds manually or clear "
+              f"the cell when the sport is back in season.")
+        return _permanent(CLOSING_ODDS_SPORT_NOT_ON_API)
 
     # Parse selection into market + lookup fields
     sel = parse_selection(bet_type, selection)
