@@ -13,7 +13,11 @@ from config import (
     MANUAL_PAYOUT_REQUIRED_BOOKS,
 )
 from sources import odds_api
-from resolver import resolve, calculate_pl_and_payout, derive_pl_from_payout, _american_odds_profit
+from resolver import (
+    resolve, resolve_parlay, calculate_pl_and_payout, derive_pl_from_payout,
+    _american_odds_profit,
+)
+from parlay import decimal_to_american
 from sheets_writer import (
     write_result, write_pl_payout, write_pl_only,
     flag_pl_blocked, clear_pl_blocked_flag, flag_payout_caution,
@@ -96,6 +100,12 @@ def poll_bet(bet: dict) -> bool:
               f"Skipping this run -- next triggered run will check again.")
         return "not_yet_time"
 
+    # Parlays settle from their legs, not a single game lookup. The gating
+    # above already used the parlay row's Game Date/Start (set to the LATEST
+    # leg), so by here every leg's game should have started.
+    if bet.get("is_parlay"):
+        return _poll_parlay(bet, now_utc, give_up_at)
+
     print(f"[poller] BetID {bet_id}: checking now — {now_utc.strftime('%H:%M:%S UTC')}")
 
     game = _fetch_result(bet, sport)
@@ -131,6 +141,74 @@ def poll_bet(bet: dict) -> bool:
 
     print(f"[poller] BetID {bet_id}: not final yet. Next triggered run will check again.")
     return "still_pending"
+
+
+def _poll_parlay(bet: dict, now_utc, give_up_at) -> str:
+    """
+    Settles a parlay by checking every leg's game and combining the results.
+
+    A parlay can only be WON once every leg's game is final, so this waits
+    until all legs report a final score before settling. (A LOSS the moment
+    one leg loses is a valid future optimization, but v1 keeps the simpler,
+    always-correct "wait for all legs" rule.)
+
+    Returns the same status strings as poll_bet():
+      "resolved"      -- combined result written this call
+      "still_pending" -- at least one leg has no final score yet, still
+                         within the give-up window
+      "needs_review"  -- past the give-up threshold with a leg still missing
+                         (a leg game that never reported, or a cancellation
+                         the Odds API can't see) -- handed to manual review
+      "error"         -- a leg selection couldn't be resolved
+    """
+    bet_id  = bet["bet_id"]
+    row_idx = bet["row_idx"]
+    legs    = bet.get("legs") or []
+
+    print(f"[poller] BetID {bet_id}: parlay with {len(legs)} legs — "
+          f"checking each leg now ({now_utc.strftime('%H:%M:%S UTC')})")
+
+    leg_games = []
+    for i, leg in enumerate(legs, start=1):
+        game = odds_api.get_game_result(leg["sport"], leg["team1"], leg["team2"])
+        if game is None:
+            print(f"[poller]   leg {i}/{len(legs)} ({leg['team1']} vs {leg['team2']}): "
+                  f"no final score yet.")
+        leg_games.append(game)
+
+    if any(g is None for g in leg_games):
+        if now_utc >= give_up_at:
+            print(f"[poller] ⚠️  BetID {bet_id}: past the give-up threshold with at "
+                  f"least one parlay leg still unresolved. Writing NEEDS_REVIEW.")
+            write_result(row_idx, RESULT_NEEDS_REVIEW, bet_id)
+            return "needs_review"
+        print(f"[poller] BetID {bet_id}: not all parlay legs final yet. "
+              f"Next triggered run will check again.")
+        return "still_pending"
+
+    # Every leg has a final game — combine into one parlay outcome.
+    try:
+        combined_result, effective_decimal = resolve_parlay(legs, leg_games)
+    except ValueError as e:
+        print(f"[poller] ❌ BetID {bet_id}: parlay resolver error — {e}")
+        return "error"
+
+    # On a WIN, settle at the EFFECTIVE combined odds (push/void legs dropped
+    # out and re-priced the parlay) rather than the stored OddsTaken, which
+    # assumed every leg counted. For LOSS/PUSH/VOID the odds don't affect P/L,
+    # so the stored value is left as-is.
+    settle_bet = dict(bet)
+    if combined_result == RESULT_WIN and effective_decimal:
+        eff_american = decimal_to_american(effective_decimal)
+        if eff_american is not None:
+            settle_bet["odds_taken"] = str(eff_american)
+
+    pl, payout = _safe_calculate_pl_payout(settle_bet, combined_result)
+    success = write_result(row_idx, combined_result, bet_id,
+                           book=bet.get("book"), pl=pl, payout=payout)
+    if success and pl is not None:
+        clear_pl_blocked_flag(row_idx, bet_id)
+    return "resolved" if success else "error"
 
 
 def _fetch_result(bet: dict, sport: str) -> dict | None:

@@ -69,6 +69,13 @@ BET_COL = {
     "payout":          "Payout",
     "pl":              "P/L",
     "notes":           "Notes",
+    # JSON array of leg dicts for a Parlay row (written by the odds-tool Log
+    # Bet Wizard). Blank for every single-selection bet. Each leg:
+    #   {sport, book, team1, team2, gameDate, gameStart, betType, selection, oddsTaken}
+    # The parlay row's OddsTaken is the combined American price; its Game
+    # Date/Start are the LATEST leg, so the poller waits for every leg to
+    # finish before settling. See parlay.py for parse/combine logic.
+    "legs":            "Legs",
 }
 
 # ── Bet types ─────────────────────────────────────────────────────
@@ -80,8 +87,16 @@ BET_TYPE_DRAW       = "Draw"
 BET_TYPE_PARLAY     = "Parlay"
 BET_TYPE_PROP       = "Prop"
 
-# Bet types this tool will resolve automatically
+# Bet types this tool will resolve automatically as a SINGLE selection.
+# Parlay is handled separately (parlay.py) -- each of its legs must itself
+# be one of these for the parlay to auto-resolve; a parlay containing a
+# Prop or manually-tracked leg falls back to manual Result entry.
 AUTOMATED_BET_TYPES = {BET_TYPE_SPREAD, BET_TYPE_MONEYLINE, BET_TYPE_TOTAL, BET_TYPE_DRAW}
+
+# A leg of a parlay can only be auto-resolved / auto-priced if its own bet
+# type is in this set (same as AUTOMATED_BET_TYPES today, named separately
+# so the parlay path reads clearly and can diverge later if needed).
+AUTOMATED_LEG_BET_TYPES = AUTOMATED_BET_TYPES
 
 # ── Book Settings "Fee Type" values ────────────────────────────────
 # Default (blank/anything else) means "flat dollar fee, entered manually

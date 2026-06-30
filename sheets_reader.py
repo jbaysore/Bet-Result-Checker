@@ -155,7 +155,8 @@ def load_pending_bets(tab_name: str) -> list[dict]:
 
     Returns a list of dicts keyed by column name.
     """
-    from config import AUTOMATED_BET_TYPES
+    from config import AUTOMATED_BET_TYPES, BET_TYPE_PARLAY
+    from parlay import parse_legs, all_legs_automatable
 
     rows = _get_bets_rows(tab_name)
 
@@ -180,8 +181,19 @@ def load_pending_bets(tab_name: str) -> list[dict]:
         if result:
             continue  # already resolved
 
-        if bet_type not in AUTOMATED_BET_TYPES:
-            continue  # parlay, prop — skip
+        is_parlay = False
+        legs = []
+        if bet_type == BET_TYPE_PARLAY:
+            # A parlay auto-resolves only if EVERY leg is an automatable type
+            # with a lookup-able game. Otherwise leave it for manual Result
+            # entry (calculate_pl_and_payout still settles it from the stored
+            # combined odds once a human types the Result).
+            legs = parse_legs(_bet_cell(row, col, "legs"))
+            if not all_legs_automatable(legs):
+                continue
+            is_parlay = True
+        elif bet_type not in AUTOMATED_BET_TYPES:
+            continue  # prop, or a parlay with a non-automatable leg — skip
 
         pending.append({
             "row_idx":     row_idx,
@@ -199,6 +211,8 @@ def load_pending_bets(tab_name: str) -> list[dict]:
             "fee":         _bet_cell(row, col, "fee"),
             "bet_category": _bet_cell(row, col, "bet_category"),
             "promo_id":    _bet_cell(row, col, "promo_id"),
+            "is_parlay":   is_parlay,
+            "legs":        legs,
         })
 
     return pending
@@ -362,7 +376,8 @@ def load_bets_needing_closing_odds(tab_name: str) -> list[dict]:
 
     Returns a list of dicts with the fields needed by closing_odds.fetch_closing_odds().
     """
-    from config import AUTOMATED_BET_TYPES, RESULT_NEEDS_REVIEW
+    from config import AUTOMATED_BET_TYPES, RESULT_NEEDS_REVIEW, BET_TYPE_PARLAY
+    from parlay import parse_legs, all_legs_automatable
 
     rows = _get_bets_rows(tab_name)
 
@@ -386,7 +401,18 @@ def load_bets_needing_closing_odds(tab_name: str) -> list[dict]:
         row = _pad_bet_row(row, col)
 
         bet_type = _bet_cell(row, col, "bet_type")
-        if bet_type not in AUTOMATED_BET_TYPES:
+
+        is_parlay = False
+        legs = []
+        if bet_type == BET_TYPE_PARLAY:
+            # Combined closing line = product of each leg's closing line, so
+            # every leg must be auto-priceable. A parlay with a Prop/manual
+            # leg gets no CLV (left blank), same as a single Prop bet.
+            legs = parse_legs(_bet_cell(row, col, "legs"))
+            if not all_legs_automatable(legs):
+                continue
+            is_parlay = True
+        elif bet_type not in AUTOMATED_BET_TYPES:
             continue
 
         result = _bet_cell(row, col, "result")
@@ -410,6 +436,8 @@ def load_bets_needing_closing_odds(tab_name: str) -> list[dict]:
             "bet_type":   bet_type,
             "odds_taken": _bet_cell(row, col, "odds_taken"),
             "result":     result,
+            "is_parlay":  is_parlay,
+            "legs":       legs,
         })
 
     return bets

@@ -70,6 +70,36 @@ def resolve(bet: dict, game: dict) -> str:
         raise ValueError(f"[resolver] Unrecognised bet type: '{bet_type}'")
 
 
+def resolve_parlay(legs: list[dict], leg_games: list[dict]) -> tuple[str, float | None]:
+    """
+    Resolves a whole parlay from its legs and each leg's final game.
+
+    Each leg in `legs` is a normalized dict (see parlay.parse_legs) with the
+    same keys resolve() needs (bet_type, selection, team1, team2, sport) plus
+    odds_taken. `leg_games` is the parallel list of final game dicts (one per
+    leg, same order) as returned by odds_api.get_game_result() -- the caller
+    (poller) is responsible for having fetched a FINAL game for every leg
+    before calling this; a None entry here is a caller bug.
+
+    Returns (combined_result, effective_decimal) from
+    parlay.combine_parlay_results -- WIN/LOSS/PUSH/VOID plus the effective
+    decimal price to settle a win at (after dropping any push/void legs).
+
+    Raises ValueError if a leg's selection can't be parsed (propagated from
+    resolve()), so the poller can treat the parlay the same way it treats a
+    single-bet resolver error.
+    """
+    from parlay import american_to_decimal, combine_parlay_results
+
+    leg_outcomes = []
+    for leg, game in zip(legs, leg_games):
+        leg_result = resolve(leg, game)
+        leg_decimal = american_to_decimal(leg["odds_taken"])
+        leg_outcomes.append((leg_result, leg_decimal))
+
+    return combine_parlay_results(leg_outcomes)
+
+
 def calculate_pl_and_payout(result: str, stake: float, odds_taken: float,
                             bet_category: str, boost_pct: float = None,
                             fee: float = 0.0, fee_before_odds: bool = False,

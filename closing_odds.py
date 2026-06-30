@@ -244,98 +244,93 @@ def _fetch_historical_snapshot(sport: str, date_iso: str, book_key: str,
     return None
 
 
-# ── Main entry point ──────────────────────────────────────────────────────────
+# ── Per-bet/leg closing price lookup ──────────────────────────────────────────
 
-def fetch_closing_odds(bet: dict) -> dict:
+def _fetch_closing_price(bet: dict, label: str) -> dict:
     """
-    Fetches historical closing odds for a single bet.
+    Core historical-snapshot lookup for ONE selection (a single bet, or one
+    leg of a parlay). Returns the closing American price, or a transient /
+    permanent failure signal.
 
     Args:
-        bet: A dict from sheets_reader.load_bets_needing_closing_odds(),
-             with keys: sport, book, team1, team2, game_date, game_start,
-             bet_type, selection, odds_taken.
+        bet:   A dict with keys sport, book, team1, team2, game_date,
+               game_start, bet_type, selection. (odds_taken is NOT used here;
+               CLV is computed by the caller, which knows whether it's pricing
+               a single bet or combining legs.)
+        label: A short identifier for log lines, e.g. "BetID 42" or
+               "BetID 42 leg 2/3".
 
-    Returns a dict with:
-        closing_odds:     American odds string (e.g. "-110") or None on failure
-        decimal_closing:  Decimal float or None
-        clv:              Sheet-format CLV (e.g. 0.0543) or None
+    Returns a dict:
+        {"price": int}                     -> success (American odds int)
+        {"price": None, "error": None}     -> TRANSIENT (API/parse issue) — retry
+        {"price": None, "error": <CODE>}   -> PERMANENT (not found) — needs review
     """
-    bet_id = bet.get("bet_id", "?")
     sport = (bet.get("sport") or "").strip()
     book = (bet.get("book") or "").strip().lower()
     team1 = bet.get("team1", "")
     team2 = bet.get("team2", "")
     bet_type = bet.get("bet_type", "")
     selection = bet.get("selection", "")
-    odds_taken_raw = bet.get("odds_taken", "")
 
-    # error=None → transient failure, don't write to sheet, retry next run
-    # error=<code> → permanent failure, write code to ClosingOdds for human review
-    _transient = {"closing_odds": None, "decimal_closing": None, "clv": None, "error": None}
+    _transient = {"price": None, "error": None}
 
     def _permanent(code):
-        return {"closing_odds": None, "decimal_closing": None, "clv": None, "error": code}
+        return {"price": None, "error": code}
 
     # Exchange books (Kalshi, etc.) price via their own API in odds-tool — never
     # present on The Odds API historical endpoint. Skip the paid call entirely.
     if is_exchange_book(book):
-        print(f"[closing_odds] BetID {bet_id}: book '{book}' is not on The Odds API "
-              f"historical feed — enter closing odds manually from {book}.")
+        print(f"[closing_odds] {label}: book '{book}' is not on The Odds API "
+              f"historical feed — manual entry required.")
         return _permanent(CLOSING_ODDS_MANUAL_REQUIRED)
 
     if not sport_has_odds_feed(sport):
-        print(f"[closing_odds] BetID {bet_id}: sport '{sport}' is not currently "
-              f"active on The Odds API — enter closing odds manually or clear "
-              f"the cell when the sport is back in season.")
+        print(f"[closing_odds] {label}: sport '{sport}' is not currently "
+              f"active on The Odds API — manual entry required.")
         return _permanent(CLOSING_ODDS_SPORT_NOT_ON_API)
 
-    # Parse selection into market + lookup fields
     sel = parse_selection(bet_type, selection)
     if sel is None:
-        print(f"[closing_odds] BetID {bet_id}: unsupported bet type '{bet_type}' — skipping.")
+        print(f"[closing_odds] {label}: unsupported bet type '{bet_type}' — skipping.")
         return _transient
 
-    # Convert game start to UTC, subtract 1 minute to get closing snapshot time
     game_dt = _parse_game_datetime(bet.get("game_date", ""), bet.get("game_start", ""))
     if game_dt is None:
-        print(f"[closing_odds] BetID {bet_id}: could not parse game datetime — skipping.")
+        print(f"[closing_odds] {label}: could not parse game datetime — skipping.")
         return _transient
 
     snapshot_dt = game_dt.astimezone(timezone.utc) - timedelta(minutes=1)
     date_iso = snapshot_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    print(f"[closing_odds] BetID {bet_id}: fetching {sel['market']} snapshot "
+    print(f"[closing_odds] {label}: fetching {sel['market']} snapshot "
           f"for {team1} vs {team2} at {date_iso} (book: {book})")
 
     events = _fetch_historical_snapshot(sport, date_iso, book, sel["market"])
     if events is None:
-        # API error (timeout, quota, network) — transient, retry next run
-        return _transient
+        return _transient  # API error (timeout, quota, network) — retry next run
 
     event = find_event(events, team1, team2)
     if event is None:
-        print(f"[closing_odds] BetID {bet_id}: game not found in snapshot "
+        print(f"[closing_odds] {label}: game not found in snapshot "
               f"({team1} vs {team2}, {sport}).")
         return _permanent(CLOSING_ODDS_GAME_NOT_FOUND)
 
-    # Find the requested bookmaker in the event
     bk = next(
         (b for b in event.get("bookmakers", [])
          if b.get("key", "").lower() == book),
         None,
     )
     if bk is None:
-        print(f"[closing_odds] BetID {bet_id}: book '{book}' not in snapshot.")
+        print(f"[closing_odds] {label}: book '{book}' not in snapshot.")
         return _permanent(CLOSING_ODDS_BOOK_NOT_FOUND)
 
-    # Find the market
     mkt = next(
         (m for m in bk.get("markets", [])
          if m.get("key") == sel["market"]),
         None,
     )
     if mkt is None:
-        print(f"[closing_odds] BetID {bet_id}: market '{sel['market']}' not in snapshot.")
+        print(f"[closing_odds] {label}: market '{sel['market']}' not in snapshot.")
         return _permanent(CLOSING_ODDS_SELECTION_NOT_FOUND)
 
     price = extract_odds(
@@ -347,26 +342,118 @@ def fetch_closing_odds(bet: dict) -> dict:
     )
 
     if price is None:
-        print(f"[closing_odds] BetID {bet_id}: could not extract price for "
+        print(f"[closing_odds] {label}: could not extract price for "
               f"selection '{selection}' from snapshot.")
         return _permanent(CLOSING_ODDS_SELECTION_NOT_FOUND)
 
+    return {"price": price, "error": None}
+
+
+def _clv_from_decimals(decimal_taken: float | None, decimal_closing: float | None) -> float | None:
+    """Sheet-format CLV from a taken/closing decimal pair, or None if unknown."""
+    clv_pct = calc_clv(decimal_taken, decimal_closing)
+    return clv_for_sheet(clv_pct) if clv_pct is not None else None
+
+
+# ── Main entry points ─────────────────────────────────────────────────────────
+
+def fetch_closing_odds(bet: dict) -> dict:
+    """
+    Fetches historical closing odds for a single (non-parlay) bet.
+
+    Args:
+        bet: A dict from sheets_reader.load_bets_needing_closing_odds(),
+             with keys: sport, book, team1, team2, game_date, game_start,
+             bet_type, selection, odds_taken.
+
+    Returns a dict with:
+        closing_odds:     American odds string (e.g. "-110") or None on failure
+        decimal_closing:  Decimal float or None
+        clv:              Sheet-format CLV (e.g. 0.0543) or None
+        error:            None for transient failures (retry), an error code
+                          string for permanent ones (write to sheet for review)
+    """
+    bet_id = bet.get("bet_id", "?")
+    res = _fetch_closing_price(bet, f"BetID {bet_id}")
+
+    if res["price"] is None:
+        # Transient (error=None) or permanent (error=<code>) — same shape out.
+        return {"closing_odds": None, "decimal_closing": None, "clv": None,
+                "error": res["error"]}
+
+    price = res["price"]
     closing_odds_str = fmt_odds(price)
     decimal_closing = to_decimal_odds(price)
 
-    # Compute CLV if OddsTaken is available
     clv = None
     try:
-        odds_taken = float(str(odds_taken_raw).replace("+", "").strip())
-        decimal_taken = to_decimal_odds(odds_taken)
-        clv_pct = calc_clv(decimal_taken, decimal_closing)
-        if clv_pct is not None:
-            clv = clv_for_sheet(clv_pct)
+        odds_taken = float(str(bet.get("odds_taken", "")).replace("+", "").strip())
+        clv = _clv_from_decimals(to_decimal_odds(odds_taken), decimal_closing)
     except (ValueError, TypeError):
         pass  # Missing or unparseable OddsTaken — CLV left as None, not a blocker
 
     print(f"[closing_odds] BetID {bet_id}: ClosingOdds={closing_odds_str}, "
           f"DecimalClosing={decimal_closing}, CLV={clv}")
+
+    return {
+        "closing_odds": closing_odds_str,
+        "decimal_closing": decimal_closing,
+        "clv": clv,
+        "error": None,
+    }
+
+
+def fetch_parlay_closing_odds(bet: dict) -> dict:
+    """
+    Fetches the combined historical closing line for a parlay: the product of
+    each leg's closing decimal odds. CLV compares the parlay's combined OddsTaken
+    against this combined closing line.
+
+    Args:
+        bet: A parlay dict from sheets_reader.load_bets_needing_closing_odds()
+             with is_parlay=True and a parsed `legs` list (each leg carrying
+             sport, book, team1, team2, game_date, game_start, bet_type,
+             selection), plus the parlay row's own combined `odds_taken`.
+
+    Failure handling mirrors the single-bet path, but ANY leg failing decides
+    the whole parlay:
+        - any leg transient  -> whole parlay transient (retry next run)
+        - any leg permanent  -> whole parlay permanent with that leg's error
+                                code (surfaces in the bell / N-A flow)
+    A combined closing line is only meaningful if every leg priced.
+    """
+    from parlay import american_to_decimal, decimal_to_american, fmt_american, combined_decimal
+
+    bet_id = bet.get("bet_id", "?")
+    legs = bet.get("legs") or []
+
+    if not legs:
+        print(f"[closing_odds] BetID {bet_id}: parlay has no parsed legs — skipping.")
+        return {"closing_odds": None, "decimal_closing": None, "clv": None, "error": None}
+
+    leg_decimals = []
+    for i, leg in enumerate(legs, start=1):
+        res = _fetch_closing_price(leg, f"BetID {bet_id} leg {i}/{len(legs)}")
+        if res["price"] is None:
+            # First failing leg decides the parlay — transient or permanent.
+            return {"closing_odds": None, "decimal_closing": None, "clv": None,
+                    "error": res["error"]}
+        leg_decimals.append(to_decimal_odds(res["price"]))
+
+    decimal_closing = combined_decimal(leg_decimals)
+    if decimal_closing is None:
+        return {"closing_odds": None, "decimal_closing": None, "clv": None, "error": None}
+
+    decimal_closing = round(decimal_closing, 8)
+    closing_odds_str = fmt_american(decimal_to_american(decimal_closing))
+
+    clv = None
+    decimal_taken = american_to_decimal(bet.get("odds_taken", ""))
+    if decimal_taken is not None:
+        clv = _clv_from_decimals(decimal_taken, decimal_closing)
+
+    print(f"[closing_odds] BetID {bet_id}: parlay ({len(legs)} legs) "
+          f"ClosingOdds={closing_odds_str}, DecimalClosing={decimal_closing}, CLV={clv}")
 
     return {
         "closing_odds": closing_odds_str,

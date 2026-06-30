@@ -6,7 +6,7 @@ from sheets_reader import (
     load_bets_needing_closing_odds,
 )
 from poller import poll_bet, complete_pl_payout, complete_manual_payout_pl, _parse_game_datetime
-from closing_odds import fetch_closing_odds
+from closing_odds import fetch_closing_odds, fetch_parlay_closing_odds
 from sheets_writer import write_closing_odds
 from config import SHEET_TAB, RESULT_VOID
 
@@ -216,7 +216,9 @@ def main():
                         print()
                         continue
 
-                    result = fetch_closing_odds(bet)
+                    result = (fetch_parlay_closing_odds(bet)
+                              if bet.get("is_parlay")
+                              else fetch_closing_odds(bet))
                     if result["closing_odds"] is not None:
                         success = write_closing_odds(
                             bet["row_idx"], bet["bet_id"],
