@@ -287,6 +287,9 @@ def load_unresolved_pl_bets(tab_name: str) -> list[dict]:
             "selection":   _bet_cell(row, col, "selection"),
             "bet_type":    _bet_cell(row, col, "bet_type"),
             "odds_taken":  _bet_cell(row, col, "odds_taken"),
+            # Parlays carry their exact combined decimal here; complete_pl_payout
+            # settles a manual parlay WIN from it instead of the rounded American.
+            "decimal_odds": _bet_cell(row, col, "decimal_odds"),
             "stake":       _bet_cell(row, col, "stake"),
             "fee":         _bet_cell(row, col, "fee"),
             "bet_category": _bet_cell(row, col, "bet_category"),

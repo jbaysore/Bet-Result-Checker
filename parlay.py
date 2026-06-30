@@ -13,7 +13,7 @@ import json
 
 from config import (
     RESULT_WIN, RESULT_LOSS, RESULT_PUSH, RESULT_VOID,
-    AUTOMATED_LEG_BET_TYPES,
+    AUTOMATED_LEG_BET_TYPES, BET_TYPE_MONEYLINE,
 )
 
 
@@ -74,6 +74,12 @@ def all_legs_automatable(legs: list[dict]) -> bool:
     for leg in legs:
         if leg["bet_type"] not in AUTOMATED_LEG_BET_TYPES:
             return False
+        # Tennis is auto-graded via ESPN, but only for match-winner
+        # (Moneyline) bets -- a tennis Spread/Total leg can't be auto-graded
+        # from a winner-only result yet, so the whole parlay falls back to
+        # manual settlement.
+        if leg["sport"].lower().startswith("tennis_") and leg["bet_type"] != BET_TYPE_MONEYLINE:
+            return False
         if not (leg["sport"] and leg["team1"] and leg["selection"]
                 and leg["game_date"] and leg["game_start"]):
             return False
@@ -96,12 +102,24 @@ def american_to_decimal(american) -> float | None:
 
 
 def decimal_to_american(decimal: float | None) -> int | None:
-    """Decimal odds → American odds (rounded to the nearest whole number)."""
+    """
+    Decimal odds → American odds, truncating toward zero on the magnitude so a
+    half-point price (decimal 2.105 = +110.5) becomes +110, matching how books
+    present it and the odds-tool wizard/server. American is a display label
+    here; settlement uses the exact decimal.
+    """
+    import math
     if decimal is None or decimal <= 1:
         return None
+    # Epsilon before flooring: a price that is mathematically an integer (e.g.
+    # decimal 1.909090... = exactly -110) can come back as 109.99999999 in
+    # float, which a bare floor would wrongly truncate to -109. 1e-9 is far
+    # smaller than the half-point gap we intend to truncate, so it only
+    # corrects float noise, never a genuine .5.
+    eps = 1e-9
     if decimal >= 2.0:
-        return round((decimal - 1) * 100)
-    return round(-100.0 / (decimal - 1))
+        return math.floor((decimal - 1) * 100 + eps)
+    return -math.floor(100.0 / (decimal - 1) + eps)
 
 
 def fmt_american(american: int | None) -> str | None:

@@ -11,13 +11,14 @@ from config import (
     BOOK_FEE_TYPE_PERCENT_OF_WIN_PROFIT,
     BOOK_FEE_TYPE_PERCENT_OF_STAKE_ON_WIN,
     MANUAL_PAYOUT_REQUIRED_BOOKS,
+    BET_TYPE_PARLAY,
+    BET_TYPE_MONEYLINE,
 )
-from sources import odds_api
+from sources import odds_api, espn_tennis
 from resolver import (
     resolve, resolve_parlay, calculate_pl_and_payout, derive_pl_from_payout,
     _american_odds_profit,
 )
-from parlay import decimal_to_american
 from sheets_writer import (
     write_result, write_pl_payout, write_pl_only,
     flag_pl_blocked, clear_pl_blocked_flag, flag_payout_caution,
@@ -170,7 +171,8 @@ def _poll_parlay(bet: dict, now_utc, give_up_at) -> str:
 
     leg_games = []
     for i, leg in enumerate(legs, start=1):
-        game = odds_api.get_game_result(leg["sport"], leg["team1"], leg["team2"])
+        game = _fetch_game_for(leg["sport"], leg["team1"], leg["team2"],
+                               leg.get("game_date"), leg.get("bet_type"))
         if game is None:
             print(f"[poller]   leg {i}/{len(legs)} ({leg['team1']} vs {leg['team2']}): "
                   f"no final score yet.")
@@ -193,17 +195,14 @@ def _poll_parlay(bet: dict, now_utc, give_up_at) -> str:
         print(f"[poller] ❌ BetID {bet_id}: parlay resolver error — {e}")
         return "error"
 
-    # On a WIN, settle at the EFFECTIVE combined odds (push/void legs dropped
-    # out and re-priced the parlay) rather than the stored OddsTaken, which
-    # assumed every leg counted. For LOSS/PUSH/VOID the odds don't affect P/L,
-    # so the stored value is left as-is.
-    settle_bet = dict(bet)
-    if combined_result == RESULT_WIN and effective_decimal:
-        eff_american = decimal_to_american(effective_decimal)
-        if eff_american is not None:
-            settle_bet["odds_taken"] = str(eff_american)
-
-    pl, payout = _safe_calculate_pl_payout(settle_bet, combined_result)
+    # On a WIN, settle at the EFFECTIVE combined DECIMAL (push/void legs
+    # dropped out and re-priced the parlay). Passing the decimal directly
+    # avoids the lossy American round-trip the stored OddsTaken went through
+    # -- a parlay's combined price (a product of leg decimals) usually has no
+    # exact American form, so settling from American could be off by up to a
+    # cent on the dollar. For LOSS/PUSH/VOID the odds don't affect P/L.
+    decimal_odds = effective_decimal if combined_result == RESULT_WIN else None
+    pl, payout = _safe_calculate_pl_payout(bet, combined_result, decimal_odds=decimal_odds)
     success = write_result(row_idx, combined_result, bet_id,
                            book=bet.get("book"), pl=pl, payout=payout)
     if success and pl is not None:
@@ -211,26 +210,43 @@ def _poll_parlay(bet: dict, now_utc, give_up_at) -> str:
     return "resolved" if success else "error"
 
 
+def _fetch_game_for(sport: str, team1: str, team2: str,
+                    game_date: str = None, bet_type: str = None) -> dict | None:
+    """
+    Routes a result lookup to the right source by sport:
+
+      - Tennis (tennis_atp_* / tennis_wta_*): ESPN's scoreboard, since The Odds
+        API /scores feed doesn't cover tennis. ESPN is viable here -- unlike
+        the general team-sport league-mapping problem -- because the Odds API
+        key already encodes the tour (atp/wta), a deterministic prefix. Only
+        Moneyline (match winner) is graded; a tennis Spread/Total returns None
+        (can't auto-grade from a winner-only result) and routes to NEEDS_REVIEW.
+      - Everything else: The Odds API /scores feed, keyed by its own sport_key.
+
+    Returns a game dict (or None) in the same shape resolver.resolve() expects,
+    regardless of which source answered.
+    """
+    if espn_tennis.is_tennis(sport):
+        if bet_type and bet_type.strip() != BET_TYPE_MONEYLINE:
+            return None
+        return espn_tennis.get_match_result(sport, team1, team2, game_date)
+    return odds_api.get_game_result(sport, team1, team2)
+
+
 def _fetch_result(bet: dict, sport: str) -> dict | None:
     """
-    Fetches a final score from the Odds API only. ESPN is intentionally
-    NOT consulted here during normal polling -- ESPN requires knowing
-    which league path corresponds to this sport, and reliably determining
-    that mapping turned out to need either a fragile fuzzy match or a
-    cached lookup table, both of which were rejected: GitHub Actions runners
-    have no persistent disk between runs for a cache, and a stored sport->league mapping
-    is exactly the kind of stale, unverified data source this project has
-    been actively moving away from. Odds API needs no such mapping --
-    it uses its own sport_key directly, the same one already on the bet.
+    Fetches a final result for a single bet via _fetch_game_for(), which
+    dispatches by sport: ESPN for tennis (Moneyline), The Odds API /scores
+    for team sports.
 
-    ESPN is still used, but only for the rare "this bet is stuck well past
-    game time" case, and only via a human-confirmed live lookup triggered
-    from the Stats page -- never automatically, never from a cached
-    mapping. See RESULT_NEEDS_REVIEW in config.py.
+    For non-tennis sports ESPN is still NOT consulted automatically -- that
+    needed a fragile sport->league mapping (rejected; see git history) and
+    remains a human-confirmed fallback via the Stats-page notification bell.
+    Tennis is the exception only because its tour is unambiguous from the
+    sport key. See RESULT_NEEDS_REVIEW in config.py.
     """
-    team1 = bet["team1"]
-    team2 = bet["team2"]
-    return odds_api.get_game_result(sport, team1, team2)
+    return _fetch_game_for(sport, bet["team1"], bet["team2"],
+                           bet.get("game_date"), bet.get("bet_type"))
 
 
 def _parse_game_datetime(game_date: str, game_start: str) -> datetime | None:
@@ -398,7 +414,20 @@ def complete_pl_payout(bet: dict) -> str:
     row_idx = bet["row_idx"]
     result = bet["result"]
 
-    pl, payout = _safe_calculate_pl_payout(bet, result)
+    # For a manually-resolved parlay, settle a WIN from the exact combined
+    # decimal stored in DecimalOddsTaken (if present) rather than the rounded
+    # American OddsTaken -- same precision reasoning as the auto-resolution
+    # path. Non-parlay rows pass None and use American odds as before.
+    decimal_odds = None
+    if result == RESULT_WIN and bet.get("bet_type", "").strip() == BET_TYPE_PARLAY:
+        try:
+            dec = float(str(bet.get("decimal_odds", "")).strip())
+            if dec > 1:
+                decimal_odds = dec
+        except (ValueError, TypeError):
+            pass
+
+    pl, payout = _safe_calculate_pl_payout(bet, result, decimal_odds=decimal_odds)
 
     if pl is None:
         # _safe_calculate_pl_payout already printed the specific reason
@@ -413,7 +442,8 @@ def complete_pl_payout(bet: dict) -> str:
     return "completed" if success else "skipped"
 
 
-def _safe_calculate_pl_payout(bet: dict, result: str) -> tuple[float | None, float | None]:
+def _safe_calculate_pl_payout(bet: dict, result: str,
+                              decimal_odds: float = None) -> tuple[float | None, float | None]:
     """
     Wraps resolver.calculate_pl_and_payout with defensive parsing of the
     sheet's stake/odds_taken strings. Returns (None, None) on any parsing
@@ -543,6 +573,7 @@ def _safe_calculate_pl_payout(bet: dict, result: str) -> tuple[float | None, flo
             fee_pct_on_win_only=fee_config["fee_percent"] if is_win_profit_fee_book else None,
             bet_type=bet.get("bet_type", "") if is_win_profit_fee_book else "",
             fee_pct_on_win_stake=fee_config["fee_percent"] if is_win_stake_fee_book else None,
+            decimal_odds=decimal_odds,
         )
     except ValueError as e:
         reason = f"could not calculate P/L -- {e}"

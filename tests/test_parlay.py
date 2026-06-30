@@ -34,6 +34,36 @@ def test_combined_decimal_is_product():
     assert parlay.decimal_to_american(d) == 377
 
 
+def test_half_point_combined_truncates_down():
+    # -6000, -10000, +105 -> decimal 2.105008 = +110.5 American. Truncates to
+    # +110, matching the sportsbook, rather than rounding up to +111.
+    d = parlay.combined_decimal([
+        parlay.american_to_decimal(-6000),
+        parlay.american_to_decimal(-10000),
+        parlay.american_to_decimal(105),
+    ])
+    assert abs(d - 2.1050083) < 1e-6
+    assert parlay.decimal_to_american(d) == 110
+
+
+def test_decimal_to_american_no_float_truncation():
+    # An exact integer price (-110) must not be floored to -109 by float noise.
+    assert parlay.decimal_to_american(parlay.american_to_decimal(-110)) == -110
+    assert parlay.decimal_to_american(parlay.american_to_decimal(150)) == 150
+
+
+def test_parlay_win_settles_from_exact_decimal():
+    # The whole point of the decimal path: a $100 win on combined decimal
+    # 2.105008 pays 210.50, not 211.00 (American +111 round-trip) or 210.00
+    # (American +110 label).
+    from resolver import calculate_pl_and_payout
+    from config import BET_CATEGORY_STANDARD
+    pl, payout = calculate_pl_and_payout(
+        RESULT_WIN, 100.0, 0, BET_CATEGORY_STANDARD, decimal_odds=2.1050083333)
+    assert payout == 210.50
+    assert pl == 110.50
+
+
 # ── Leg JSON parsing ───────────────────────────────────────────────────────────
 
 def test_parse_legs_normalizes_camel_case():

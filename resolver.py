@@ -104,7 +104,8 @@ def calculate_pl_and_payout(result: str, stake: float, odds_taken: float,
                             bet_category: str, boost_pct: float = None,
                             fee: float = 0.0, fee_before_odds: bool = False,
                             fee_pct_on_win_only: float = None, bet_type: str = "",
-                            fee_pct_on_win_stake: float = None) -> tuple[float, float | None]:
+                            fee_pct_on_win_stake: float = None,
+                            decimal_odds: float = None) -> tuple[float, float | None]:
     """
     Computes P/L and Payout for a resolved bet, given American odds and the
     bet's category (which determines whether the stake was real cash or
@@ -237,7 +238,13 @@ def calculate_pl_and_payout(result: str, stake: float, odds_taken: float,
 
     if result == RESULT_WIN:
         effective_stake = (stake - fee) if fee_before_odds else stake
-        profit = _american_odds_profit(effective_stake, odds_taken)
+        # A parlay passes its exact combined decimal price (decimal_odds) so
+        # profit is computed from it directly, instead of from a lossy
+        # American round-trip of the same product. Single bets pass American
+        # odds as before (decimal_odds is None).
+        profit = (_decimal_odds_profit(effective_stake, decimal_odds)
+                  if decimal_odds is not None
+                  else _american_odds_profit(effective_stake, odds_taken))
         if bet_category == BET_CATEGORY_PROFIT_BOOST:
             if boost_pct is None:
                 raise ValueError(
@@ -368,6 +375,21 @@ def _american_odds_profit(stake: float, odds: float) -> float:
         raw = Decimal(str(stake)) * Decimal(str(odds)) / Decimal(100)
     else:
         raw = Decimal(str(stake)) * Decimal(100) / Decimal(str(abs(odds)))
+    return float(raw.quantize(Decimal('0.01'), rounding=ROUND_DOWN))
+
+
+def _decimal_odds_profit(stake: float, decimal_odds: float) -> float:
+    """
+    Profit on a winning bet priced in DECIMAL odds: stake * (decimal - 1).
+
+    Exists for parlays, whose combined price is a product of leg decimals
+    (e.g. 2.105008) that usually has no exact American representation -- so
+    round-tripping it through American (+110/+111) would settle a win at the
+    wrong price by up to a cent on the dollar. Keeps the same house-favor
+    cent truncation (ROUND_DOWN) and exact-Decimal arithmetic as
+    _american_odds_profit, just from the decimal price directly.
+    """
+    raw = Decimal(str(stake)) * (Decimal(str(decimal_odds)) - Decimal(1))
     return float(raw.quantize(Decimal('0.01'), rounding=ROUND_DOWN))
 
 
