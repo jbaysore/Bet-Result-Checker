@@ -10,6 +10,8 @@ SCOPES = [
 _client_cache = None
 _spreadsheet_cache = None
 _tab_cache = {}
+_bets_rows_cache: dict[str, list[list[str]]] = {}
+_missing_col_warnings: set[str] = set()
 _book_settings_rows_cache = None
 _promotions_rows_cache = None
 
@@ -98,6 +100,15 @@ def _resolve_promotions_headers_from_rows(rows: list[list[str]]) -> tuple[int, l
     return header_row_idx, headers
 
 
+def _get_bets_rows(tab_name: str) -> list[list[str]]:
+    """One Bets-tab read per process per tab — trigger.py calls four load_*
+    functions per run; without this cache that was four identical get_all_values()
+    calls hitting the Sheets read quota."""
+    if tab_name not in _bets_rows_cache:
+        _bets_rows_cache[tab_name] = _get_tab(tab_name).get_all_values()
+    return _bets_rows_cache[tab_name]
+
+
 def _resolve_bet_col_indices(headers: list[str]) -> dict[str, int | None]:
     """
     Maps config.BET_COL logical keys to 0-based column indices against the
@@ -112,8 +123,10 @@ def _resolve_bet_col_indices(headers: list[str]) -> dict[str, int | None]:
             col_idx[key] = headers.index(header_name)
         except ValueError:
             col_idx[key] = None
-            print(f"[sheets_reader] ⚠️  Bets tab is missing expected "
-                  f"column '{header_name}' -- continuing without it.")
+            if header_name not in _missing_col_warnings:
+                _missing_col_warnings.add(header_name)
+                print(f"[sheets_reader] ⚠️  Bets tab is missing optional "
+                      f"column '{header_name}' -- continuing without it.")
     return col_idx
 
 
@@ -144,9 +157,7 @@ def load_pending_bets(tab_name: str) -> list[dict]:
     """
     from config import AUTOMATED_BET_TYPES
 
-    tab = _get_tab(tab_name)
-
-    rows = tab.get_all_values()
+    rows = _get_bets_rows(tab_name)
 
     if not rows:
         return []
@@ -222,9 +233,7 @@ def load_unresolved_pl_bets(tab_name: str) -> list[dict]:
     load_pending_bets()'s output, so it can be passed straight into
     poller._safe_calculate_pl_payout() without any reshaping.
     """
-    tab = _get_tab(tab_name)
-
-    rows = tab.get_all_values()
+    rows = _get_bets_rows(tab_name)
 
     if not rows:
         return []
@@ -296,9 +305,7 @@ def load_manual_payout_pending_pl_bets(tab_name: str) -> list[dict]:
     including "payout" (unlike load_unresolved_pl_bets(), which never
     needs it since Payout is one of the two blank fields it's filling in).
     """
-    tab = _get_tab(tab_name)
-
-    rows = tab.get_all_values()
+    rows = _get_bets_rows(tab_name)
 
     if not rows:
         return []
@@ -357,8 +364,7 @@ def load_bets_needing_closing_odds(tab_name: str) -> list[dict]:
     """
     from config import AUTOMATED_BET_TYPES, RESULT_NEEDS_REVIEW
 
-    tab = _get_tab(tab_name)
-    rows = tab.get_all_values()
+    rows = _get_bets_rows(tab_name)
 
     if not rows:
         return []
@@ -685,9 +691,7 @@ def load_bets_by_promo_id(tab_name: str) -> dict[str, list[dict]]:
     included here, unlike load_pending_bets() which omits them since
     they're guaranteed blank there).
     """
-    tab = _get_tab(tab_name)
-
-    rows = tab.get_all_values()
+    rows = _get_bets_rows(tab_name)
     if not rows:
         return {}
 

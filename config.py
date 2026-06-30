@@ -44,7 +44,7 @@ ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 #         Game Date | Game Start Time | Selection | Bet Type |
 #         OddsTaken | DecimalOddsTaken | ClosingOdds | DecimalClosingOdds |
 #         CLV | Stake | Fee | Bet Category | Promo ID | Result | Payout |
-#         P/L | Running P/L | Notes
+#         P/L | Notes
 BET_COL = {
     "bet_id":          "BetID",
     "date_placed":     "Date Placed",
@@ -68,7 +68,6 @@ BET_COL = {
     "result":          "Result",
     "payout":          "Payout",
     "pl":              "P/L",
-    "running_pl":      "Running P/L",
     "notes":           "Notes",
 }
 

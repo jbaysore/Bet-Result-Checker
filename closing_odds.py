@@ -21,6 +21,10 @@ from config import (
 )
 from poller import _parse_game_datetime
 
+# One historical snapshot per (sport, timestamp, book, market) per process —
+# multiple bets on the same game/book reuse the same API response.
+_snapshot_cache: dict[tuple[str, str, str, str], list | None] = {}
+
 
 # ── Region routing ────────────────────────────────────────────────────────────
 # Mirrors odds-tool's bookConstants.js regionForBookKey() and
@@ -180,6 +184,10 @@ def _fetch_historical_snapshot(sport: str, date_iso: str, book_key: str,
     Calls the historical odds endpoint and returns the events list, or None
     on any error. Retries up to 3 times on transient failures.
     """
+    cache_key = (sport, date_iso, book_key.lower(), market)
+    if cache_key in _snapshot_cache:
+        return _snapshot_cache[cache_key]
+
     url = f"{ODDS_API_BASE}/historical/sports/{sport}/odds"
     params = {
         "apiKey":      ODDS_API_KEY,
@@ -212,7 +220,9 @@ def _fetch_historical_snapshot(sport: str, date_iso: str, book_key: str,
             print(f"[closing_odds] Credits used: {used} | Remaining: {remaining}")
 
             data = resp.json()
-            return data.get("data", [])
+            events = data.get("data", [])
+            _snapshot_cache[cache_key] = events
+            return events
 
         except requests.RequestException as e:
             if attempt < 2:

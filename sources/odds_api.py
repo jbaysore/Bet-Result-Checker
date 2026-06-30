@@ -1,6 +1,11 @@
 import requests
 from config import ODDS_API_KEY, ODDS_API_BASE
 
+# One /scores response per sport per process — poll_bet() calls get_game_result()
+# once per pending bet; on a busy NFL Sunday that's many identical API calls
+# without this cache.
+_scores_cache: dict[str, list] = {}
+
 
 def get_game_result(sport_key: str, team1: str, team2: str) -> dict | None:
     """
@@ -37,48 +42,9 @@ def get_game_result(sport_key: str, team1: str, team2: str) -> dict | None:
     this fallback will incorrectly report it as "not final yet" rather
     than cancelled — a known limitation, not a bug to fix here.
     """
-    url = f"{ODDS_API_BASE}/sports/{sport_key}/scores"
-
-    params = {
-        "apiKey":        ODDS_API_KEY,
-        "daysFrom":      7,   # look back up to 7 days for completed games
-        "dateFormat":    "iso",
-    }
-
-    try:
-        response = requests.get(url, params=params, timeout=10)
-
-        # Surface credit/auth errors clearly
-        if response.status_code == 401:
-            print("[odds_api] Invalid API key. Check ODDS_API_KEY in your .env.")
-            return None
-        if response.status_code == 422:
-            print(f"[odds_api] Sport key '{sport_key}' not recognised by Odds API.")
-            return None
-        if response.status_code == 429:
-            print("[odds_api] Odds API quota exceeded.")
-            return None
-
-        response.raise_for_status()
-
-    except requests.RequestException as e:
-        print(f"[odds_api] Request failed for {sport_key}: {e}")
+    games = _fetch_scores(sport_key)
+    if games is None:
         return None
-
-    try:
-        games = response.json()
-    except ValueError as e:
-        print(f"[odds_api] Failed to parse JSON for {sport_key}: {e}")
-        return None
-
-    if not isinstance(games, list):
-        print(f"[odds_api] Unexpected response format for {sport_key}.")
-        return None
-
-    # Log remaining credits after every call so you can monitor usage
-    remaining = response.headers.get("x-requests-remaining", "unknown")
-    used = response.headers.get("x-requests-used", "unknown")
-    print(f"[odds_api] Credits used: {used} | Remaining: {remaining}")
 
     t1 = team1.lower().strip()
     t2 = team2.lower().strip()
@@ -120,6 +86,58 @@ def get_game_result(sport_key: str, team1: str, team2: str) -> dict | None:
 
     print(f"[odds_api] No matching game found for '{team1}' vs '{team2}' in {sport_key}.")
     return None
+
+
+def _fetch_scores(sport_key: str) -> list | None:
+    """Fetches and caches the full /scores payload for a sport (one credit per sport per run)."""
+    if sport_key in _scores_cache:
+        return _scores_cache[sport_key]
+
+    url = f"{ODDS_API_BASE}/sports/{sport_key}/scores"
+
+    params = {
+        "apiKey":        ODDS_API_KEY,
+        "daysFrom":      7,   # look back up to 7 days for completed games
+        "dateFormat":    "iso",
+    }
+
+    try:
+        response = requests.get(url, params=params, timeout=10)
+
+        # Surface credit/auth errors clearly — don't cache so a later bet can retry
+        if response.status_code == 401:
+            print("[odds_api] Invalid API key. Check ODDS_API_KEY in your .env.")
+            return None
+        if response.status_code == 422:
+            print(f"[odds_api] Sport key '{sport_key}' not recognised by Odds API.")
+            return None
+        if response.status_code == 429:
+            print("[odds_api] Odds API quota exceeded.")
+            return None
+
+        response.raise_for_status()
+
+    except requests.RequestException as e:
+        print(f"[odds_api] Request failed for {sport_key}: {e}")
+        return None
+
+    try:
+        games = response.json()
+    except ValueError as e:
+        print(f"[odds_api] Failed to parse JSON for {sport_key}: {e}")
+        return None
+
+    if not isinstance(games, list):
+        print(f"[odds_api] Unexpected response format for {sport_key}.")
+        return None
+
+    # Log remaining credits after every call so you can monitor usage
+    remaining = response.headers.get("x-requests-remaining", "unknown")
+    used = response.headers.get("x-requests-used", "unknown")
+    print(f"[odds_api] Credits used: {used} | Remaining: {remaining}")
+
+    _scores_cache[sport_key] = games
+    return games
 
 
 def _matches_any(sheet_name: str, api_name: str) -> bool:
