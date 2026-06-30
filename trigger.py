@@ -228,7 +228,21 @@ def main():
                             closing_results["captured"] += 1
                         else:
                             closing_results["skipped"] += 1
+                    elif result.get("error"):
+                        # Permanent failure (game/book/selection not found in
+                        # snapshot) — write the error code to the ClosingOdds
+                        # column so the odds-tool notification bell surfaces it
+                        # for human review. The cell is no longer blank after
+                        # this, so this bet won't be retried automatically;
+                        # clear the cell manually to trigger a retry.
+                        write_closing_odds(
+                            bet["row_idx"], bet["bet_id"],
+                            result["error"], None, None,
+                        )
+                        closing_results["skipped"] += 1
                     else:
+                        # Transient failure (API timeout, quota) — leave blank,
+                        # retry on the next scheduled run.
                         closing_results["skipped"] += 1
                 except Exception as e:
                     print(f"[trigger] ❌ BetID {bet['bet_id']}: unexpected error -- {e}. "

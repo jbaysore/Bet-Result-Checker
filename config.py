@@ -155,6 +155,15 @@ RESULT_NEEDS_REVIEW = "NEEDS_REVIEW"  # written when Odds API never returned a f
 RESULT_PENDING = "PENDING"  # written when a NEEDS_REVIEW check finds nothing useful
                              # (or is skipped) -- fully manual review from here
 
+# ── Closing odds failure codes ────────────────────────────────────
+# Written to the ClosingOdds column when the historical snapshot fetch
+# succeeds (no transient error) but the specific bet can't be matched.
+# Surfaces in the odds-tool notification bell until manually cleared
+# or overwritten with a real value.
+CLOSING_ODDS_GAME_NOT_FOUND      = "GAME NOT FOUND"
+CLOSING_ODDS_BOOK_NOT_FOUND      = "BOOK NOT FOUND"
+CLOSING_ODDS_SELECTION_NOT_FOUND = "SELECTION NOT FOUND"
+
 # ── Game status values ────────────────────────────────────────────
 # Contract that any upstream game-result source (ESPN, Odds API, etc.)
 # must translate its own status fields into before passing a game dict

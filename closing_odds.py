@@ -17,6 +17,7 @@ from datetime import timedelta, timezone
 from config import (
     ODDS_API_KEY, ODDS_API_BASE,
     BET_TYPE_MONEYLINE, BET_TYPE_SPREAD, BET_TYPE_TOTAL, BET_TYPE_DRAW,
+    CLOSING_ODDS_GAME_NOT_FOUND, CLOSING_ODDS_BOOK_NOT_FOUND, CLOSING_ODDS_SELECTION_NOT_FOUND,
 )
 from poller import _parse_game_datetime
 
@@ -249,19 +250,24 @@ def fetch_closing_odds(bet: dict) -> dict:
     selection = bet.get("selection", "")
     odds_taken_raw = bet.get("odds_taken", "")
 
-    _empty = {"closing_odds": None, "decimal_closing": None, "clv": None}
+    # error=None → transient failure, don't write to sheet, retry next run
+    # error=<code> → permanent failure, write code to ClosingOdds for human review
+    _transient = {"closing_odds": None, "decimal_closing": None, "clv": None, "error": None}
+
+    def _permanent(code):
+        return {"closing_odds": None, "decimal_closing": None, "clv": None, "error": code}
 
     # Parse selection into market + lookup fields
     sel = parse_selection(bet_type, selection)
     if sel is None:
         print(f"[closing_odds] BetID {bet_id}: unsupported bet type '{bet_type}' — skipping.")
-        return _empty
+        return _transient
 
     # Convert game start to UTC, subtract 1 minute to get closing snapshot time
     game_dt = _parse_game_datetime(bet.get("game_date", ""), bet.get("game_start", ""))
     if game_dt is None:
         print(f"[closing_odds] BetID {bet_id}: could not parse game datetime — skipping.")
-        return _empty
+        return _transient
 
     snapshot_dt = game_dt.astimezone(timezone.utc) - timedelta(minutes=1)
     date_iso = snapshot_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -271,13 +277,14 @@ def fetch_closing_odds(bet: dict) -> dict:
 
     events = _fetch_historical_snapshot(sport, date_iso, book, sel["market"])
     if events is None:
-        return _empty
+        # API error (timeout, quota, network) — transient, retry next run
+        return _transient
 
     event = find_event(events, team1, team2)
     if event is None:
         print(f"[closing_odds] BetID {bet_id}: game not found in snapshot "
               f"({team1} vs {team2}, {sport}).")
-        return _empty
+        return _permanent(CLOSING_ODDS_GAME_NOT_FOUND)
 
     # Find the requested bookmaker in the event
     bk = next(
@@ -287,7 +294,7 @@ def fetch_closing_odds(bet: dict) -> dict:
     )
     if bk is None:
         print(f"[closing_odds] BetID {bet_id}: book '{book}' not in snapshot.")
-        return _empty
+        return _permanent(CLOSING_ODDS_BOOK_NOT_FOUND)
 
     # Find the market
     mkt = next(
@@ -297,7 +304,7 @@ def fetch_closing_odds(bet: dict) -> dict:
     )
     if mkt is None:
         print(f"[closing_odds] BetID {bet_id}: market '{sel['market']}' not in snapshot.")
-        return _empty
+        return _permanent(CLOSING_ODDS_SELECTION_NOT_FOUND)
 
     price = extract_odds(
         sel["market"],
@@ -310,7 +317,7 @@ def fetch_closing_odds(bet: dict) -> dict:
     if price is None:
         print(f"[closing_odds] BetID {bet_id}: could not extract price for "
               f"selection '{selection}' from snapshot.")
-        return _empty
+        return _permanent(CLOSING_ODDS_SELECTION_NOT_FOUND)
 
     closing_odds_str = fmt_odds(price)
     decimal_closing = to_decimal_odds(price)
@@ -333,4 +340,5 @@ def fetch_closing_odds(bet: dict) -> dict:
         "closing_odds": closing_odds_str,
         "decimal_closing": decimal_closing,
         "clv": clv,
+        "error": None,
     }
