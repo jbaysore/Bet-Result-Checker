@@ -379,7 +379,10 @@ def load_bets_needing_closing_odds(tab_name: str) -> list[dict]:
 
     Returns a list of dicts with the fields needed by closing_odds.fetch_closing_odds().
     """
-    from config import AUTOMATED_BET_TYPES, RESULT_NEEDS_REVIEW, BET_TYPE_PARLAY
+    from config import (
+        AUTOMATED_BET_TYPES, RESULT_NEEDS_REVIEW, BET_TYPE_PARLAY,
+        CLOSING_ODDS_ERROR_CODES,
+    )
     from parlay import parse_legs, all_legs_automatable
 
     rows = _get_bets_rows(tab_name)
@@ -423,8 +426,12 @@ def load_bets_needing_closing_odds(tab_name: str) -> list[dict]:
             continue  # needs human review before closing odds are useful
 
         closing_odds = _bet_cell(row, col, "closing_odds")
-        if closing_odds:
-            continue  # already captured
+        # Re-scan rows whose ClosingOdds holds a failure code (BOOK NOT FOUND,
+        # SELECTION NOT FOUND, etc.) -- they may resolve now if the underlying
+        # cause was fixed. A real odds value, "VOID", or "N/A" is final and is
+        # never re-fetched.
+        if closing_odds and closing_odds not in CLOSING_ODDS_ERROR_CODES:
+            continue  # already captured (real value, VOID, or N/A)
 
         bets.append({
             "row_idx":    row_idx,

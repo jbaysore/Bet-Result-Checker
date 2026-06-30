@@ -184,6 +184,20 @@ CLOSING_ODDS_MANUAL_REQUIRED     = "MANUAL ENTRY"
 # (e.g. soccer_fifa_world_cup between tournaments).
 CLOSING_ODDS_SPORT_NOT_ON_API    = "SPORT NOT ON API"
 
+# The full set of failure codes (mirrors odds-tool's CLOSING_ODDS_ERROR_CODES).
+# These are the ONLY non-empty ClosingOdds values the automation will re-scan
+# and overwrite. A real odds value, "VOID", or "N/A" is final -- never
+# re-fetched or overwritten. Re-scanning lets a row recover automatically once
+# the underlying cause is fixed (a corrected team name, a registered book, or a
+# sport coming back into season) without having to clear the cell by hand.
+CLOSING_ODDS_ERROR_CODES = {
+    CLOSING_ODDS_GAME_NOT_FOUND,
+    CLOSING_ODDS_BOOK_NOT_FOUND,
+    CLOSING_ODDS_SELECTION_NOT_FOUND,
+    CLOSING_ODDS_MANUAL_REQUIRED,
+    CLOSING_ODDS_SPORT_NOT_ON_API,
+}
+
 # ── Game status values ────────────────────────────────────────────
 # Contract that any upstream game-result source (ESPN, Odds API, etc.)
 # must translate its own status fields into before passing a game dict

@@ -1,6 +1,9 @@
 import gspread
 from google.oauth2.service_account import Credentials
-from config import SHEET_ID, SHEET_TAB, RESULT_VOID, get_credentials_info
+from config import (
+    SHEET_ID, SHEET_TAB, RESULT_VOID, get_credentials_info,
+    CLOSING_ODDS_ERROR_CODES,
+)
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -436,9 +439,19 @@ def write_closing_odds(row_idx: int, bet_id: str,
             return False
 
         current_closing = _cell_at(row, closing_col)
-        if current_closing:
+        # Never overwrite a real value, "VOID", or "N/A" -- only a blank cell or
+        # a prior failure code (so a re-scan can replace BOOK NOT FOUND etc.
+        # with a real value, or update it to a different code).
+        if current_closing and current_closing not in CLOSING_ODDS_ERROR_CODES:
             print(f"[sheets_writer] Row {row_idx} (BetID: {bet_id}) already has "
                   f"ClosingOdds ('{current_closing}'). Skipping.")
+            return False
+        # No-op when a re-scan produces the identical failure code -- avoid
+        # churning the cell with a needless Sheets write every run for a row
+        # that keeps failing the same way.
+        if current_closing and current_closing == closing_odds:
+            print(f"[sheets_writer] Row {row_idx} (BetID: {bet_id}) re-scan still "
+                  f"'{current_closing}' -- no change, leaving cell as-is.")
             return False
 
         cells = [gspread.Cell(row_idx, closing_col, closing_odds)]
