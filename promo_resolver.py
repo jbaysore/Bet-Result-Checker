@@ -38,11 +38,12 @@ from datetime import datetime, date, timedelta
 from config import (
     BET_CATEGORY_QUALIFYING, BET_CATEGORY_BONUS_BET, BET_CATEGORY_PROFIT_BOOST,
     BET_CATEGORY_DEPOSIT_BONUS, BET_CATEGORY_INSURANCE_BET, BET_CATEGORY_STANDARD,
+    BET_CATEGORY_ODDS_BOOST,
     RESULT_WIN, RESULT_LOSS, RESULT_PUSH, RESULT_VOID,
     PROMO_STATUS_REALIZED, PROMO_STATUS_UNUSED, PROMO_TYPE_PROFIT_BOOST_DAILY,
     PROMO_TYPE_BONUS_BET, PROMO_TYPE_PROFIT_BOOST,
-    PROMO_TYPE_DEPOSIT_BONUS, PROMO_TYPE_INSURANCE_BET,
-    REWARD_TIMING_PER_QUALIFYING_BET,
+    PROMO_TYPE_DEPOSIT_BONUS, PROMO_TYPE_INSURANCE_BET, PROMO_TYPE_ODDS_BOOST,
+    REWARD_TIMING_PER_QUALIFYING_BET, PAYOUT_ROUND_NEAREST_BOOKS,
 )
 from resolver import calculate_pl_and_payout
 
@@ -314,7 +315,8 @@ def evaluate_profit_boost_promo(promo: dict, linked_bets: list[dict], today: dat
 
         unboosted_pl, _ = calculate_pl_and_payout(
             reward_bet["result"], stake, odds_taken,
-            bet_category=BET_CATEGORY_STANDARD, fee=fee, fee_before_odds=fee_before_odds
+            bet_category=BET_CATEGORY_STANDARD, fee=fee, fee_before_odds=fee_before_odds,
+            round_to_nearest=(reward_bet["book"] or "").strip().lower() in PAYOUT_ROUND_NEAREST_BOOKS
         )
         return round(actual_pl - unboosted_pl, 2)
 
@@ -387,6 +389,94 @@ def evaluate_deposit_bonus_promo(promo: dict, linked_bets: list[dict], today: da
         "finalize": {"status": PROMO_STATUS_REALIZED, "realized_amount": pl},
         "log": log,
     }
+
+
+# ════════════════════════════════════════════════════════════════════
+# ── Odds Boost ────────────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════════
+
+def evaluate_odds_boost_promo(promo: dict, linked_bets: list[dict], today: date,
+                               fee_before_odds_lookup: dict) -> dict:
+    """
+    Odds Boost: a single boosted line, used once. The linked reward bet is
+    logged at the BOOSTED odds with Bet Category = "Odds Boost", so its own
+    stored P/L already reflects the boosted result (real-money math, no boost %
+    -- the odds themselves are the boost). The promo's value is the EXTRA that
+    the boost bought versus the original line:
+
+        Realized Amount = actual P/L (at boosted odds)
+                          - P/L the same stake would have returned at the
+                            promo's Original Odds
+
+    computed by reusing resolver.calculate_pl_and_payout() as a Standard bet at
+    the original odds (same fee mechanic), then differencing -- the identical
+    pattern to evaluate_profit_boost_promo, just with an odds baseline instead
+    of a boost-% baseline. It comes out to exactly $0 on a loss/push/void, since
+    both sides return the same when the bet didn't win.
+
+    Single-use: expects one linked Odds Boost bet. If none is placed and the
+    promo has expired, it finalizes as Unused ($0); otherwise it waits.
+
+    fee_before_odds_lookup: {book: bool}, so the original-odds baseline uses the
+    SAME fee mechanic the real bet used (built by promo_trigger.py).
+    """
+    log = []
+    boost_bets = sorted(
+        [b for b in linked_bets if b["bet_category"] == BET_CATEGORY_ODDS_BOOST],
+        key=lambda b: _parse_date(b["date_placed"]) or date.min
+    )
+
+    if not boost_bets:
+        expiry = _parse_date(promo.get("expiration_date", ""))
+        if expiry is not None and today > expiry:
+            log.append(f"No Odds Boost bet was ever placed and the promo expired "
+                       f"{expiry} -- finalizing as Unused ($0).")
+            return {"qualifying_cost_fill": None,
+                    "finalize": {"status": PROMO_STATUS_UNUSED, "realized_amount": 0.0},
+                    "log": log}
+        log.append("No Odds Boost-category bet linked yet -- waiting (Pending).")
+        return {"qualifying_cost_fill": None, "finalize": None, "log": log}
+
+    if len(boost_bets) > 1:
+        ignored = ", ".join(str(b["bet_id"]) for b in boost_bets[1:])
+        log.append(f"⚠️  {len(boost_bets)} Odds Boost bets are linked, but this is a "
+                   f"single-line boost -- using the earliest (BetID {boost_bets[0]['bet_id']}) "
+                   f"and ignoring BetID {ignored}. Recommend manual review.")
+
+    bet = boost_bets[0]
+    if not _is_final(bet["result"]):
+        log.append(f"Odds Boost bet (BetID {bet['bet_id']}) placed but not yet settled "
+                   f"(Result='{bet['result'] or 'blank'}') -- waiting.")
+        return {"qualifying_cost_fill": None, "finalize": None, "log": log}
+
+    original_odds_raw = (promo.get("original_odds") or "").strip()
+    try:
+        original_odds = float(original_odds_raw.replace("+", "")) if original_odds_raw else None
+    except (ValueError, TypeError):
+        original_odds = None
+    if original_odds is None:
+        log.append(f"Odds Boost bet (BetID {bet['bet_id']}) settled {bet['result']}, but the "
+                   f"promo's Original Odds field is blank/unparseable ('{original_odds_raw}') -- "
+                   f"can't measure the boost's value. Fill in Original Odds; leaving Pending.")
+        return {"qualifying_cost_fill": None, "finalize": None, "log": log}
+
+    actual_pl = _safe_float(bet["pl"])
+    stake = _safe_float(bet["stake"])
+    fee = _safe_float(bet["fee"])
+    fee_before_odds = (fee_before_odds_lookup or {}).get(bet["book"], False)
+
+    baseline_pl, _ = calculate_pl_and_payout(
+        bet["result"], stake, original_odds,
+        bet_category=BET_CATEGORY_STANDARD, fee=fee, fee_before_odds=fee_before_odds,
+        round_to_nearest=(bet["book"] or "").strip().lower() in PAYOUT_ROUND_NEAREST_BOOKS
+    )
+    realized = round(actual_pl - baseline_pl, 2)
+    log.append(f"Odds Boost bet (BetID {bet['bet_id']}) settled {bet['result']}. Boosted P/L "
+               f"{actual_pl} vs {baseline_pl} at original odds {original_odds_raw} -> boost value "
+               f"{realized}. Finalizing as Realized.")
+    return {"qualifying_cost_fill": None,
+            "finalize": {"status": PROMO_STATUS_REALIZED, "realized_amount": realized},
+            "log": log}
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -741,7 +831,8 @@ def evaluate_profit_boost_daily_promo(promo: dict, linked_bets: list[dict], toda
 
         unboosted_pl, _ = calculate_pl_and_payout(
             reward_bet["result"], stake, odds_taken,
-            bet_category=BET_CATEGORY_STANDARD, fee=fee, fee_before_odds=fee_before_odds
+            bet_category=BET_CATEGORY_STANDARD, fee=fee, fee_before_odds=fee_before_odds,
+            round_to_nearest=(reward_bet["book"] or "").strip().lower() in PAYOUT_ROUND_NEAREST_BOOKS
         )
         return round(actual_pl - unboosted_pl, 2)
 
@@ -843,6 +934,9 @@ def evaluate_promo(promo: dict, linked_bets: list[dict], today: date,
 
     if promo_type == PROMO_TYPE_INSURANCE_BET:
         return evaluate_insurance_bet_promo(promo, linked_bets, today)
+
+    if promo_type == PROMO_TYPE_ODDS_BOOST:
+        return evaluate_odds_boost_promo(promo, linked_bets, today, fee_before_odds_lookup or {})
 
     if promo_type == PROMO_TYPE_PROFIT_BOOST_DAILY:
         start_date = _parse_date(promo.get("start_date", ""))

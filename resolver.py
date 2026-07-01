@@ -1,4 +1,4 @@
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
 
 from config import (
     BET_TYPE_SPREAD, BET_TYPE_MONEYLINE, BET_TYPE_TOTAL, BET_TYPE_DRAW, BET_TYPE_PARLAY,
@@ -105,7 +105,8 @@ def calculate_pl_and_payout(result: str, stake: float, odds_taken: float,
                             fee: float = 0.0, fee_before_odds: bool = False,
                             fee_pct_on_win_only: float = None, bet_type: str = "",
                             fee_pct_on_win_stake: float = None,
-                            decimal_odds: float = None) -> tuple[float, float | None]:
+                            decimal_odds: float = None,
+                            round_to_nearest: bool = False) -> tuple[float, float | None]:
     """
     Computes P/L and Payout for a resolved bet, given American odds and the
     bet's category (which determines whether the stake was real cash or
@@ -168,6 +169,11 @@ def calculate_pl_and_payout(result: str, stake: float, odds_taken: float,
                       set, this OVERRIDES `fee` entirely: forced to 0.0 for
                       every non-WIN result, derived as
                       round(stake * fee_pct_on_win_stake / 100, 2) on a win.
+        round_to_nearest: How the winning profit's fractional cent is
+                      handled. False (default) truncates in the house's favor
+                      (DraftKings and most books); True rounds to the nearest
+                      cent (FanDuel). Set per-book by the caller from
+                      config.PAYOUT_ROUND_NEAREST_BOOKS. Only affects a WIN.
 
     Returns:
         (pl, payout) -- payout is None when nothing is paid out (a loss,
@@ -242,9 +248,9 @@ def calculate_pl_and_payout(result: str, stake: float, odds_taken: float,
         # profit is computed from it directly, instead of from a lossy
         # American round-trip of the same product. Single bets pass American
         # odds as before (decimal_odds is None).
-        profit = (_decimal_odds_profit(effective_stake, decimal_odds)
+        profit = (_decimal_odds_profit(effective_stake, decimal_odds, round_to_nearest)
                   if decimal_odds is not None
-                  else _american_odds_profit(effective_stake, odds_taken))
+                  else _american_odds_profit(effective_stake, odds_taken, round_to_nearest))
         if bet_category == BET_CATEGORY_PROFIT_BOOST:
             if boost_pct is None:
                 raise ValueError(
@@ -351,46 +357,54 @@ def derive_pl_from_payout(payout: float, stake: float, fee: float, bet_category:
     return round(payout - stake - fee, 2)
 
 
-def _american_odds_profit(stake: float, odds: float) -> float:
+def _american_odds_profit(stake: float, odds: float, round_to_nearest: bool = False) -> float:
     """
     Converts American odds to profit on a winning bet.
     Positive odds (e.g. +154): profit = stake * (odds / 100)
     Negative odds (e.g. -453): profit = stake * (100 / abs(odds))
 
-    Truncates (rounds DOWN) to the cent rather than rounding to nearest --
-    confirmed against two real DraftKings settlements that disagreed with
-    nearest-cent rounding by exactly $0.01 in the book's favor (stake
-    $325.76 @ -255: nearest-cent gives $127.75 profit/$453.51 payout, but
-    DraftKings actually paid $127.74/$453.50; stake $100 @ -453: nearest-
-    cent gives $22.08, DraftKings paid $22.07). Sportsbooks settle this
-    way industry-wide -- fractional cents are truncated in the house's
-    favor, never rounded up in the bettor's favor. Uses Decimal (not
-    float + math.floor) because binary floats can't exactly represent
-    most stake/odds combinations -- a stray float imprecision could flip
-    an exact cent value down by a penny it shouldn't lose. Decimal(str(x))
-    on the ORIGINAL inputs keeps the division exact-as-typed before
-    truncating only once, at the very end.
+    The fractional-cent rounding is PER-BOOK (see config's per-book sets and
+    the callers that pass round_to_nearest):
+
+      - round_to_nearest=False (default): truncate DOWN to the cent, in the
+        house's favor. Confirmed against two real DraftKings settlements that
+        disagreed with nearest-cent rounding by $0.01 (stake $325.76 @ -255:
+        DraftKings paid $127.74, not $127.75; stake $100 @ -453: paid $22.07,
+        not $22.08).
+      - round_to_nearest=True: round to the NEAREST cent. Confirmed for
+        FanDuel against a real settlement (stake $284 @ -430: profit
+        66.0465... paid as $66.05, where truncation gives $66.04). Earlier
+        code assumed truncation was industry-wide; FanDuel disproved that.
+
+    Uses Decimal (not float + math.floor) because binary floats can't exactly
+    represent most stake/odds combinations -- a stray float imprecision could
+    flip an exact cent value the wrong way. Decimal(str(x)) on the ORIGINAL
+    inputs keeps the division exact-as-typed before rounding only once, at the
+    very end.
     """
     if odds > 0:
         raw = Decimal(str(stake)) * Decimal(str(odds)) / Decimal(100)
     else:
         raw = Decimal(str(stake)) * Decimal(100) / Decimal(str(abs(odds)))
-    return float(raw.quantize(Decimal('0.01'), rounding=ROUND_DOWN))
+    rounding = ROUND_HALF_UP if round_to_nearest else ROUND_DOWN
+    return float(raw.quantize(Decimal('0.01'), rounding=rounding))
 
 
-def _decimal_odds_profit(stake: float, decimal_odds: float) -> float:
+def _decimal_odds_profit(stake: float, decimal_odds: float, round_to_nearest: bool = False) -> float:
     """
     Profit on a winning bet priced in DECIMAL odds: stake * (decimal - 1).
 
     Exists for parlays, whose combined price is a product of leg decimals
     (e.g. 2.105008) that usually has no exact American representation -- so
     round-tripping it through American (+110/+111) would settle a win at the
-    wrong price by up to a cent on the dollar. Keeps the same house-favor
-    cent truncation (ROUND_DOWN) and exact-Decimal arithmetic as
-    _american_odds_profit, just from the decimal price directly.
+    wrong price by up to a cent on the dollar. Same per-book cent rounding as
+    _american_odds_profit (truncate by default; nearest for FanDuel and other
+    round_to_nearest books) and the same exact-Decimal arithmetic, just from
+    the decimal price directly.
     """
     raw = Decimal(str(stake)) * (Decimal(str(decimal_odds)) - Decimal(1))
-    return float(raw.quantize(Decimal('0.01'), rounding=ROUND_DOWN))
+    rounding = ROUND_HALF_UP if round_to_nearest else ROUND_DOWN
+    return float(raw.quantize(Decimal('0.01'), rounding=rounding))
 
 
 # ── Moneyline ─────────────────────────────────────────────────────────────────

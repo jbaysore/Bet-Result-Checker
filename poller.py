@@ -11,6 +11,7 @@ from config import (
     BOOK_FEE_TYPE_PERCENT_OF_WIN_PROFIT,
     BOOK_FEE_TYPE_PERCENT_OF_STAKE_ON_WIN,
     MANUAL_PAYOUT_REQUIRED_BOOKS,
+    PAYOUT_ROUND_NEAREST_BOOKS,
     BET_TYPE_PARLAY,
     BET_TYPE_MONEYLINE,
 )
@@ -574,6 +575,7 @@ def _safe_calculate_pl_payout(bet: dict, result: str,
             bet_type=bet.get("bet_type", "") if is_win_profit_fee_book else "",
             fee_pct_on_win_stake=fee_config["fee_percent"] if is_win_stake_fee_book else None,
             decimal_odds=decimal_odds,
+            round_to_nearest=book_lower in PAYOUT_ROUND_NEAREST_BOOKS,
         )
     except ValueError as e:
         reason = f"could not calculate P/L -- {e}"

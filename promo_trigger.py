@@ -7,7 +7,7 @@ from sheets_writer import write_promo_qualifying_cost, write_promo_resolution
 from promo_resolver import evaluate_promo
 from config import (
     SHEET_TAB, PROMO_TYPE_PROFIT_BOOST, PROMO_TYPE_PROFIT_BOOST_DAILY,
-    BET_CATEGORY_PROFIT_BOOST,
+    PROMO_TYPE_ODDS_BOOST, BET_CATEGORY_PROFIT_BOOST, BET_CATEGORY_ODDS_BOOST,
 )
 
 CENTRAL = pytz.timezone("America/Chicago")
@@ -78,15 +78,19 @@ def main():
         print(f"  Linked bets: {len(linked_bets)}")
 
         fee_before_odds_lookup = None
-        if promo_type in (PROMO_TYPE_PROFIT_BOOST, PROMO_TYPE_PROFIT_BOOST_DAILY):
-            # Build {book: bool} only for the books actually appearing
-            # among this promo's linked Profit Boost reward bets --
-            # normally just one (the promo's own book), but built from
-            # the bets themselves rather than assumed, in case a token
-            # somehow got logged against a different book.
+        if promo_type in (PROMO_TYPE_PROFIT_BOOST, PROMO_TYPE_PROFIT_BOOST_DAILY,
+                          PROMO_TYPE_ODDS_BOOST):
+            # Build {book: bool} only for the books actually appearing among
+            # this promo's linked reward bets -- normally just one (the promo's
+            # own book), but built from the bets themselves rather than assumed,
+            # in case a reward bet got logged against a different book. Profit
+            # Boost needs it to recompute an UNBOOSTED baseline; Odds Boost to
+            # recompute the ORIGINAL-ODDS baseline -- both must use the same fee
+            # mechanic the real bet used.
+            reward_categories = {BET_CATEGORY_PROFIT_BOOST, BET_CATEGORY_ODDS_BOOST}
             books_in_play = {
                 b["book"] for b in linked_bets
-                if b["bet_category"] == BET_CATEGORY_PROFIT_BOOST and b["book"]
+                if b["bet_category"] in reward_categories and b["book"]
             }
             fee_before_odds_lookup = {b: get_fee_before_odds_cached(b) for b in books_in_play}
 

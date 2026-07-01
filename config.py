@@ -131,6 +131,16 @@ BOOK_FEE_TYPE_PERCENT_OF_STAKE_ON_WIN = "Percent Of Stake On Win"
 # whatever Payout gets entered, once it's there.
 MANUAL_PAYOUT_REQUIRED_BOOKS = {"kalshi"}
 
+# Books that settle a winning payout by ROUNDING the fractional cent to the
+# NEAREST cent, rather than truncating it in the house's favor. The default
+# (any book not listed here) truncates -- confirmed against real DraftKings
+# settlements ($100 @ -453 -> $22.07, $325.76 @ -255 -> $127.74; see
+# resolver._american_odds_profit). FanDuel rounds the other way: confirmed
+# 2026-07-01 against a real settlement, stake $284 @ -430, profit 66.0465...
+# paid as $66.05 (payout $350.05), where truncation would give $350.04. Keyed
+# by lowercased book key, same convention as MANUAL_PAYOUT_REQUIRED_BOOKS.
+PAYOUT_ROUND_NEAREST_BOOKS = {"fanduel"}
+
 # ── Bet Categories ──────────────────────────────────────────────────
 # Matches the 6 canonical values enforced by LogBetWizard.jsx's BET_CATEGORIES
 # (Free Bet was removed -- unused, and its real payout behavior was never
@@ -141,6 +151,12 @@ BET_CATEGORY_BONUS_BET      = "Bonus Bet"
 BET_CATEGORY_PROFIT_BOOST   = "Profit Boost"
 BET_CATEGORY_STANDARD       = "Standard"
 BET_CATEGORY_INSURANCE_BET  = "Insurance Bet"
+# Odds Boost: a real-money bet placed at boosted odds on one book-specified
+# line. The stake is your own cash and the bet is logged at the BOOSTED odds,
+# so its own P/L is settled with normal real-money math (no boost % applied --
+# the odds already are the boost). The promo's value is derived separately by
+# promo_resolver as the P/L difference vs the original (pre-boost) odds.
+BET_CATEGORY_ODDS_BOOST     = "Odds Boost"
 
 # Categories where the stake itself is bonus/promotional credit, not real
 # cash -- a loss costs nothing (P/L = 0), and a void returns no Payout
@@ -153,7 +169,8 @@ PROMO_FUNDED_CATEGORIES = {BET_CATEGORY_BONUS_BET, BET_CATEGORY_DEPOSIT_BONUS}
 # here: the promo affects odds or provides a separate refund credit, but
 # the wagered stake itself was genuinely your money.
 REAL_MONEY_CATEGORIES = {BET_CATEGORY_STANDARD, BET_CATEGORY_QUALIFYING,
-                          BET_CATEGORY_PROFIT_BOOST, BET_CATEGORY_INSURANCE_BET}
+                          BET_CATEGORY_PROFIT_BOOST, BET_CATEGORY_INSURANCE_BET,
+                          BET_CATEGORY_ODDS_BOOST}
 
 # ── Result values ─────────────────────────────────────────────────
 RESULT_WIN   = "WIN"
@@ -266,6 +283,10 @@ PROMO_COL = {
     # holds day 1's date, so day N = Start Date + (N-1). Blank/unused for
     # every other promo type, and for a single-shot Insurance Bet promo.
     "start_date":            "Start Date",
+    # The original (pre-boost) American odds for an Odds Boost promo -- the
+    # baseline the boosted line is measured against. Blank/unused for every
+    # other promo type. See evaluate_odds_boost_promo in promo_resolver.py.
+    "original_odds":         "Original Odds",
 }
 
 PROMOTIONS_TAB = "Promotions"
@@ -292,6 +313,12 @@ PROMO_TYPE_BONUS_BET     = BET_CATEGORY_BONUS_BET
 PROMO_TYPE_DEPOSIT_BONUS = BET_CATEGORY_DEPOSIT_BONUS
 PROMO_TYPE_PROFIT_BOOST  = BET_CATEGORY_PROFIT_BOOST
 PROMO_TYPE_INSURANCE_BET = BET_CATEGORY_INSURANCE_BET
+# Odds Boost promo: a single boosted line, used once, with a max stake. Its
+# linked reward bet carries Bet Category = "Odds Boost" and is placed at the
+# boosted odds; the promo row stores the ORIGINAL (pre-boost) odds so the
+# realized value can be computed as the P/L delta. See
+# evaluate_odds_boost_promo in promo_resolver.py.
+PROMO_TYPE_ODDS_BOOST    = BET_CATEGORY_ODDS_BOOST
 
 # Unlike the aliases above, this Promo Type has NO matching Bet Category of
 # its own -- each day's boosted bet is still logged with

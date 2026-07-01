@@ -155,7 +155,7 @@ def load_pending_bets(tab_name: str) -> list[dict]:
 
     Returns a list of dicts keyed by column name.
     """
-    from config import AUTOMATED_BET_TYPES, BET_TYPE_PARLAY
+    from config import AUTOMATED_BET_TYPES, BET_TYPE_PARLAY, RESULT_NEEDS_REVIEW
     from parlay import parse_legs, all_legs_automatable
 
     rows = _get_bets_rows(tab_name)
@@ -178,8 +178,12 @@ def load_pending_bets(tab_name: str) -> list[dict]:
         result = _bet_cell(row, col, "result")
         bet_type = _bet_cell(row, col, "bet_type")
 
-        if result:
-            continue  # already resolved
+        # Re-scan NEEDS_REVIEW rows -- a final score may be available now (e.g.
+        # a game that reported late, or a tennis match now gradable via ESPN).
+        # A real WIN/LOSS/PUSH/VOID or a manual PENDING is left untouched;
+        # write_result() also refuses to overwrite anything but NEEDS_REVIEW.
+        if result and result != RESULT_NEEDS_REVIEW:
+            continue  # already resolved (or PENDING / manual)
 
         is_parlay = False
         legs = []
@@ -704,6 +708,7 @@ def load_pending_promotions() -> list[dict]:
             "reward_timing":        cell(row, "reward_timing"),
             "token_usage_window":   cell(row, "token_usage_window"),
             "start_date":           cell(row, "start_date"),
+            "original_odds":        cell(row, "original_odds"),
         })
 
     return pending

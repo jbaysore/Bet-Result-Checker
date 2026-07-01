@@ -1,7 +1,7 @@
 import gspread
 from google.oauth2.service_account import Credentials
 from config import (
-    SHEET_ID, SHEET_TAB, RESULT_VOID, get_credentials_info,
+    SHEET_ID, SHEET_TAB, RESULT_VOID, RESULT_NEEDS_REVIEW, get_credentials_info,
     CLOSING_ODDS_ERROR_CODES,
 )
 
@@ -221,9 +221,20 @@ def write_result(row_idx: int, result: str, bet_id: str, book: str = None,
             return False
 
         current_result = _cell_at(row, result_col)
-        if current_result:
+        # Allow writing only into a blank cell or over a prior NEEDS_REVIEW (a
+        # re-scan that finally found a final score). NEVER overwrite a real
+        # WIN/LOSS/PUSH/VOID or a manual PENDING -- those are settled or
+        # human-owned, and clobbering a hand-entered result would be a data-loss
+        # bug.
+        if current_result and current_result != RESULT_NEEDS_REVIEW:
             print(f"[sheets_writer] Row {row_idx} (BetID: {bet_id}) already has "
                   f"result '{current_result}'. Skipping.")
+            return False
+        # No-op when re-writing the identical value (a re-poll that still found
+        # nothing re-issues NEEDS_REVIEW) -- don't churn the cell every run.
+        if current_result and current_result == result:
+            print(f"[sheets_writer] Row {row_idx} (BetID: {bet_id}) re-scan still "
+                  f"NEEDS_REVIEW -- no change, leaving as-is.")
             return False
 
         zero_fee = False
