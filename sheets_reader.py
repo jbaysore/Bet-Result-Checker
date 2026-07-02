@@ -146,6 +146,58 @@ def _bet_cell(row: list, col_idx: dict, key: str) -> str:
     return row[idx].strip()
 
 
+DUPLICATE_BET_ID_PREFIX = "⚠ Duplicate BetID:"
+
+
+def _duplicate_bet_id_row_map(rows: list[list[str]], col: dict[str, int | None]) -> dict[str, list[int]]:
+    """Maps BetID values that appear on more than one row to their 1-based sheet row numbers."""
+    if col.get("bet_id") is None:
+        return {}
+
+    grouped: dict[str, list[int]] = {}
+    for row_idx, row in enumerate(rows[1:], start=2):
+        row = _pad_bet_row(row, col)
+        bet_id = _bet_cell(row, col, "bet_id")
+        if not bet_id:
+            continue
+        grouped.setdefault(bet_id, []).append(row_idx)
+
+    return {bet_id: row_idxs for bet_id, row_idxs in grouped.items() if len(row_idxs) > 1}
+
+
+def _duplicate_bet_ids(rows: list[list[str]], col: dict[str, int | None]) -> set[str]:
+    return set(_duplicate_bet_id_row_map(rows, col).keys())
+
+
+def find_duplicate_bet_id_rows(tab_name: str) -> list[dict]:
+    """
+    Returns every Bets-tab row whose BetID appears more than once on the sheet.
+    Used by trigger.py to flag rows and exclude them from automated settlement.
+    """
+    rows = _get_bets_rows(tab_name)
+    if not rows:
+        return []
+
+    headers = rows[0]
+    col = _resolve_bet_col_indices(headers)
+    if col.get("bet_id") is None:
+        return []
+
+    dup_map = _duplicate_bet_id_row_map(rows, col)
+    if not dup_map:
+        return []
+
+    flagged = []
+    for bet_id, row_idxs in dup_map.items():
+        for row_idx in row_idxs:
+            flagged.append({
+                "row_idx": row_idx,
+                "bet_id": bet_id,
+                "other_row_idxs": [i for i in row_idxs if i != row_idx],
+            })
+    return flagged
+
+
 def load_pending_bets(tab_name: str) -> list[dict]:
     """
     Reads the Bets tab and returns all rows where:
@@ -171,9 +223,15 @@ def load_pending_bets(tab_name: str) -> list[dict]:
             "column entirely -- cannot proceed."
         )
 
+    duplicate_ids = _duplicate_bet_ids(rows, col)
+
     pending = []
     for row_idx, row in enumerate(rows[1:], start=2):  # row 1 is header
         row = _pad_bet_row(row, col)
+
+        bet_id = _bet_cell(row, col, "bet_id")
+        if bet_id in duplicate_ids:
+            continue  # flagged by trigger.py; never auto-settle duplicate IDs
 
         result = _bet_cell(row, col, "result")
         bet_type = _bet_cell(row, col, "bet_type")
@@ -267,9 +325,15 @@ def load_unresolved_pl_bets(tab_name: str) -> list[dict]:
             "column entirely -- cannot proceed."
         )
 
+    duplicate_ids = _duplicate_bet_ids(rows, col)
+
     unresolved = []
     for row_idx, row in enumerate(rows[1:], start=2):  # row 1 is header
         row = _pad_bet_row(row, col)
+
+        bet_id = _bet_cell(row, col, "bet_id")
+        if bet_id in duplicate_ids:
+            continue
 
         result = _bet_cell(row, col, "result")
         pl = _bet_cell(row, col, "pl")
@@ -342,9 +406,15 @@ def load_manual_payout_pending_pl_bets(tab_name: str) -> list[dict]:
             "column entirely -- cannot proceed."
         )
 
+    duplicate_ids = _duplicate_bet_ids(rows, col)
+
     pending = []
     for row_idx, row in enumerate(rows[1:], start=2):  # row 1 is header
         row = _pad_bet_row(row, col)
+
+        bet_id = _bet_cell(row, col, "bet_id")
+        if bet_id in duplicate_ids:
+            continue
 
         result = _bet_cell(row, col, "result")
         pl = _bet_cell(row, col, "pl")
@@ -409,9 +479,15 @@ def load_bets_needing_closing_odds(tab_name: str) -> list[dict]:
               "closing odds pass will find nothing to do.")
         return []
 
+    duplicate_ids = _duplicate_bet_ids(rows, col)
+
     bets = []
     for row_idx, row in enumerate(rows[1:], start=2):
         row = _pad_bet_row(row, col)
+
+        bet_id = _bet_cell(row, col, "bet_id")
+        if bet_id in duplicate_ids:
+            continue
 
         bet_type = _bet_cell(row, col, "bet_type")
 

@@ -1,6 +1,9 @@
 name: Run Bet Result Checker
 on:
   workflow_dispatch:
+concurrency:
+  group: bet-result-checker
+  cancel-in-progress: false
 jobs:
   run:
     runs-on: ubuntu-latest

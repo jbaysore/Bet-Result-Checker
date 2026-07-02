@@ -3,11 +3,11 @@ from datetime import datetime, timezone
 import pytz
 from sheets_reader import (
     load_pending_bets, load_unresolved_pl_bets, load_manual_payout_pending_pl_bets,
-    load_bets_needing_closing_odds,
+    load_bets_needing_closing_odds, find_duplicate_bet_id_rows,
 )
 from poller import poll_bet, complete_pl_payout, complete_manual_payout_pl, _parse_game_datetime
 from closing_odds import fetch_closing_odds, fetch_parlay_closing_odds
-from sheets_writer import write_closing_odds
+from sheets_writer import write_closing_odds, flag_duplicate_bet_id
 from config import SHEET_TAB, RESULT_VOID
 
 CENTRAL = pytz.timezone("America/Chicago")
@@ -18,6 +18,27 @@ def main():
     print(f"  Bet Result Checker")
     print(f"  Started: {datetime.now(CENTRAL).strftime('%m/%d/%Y %I:%M:%S %p CT')}")
     print("=" * 60)
+
+    write_failures = 0
+
+    # ── Flag duplicate BetIDs before any settlement pass ─────────
+    try:
+        duplicate_rows = find_duplicate_bet_id_rows(SHEET_TAB)
+    except Exception as e:
+        print(f"[trigger] ⚠️  Could not scan for duplicate BetIDs: {e}")
+        duplicate_rows = []
+
+    if duplicate_rows:
+        by_id: dict[str, list[int]] = {}
+        for entry in duplicate_rows:
+            by_id.setdefault(entry["bet_id"], []).append(entry["row_idx"])
+        print(f"[trigger] ⚠️  Found {len(by_id)} duplicate BetID(s) across "
+              f"{len(duplicate_rows)} row(s) — flagging and excluding from automated settlement.")
+        for bet_id, row_idxs in by_id.items():
+            detail = f"also on row(s) {', '.join(str(i) for i in sorted(row_idxs))}"
+            for row_idx in row_idxs:
+                if not flag_duplicate_bet_id(row_idx, bet_id, detail):
+                    write_failures += 1
 
     # ── Load pending bets ────────────────────────────────────────
     print(f"[trigger] Loading pending bets from '{SHEET_TAB}' tab...")
@@ -95,6 +116,7 @@ def main():
                 print(f"[trigger] ❌ BetID {bet['bet_id']}: unexpected error -- {e}. "
                       f"Continuing with the next bet; this one will be retried next run.")
                 status = "error"
+                write_failures += 1
 
             if status == "resolved":
                 results["resolved"] += 1
@@ -133,6 +155,7 @@ def main():
                 print(f"[trigger] ❌ BetID {bet['bet_id']}: unexpected error -- {e}. "
                       f"Continuing with the next row; this one will be retried next run.")
                 status = "skipped"
+                write_failures += 1
             pl_results[status] = pl_results.get(status, 0) + 1
             print()
     else:
@@ -166,6 +189,7 @@ def main():
                 print(f"[trigger] ❌ BetID {bet['bet_id']}: unexpected error -- {e}. "
                       f"Continuing with the next row; this one will be retried next run.")
                 status = "skipped"
+                write_failures += 1
             manual_pl_results[status] = manual_pl_results.get(status, 0) + 1
             print()
     else:
@@ -213,6 +237,7 @@ def main():
                             closing_results["captured"] += 1
                         else:
                             closing_results["skipped"] += 1
+                            write_failures += 1
                         print()
                         continue
 
@@ -230,6 +255,7 @@ def main():
                             closing_results["captured"] += 1
                         else:
                             closing_results["skipped"] += 1
+                            write_failures += 1
                     elif result.get("error"):
                         # Permanent failure (game/book/selection not found in
                         # snapshot) — write the error code to the ClosingOdds
@@ -270,6 +296,10 @@ def main():
     print(f"  Closing Odds Captured: {closing_results['captured']}")
     print(f"  Closing Odds Skipped:  {closing_results['skipped']} (game not in snapshot, or unsupported bet type)")
     print("=" * 60)
+
+    if write_failures:
+        print(f"[trigger] ❌ {write_failures} critical write failure(s) — exiting non-zero for CI")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

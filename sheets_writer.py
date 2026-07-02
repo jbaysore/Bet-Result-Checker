@@ -489,6 +489,58 @@ def write_closing_odds(row_idx: int, bet_id: str,
 
 
 PL_BLOCKED_PREFIX = "⚠ P/L not calculated:"
+DUPLICATE_BET_ID_PREFIX = "⚠ Duplicate BetID:"
+
+
+def flag_duplicate_bet_id(row_idx: int, bet_id: str, detail: str) -> bool:
+    """
+    Appends a visible duplicate-BetID warning to Notes when the same BetID
+    appears on more than one row. Automated settlement skips these rows;
+    this makes the problem visible on the sheet itself, not just in CI logs.
+
+    Idempotent: replaces an existing DUPLICATE_BET_ID_PREFIX line rather than
+    stacking duplicates on every scheduled run.
+    """
+    idx = _bets_col_letter_lookup()
+    notes_col = idx.get("notes")
+    bet_id_col = idx.get("bet_id")
+
+    if None in (notes_col, bet_id_col):
+        print(f"[sheets_writer] ⚠️  Bets tab is missing Notes/BetID column -- "
+              f"cannot flag row {row_idx} for duplicate BetID.")
+        return False
+
+    try:
+        sheet = _get_sheet()
+        row = _read_bet_row(sheet, row_idx)
+
+        if not _bet_id_matches(row, bet_id_col, bet_id):
+            current_bet_id = _cell_at(row, bet_id_col)
+            print(f"[sheets_writer] ⚠️  Row {row_idx} BetID mismatch. "
+                  f"Expected '{bet_id}', found '{current_bet_id}'. Skipping duplicate flag.")
+            return False
+
+        existing_notes = _cell_at(row, notes_col)
+        flag_line = f"{DUPLICATE_BET_ID_PREFIX} {detail}"
+
+        other_lines = [
+            line for line in existing_notes.split("\n")
+            if line.strip() and not line.strip().startswith(DUPLICATE_BET_ID_PREFIX)
+        ]
+        new_notes = "\n".join(other_lines + [flag_line])
+
+        sheet.update_cell(row_idx, notes_col, new_notes)
+        print(f"[sheets_writer] 🚩 Row {row_idx} (BetID: {bet_id}) flagged: {flag_line}")
+        return True
+
+    except gspread.exceptions.APIError as e:
+        print(f"[sheets_writer] ❌ Sheets API error flagging duplicate BetID on row {row_idx} "
+              f"(BetID: {bet_id}): {e}")
+        return False
+    except Exception as e:
+        print(f"[sheets_writer] ❌ Unexpected error flagging duplicate BetID on row {row_idx} "
+              f"(BetID: {bet_id}): {e}")
+        return False
 
 
 def flag_pl_blocked(row_idx: int, bet_id: str, reason: str) -> bool:
