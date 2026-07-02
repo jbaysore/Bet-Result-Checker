@@ -280,8 +280,23 @@ def _fetch_closing_price(bet: dict, label: str) -> dict:
     # Exchange books (Kalshi, etc.) price via their own API in odds-tool — never
     # present on The Odds API historical endpoint. Skip the paid call entirely.
     if is_exchange_book(book):
-        print(f"[closing_odds] {label}: book '{book}' is not on The Odds API "
-              f"historical feed — manual entry required.")
+        # Kalshi is an exchange, but its own public API exposes historical
+        # candlesticks -- if we captured the market ticker at log time, pull the
+        # real closing line from there instead of routing to manual entry.
+        if book == "kalshi":
+            ticker = (bet.get("kalshi_ticker") or "").strip()
+            if ticker:
+                from sources.kalshi import get_closing_american
+                game_dt = _parse_game_datetime(bet.get("game_date", ""), bet.get("game_start", ""))
+                american = get_closing_american(ticker, game_dt, label)
+                if american is not None:
+                    return {"price": american, "error": None}
+                # Ticker present but no closing price yet (illiquid, or a
+                # transient API issue). Fall back to MANUAL ENTRY, which the
+                # re-scan pass will re-attempt against Kalshi on the next run.
+            # else: no ticker (older bet, or couldn't be resolved) -> manual.
+        print(f"[closing_odds] {label}: book '{book}' closing line not available "
+              f"automatically — manual entry required.")
         return _permanent(CLOSING_ODDS_MANUAL_REQUIRED)
 
     if not sport_has_odds_feed(sport):

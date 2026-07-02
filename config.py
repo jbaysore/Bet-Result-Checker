@@ -76,6 +76,11 @@ BET_COL = {
     # Date/Start are the LATEST leg, so the poller waits for every leg to
     # finish before settling. See parlay.py for parse/combine logic.
     "legs":            "Legs",
+    # The Kalshi market ticker for a Kalshi bet (resolved + written by the
+    # odds-tool server at log time). Lets the closing-odds pass pull the real
+    # closing line from Kalshi's candlesticks API instead of falling back to
+    # MANUAL ENTRY. Blank for non-Kalshi bets. See sources/kalshi.py.
+    "kalshi_ticker":   "Kalshi Ticker",
 }
 
 # ── Bet types ─────────────────────────────────────────────────────

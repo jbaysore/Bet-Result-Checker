@@ -6,6 +6,7 @@ from config import (
     POLL_MAX_DURATION_SECONDS,
     RESULT_NEEDS_REVIEW,
     RESULT_WIN,
+    RESULT_LOSS,
     BET_CATEGORY_PROFIT_BOOST,
     BET_CATEGORY_BONUS_BET,
     BOOK_FEE_TYPE_PERCENT_OF_WIN_PROFIT,
@@ -109,6 +110,24 @@ def poll_bet(bet: dict) -> bool:
         return _poll_parlay(bet, now_utc, give_up_at)
 
     print(f"[poller] BetID {bet_id}: checking now — {now_utc.strftime('%H:%M:%S UTC')}")
+
+    # Kalshi single bets: settle from the Kalshi market's own resolution first.
+    # We stored the SELECTION's market ticker at log time, so a 'yes' settlement
+    # is a WIN and 'no' a LOSS with no team matching -- authoritative (the exact
+    # contract you held) and not dependent on the Odds API scores feed. If the
+    # market isn't finalized yet, fall through to the normal score-based path.
+    if (bet.get("book") or "").strip().lower() == "kalshi" and bet.get("kalshi_ticker"):
+        from sources.kalshi import get_market_result
+        kr = get_market_result(bet["kalshi_ticker"], f"BetID {bet_id}")
+        if kr in ("yes", "no"):
+            result = RESULT_WIN if kr == "yes" else RESULT_LOSS
+            pl, payout = _safe_calculate_pl_payout(bet, result)
+            success = write_result(row_idx, result, bet_id, book=bet.get("book"),
+                                   pl=pl, payout=payout)
+            if success and pl is not None:
+                clear_pl_blocked_flag(row_idx, bet_id)
+            print(f"[poller] BetID {bet_id}: Kalshi market settled '{kr}' → {result}.")
+            return "resolved" if success else "error"
 
     game = _fetch_result(bet, sport)
 

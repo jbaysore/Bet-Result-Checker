@@ -217,6 +217,9 @@ def load_pending_bets(tab_name: str) -> list[dict]:
             "promo_id":    _bet_cell(row, col, "promo_id"),
             "is_parlay":   is_parlay,
             "legs":        legs,
+            # Kalshi market ticker (blank for non-Kalshi) -- lets poll_bet settle
+            # from Kalshi's own market resolution before the score-based path.
+            "kalshi_ticker": _bet_cell(row, col, "kalshi_ticker"),
         })
 
     return pending
@@ -452,6 +455,9 @@ def load_bets_needing_closing_odds(tab_name: str) -> list[dict]:
             "result":     result,
             "is_parlay":  is_parlay,
             "legs":       legs,
+            # Kalshi market ticker (blank for non-Kalshi) -- lets closing_odds
+            # pull the real Kalshi closing line instead of MANUAL ENTRY.
+            "kalshi_ticker": _bet_cell(row, col, "kalshi_ticker"),
         })
 
     return bets
