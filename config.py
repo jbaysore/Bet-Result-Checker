@@ -137,9 +137,12 @@ MANUAL_PAYOUT_REQUIRED_BOOKS = {"kalshi"}
 # settlements ($100 @ -453 -> $22.07, $325.76 @ -255 -> $127.74; see
 # resolver._american_odds_profit). FanDuel rounds the other way: confirmed
 # 2026-07-01 against a real settlement, stake $284 @ -430, profit 66.0465...
-# paid as $66.05 (payout $350.05), where truncation would give $350.04. Keyed
-# by lowercased book key, same convention as MANUAL_PAYOUT_REQUIRED_BOOKS.
-PAYOUT_ROUND_NEAREST_BOOKS = {"fanduel"}
+# paid as $66.05 (payout $350.05), where truncation would give $350.04.
+# ProphetX matches FanDuel here too: confirmed 2026-07-01, stake $297.83 @
+# -470, app shows +$63.37 before the 2% fee (63.3680... truncated would be
+# $63.36 -> P/L $62.09; nearest gives $63.37 -> P/L $62.10). Keyed by
+# lowercased book key, same convention as MANUAL_PAYOUT_REQUIRED_BOOKS.
+PAYOUT_ROUND_NEAREST_BOOKS = {"fanduel", "prophetx"}
 
 # ── Bet Categories ──────────────────────────────────────────────────
 # Matches the 6 canonical values enforced by LogBetWizard.jsx's BET_CATEGORIES

@@ -10,6 +10,27 @@ def test_fanduel_is_configured_nearest():
     assert "fanduel" in PAYOUT_ROUND_NEAREST_BOOKS
 
 
+def test_prophetx_is_configured_nearest():
+    assert "prophetx" in PAYOUT_ROUND_NEAREST_BOOKS
+
+
+def test_real_prophetx_settlement_rounds_up():
+    # Confirmed real settlement: stake $297.83 @ -470, app +$63.37 before 2% fee.
+    pl, payout = calculate_pl_and_payout(
+        RESULT_WIN, 297.83, -470, BET_CATEGORY_STANDARD,
+        fee_pct_on_win_only=2.0, bet_type="Moneyline", round_to_nearest=True)
+    assert payout == 361.20
+    assert pl == 62.10
+
+
+def test_prophetx_same_settlement_truncates_by_default():
+    pl, payout = calculate_pl_and_payout(
+        RESULT_WIN, 297.83, -470, BET_CATEGORY_STANDARD,
+        fee_pct_on_win_only=2.0, bet_type="Moneyline")
+    assert payout == 361.19
+    assert pl == 62.09
+
+
 def test_real_fanduel_settlement_rounds_up():
     # Confirmed real settlement: stake $284 @ -430 -> $350.05 (profit 66.0465..)
     pl, payout = calculate_pl_and_payout(
