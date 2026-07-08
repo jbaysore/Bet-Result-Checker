@@ -14,6 +14,25 @@ def test_prophetx_is_configured_nearest():
     assert "prophetx" in PAYOUT_ROUND_NEAREST_BOOKS
 
 
+def test_fanatics_is_configured_nearest():
+    assert "fanatics" in PAYOUT_ROUND_NEAREST_BOOKS
+
+
+def test_real_fanatics_settlement_rounds_up():
+    # Confirmed real settlement: stake $1,017 @ -270, payout $1,393.67 (profit 376.6666..)
+    pl, payout = calculate_pl_and_payout(
+        RESULT_WIN, 1017.0, -270, BET_CATEGORY_STANDARD, fee=0.5, round_to_nearest=True)
+    assert payout == 1393.67
+    assert pl == 376.17
+
+
+def test_real_fanatics_settlement_truncates_by_default():
+    pl, payout = calculate_pl_and_payout(
+        RESULT_WIN, 1017.0, -270, BET_CATEGORY_STANDARD, fee=0.5)
+    assert payout == 1393.66
+    assert pl == 376.16
+
+
 def test_real_prophetx_settlement_rounds_up():
     # Confirmed real settlement: stake $297.83 @ -470, app +$63.37 before 2% fee.
     pl, payout = calculate_pl_and_payout(

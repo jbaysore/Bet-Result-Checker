@@ -369,12 +369,18 @@ def complete_manual_payout_pl(bet: dict) -> str:
         return "skipped"
 
     if result != RESULT_WIN:
-        # A LOSS/PUSH/VOID never needed manual Payout entry in the first
-        # place (see config.MANUAL_PAYOUT_REQUIRED_BOOKS docstring) -- if
-        # one shows up here anyway (e.g. hand-edited), the standard
-        # P/L = Payout - Stake - Fee relationship is still correct, no
-        # special derivation needed.
-        pl = round(payout - stake - fee, 2)
+        # Category-aware math (Bonus Bet LOSS is P/L 0, not -stake). The naive
+        # payout - stake - fee formula is only valid for real-money categories.
+        book = (bet.get("book") or "").strip()
+        fee_before_odds = get_book_fee_before_odds(book) if book else False
+        try:
+            odds_taken = float(str(bet.get("odds_taken", "0")).replace("+", ""))
+        except (ValueError, TypeError):
+            odds_taken = 0.0
+        pl, _ = calculate_pl_and_payout(
+            result, stake, odds_taken, bet_category,
+            boost_pct=None, fee=fee, fee_before_odds=fee_before_odds,
+        )
     else:
         pl = derive_pl_from_payout(payout, stake, fee, bet_category)
 
