@@ -357,6 +357,25 @@ def derive_pl_from_payout(payout: float, stake: float, fee: float, bet_category:
     return round(payout - stake - fee, 2)
 
 
+def derive_cashout_pl(
+    payout: float,
+    stake: float,
+    fee: float,
+    bet_category: str,
+    *,
+    fee_before_odds: bool = False,
+) -> float:
+    """
+    P/L for a manual cashout when the user enters the dollars returned.
+    Mirrors odds-tool/cashoutPl.js deriveCashoutPl().
+    """
+    if bet_category == BET_CATEGORY_BONUS_BET:
+        return round(payout - fee, 2)
+    if fee_before_odds:
+        return round(payout - stake, 2)
+    return round(payout - stake - fee, 2)
+
+
 def _american_odds_profit(stake: float, odds: float, round_to_nearest: bool = False) -> float:
     """
     Converts American odds to profit on a winning bet.

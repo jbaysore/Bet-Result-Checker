@@ -191,6 +191,7 @@ RESULT_WIN   = "WIN"
 RESULT_LOSS  = "LOSS"
 RESULT_PUSH  = "PUSH"
 RESULT_VOID  = "VOID"        # written when a game is cancelled/postponed and never played
+RESULT_CASHOUT = "CASHOUT"   # manual early exit — payout entered by user
 RESULT_NEEDS_REVIEW = "NEEDS_REVIEW"  # written when Odds API never returned a final
                                        # score well past game time -- use the odds-tool
                                        # notification bell (Check result) before full
