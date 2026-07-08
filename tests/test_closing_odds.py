@@ -13,6 +13,7 @@ from closing_odds import (
     region_for_book_key,
     fetch_closing_odds,
     is_exchange_book,
+    needs_manual_closing_odds,
 )
 from config import CLOSING_ODDS_MANUAL_REQUIRED, CLOSING_ODDS_SPORT_NOT_ON_API
 
@@ -21,6 +22,8 @@ def test_region_for_book_key():
     assert region_for_book_key("fanatics") == "us"
     assert region_for_book_key("kalshi") == "us_ex"
     assert region_for_book_key("espnbet") == "us2"
+    # ProphetX is an exchange -> us_ex region on The Odds API.
+    assert region_for_book_key("prophetx") == "us_ex"
 
 
 def test_parse_selection_moneyline():
@@ -76,7 +79,59 @@ def test_clv_math():
 
 def test_is_exchange_book():
     assert is_exchange_book("kalshi")
+    assert is_exchange_book("prophetx")
     assert not is_exchange_book("fanatics")
+
+
+def test_needs_manual_closing_odds_excludes_prophetx():
+    # Prediction markets not on The Odds API -> manual.
+    assert needs_manual_closing_odds("kalshi")
+    assert needs_manual_closing_odds("polymarket")
+    assert needs_manual_closing_odds("novig")
+    assert needs_manual_closing_odds("betopenly")
+    # ProphetX IS on The Odds API (us_ex) -> must NOT be manual-only.
+    assert not needs_manual_closing_odds("prophetx")
+    assert not needs_manual_closing_odds("fanatics")
+
+
+@patch("closing_odds.sport_has_odds_feed", return_value=True)
+@patch("closing_odds._fetch_historical_snapshot")
+def test_fetch_closing_odds_queries_prophetx(mock_snapshot, _mock_feed):
+    # ProphetX must hit the historical endpoint (not short-circuit to manual).
+    mock_snapshot.return_value = [{
+        "home_team": "Argentina",
+        "away_team": "Jordan",
+        "bookmakers": [{
+            "key": "prophetx",
+            "markets": [{
+                "key": "h2h",
+                "outcomes": [
+                    {"name": "Argentina", "price": -140},
+                    {"name": "Jordan", "price": 120},
+                ],
+            }],
+        }],
+    }]
+    result = fetch_closing_odds({
+        "bet_id": "201",
+        "sport": "soccer_fifa_world_cup",
+        "book": "prophetx",
+        "team1": "Argentina",
+        "team2": "Jordan",
+        "game_date": "6/15/2026",
+        "game_start": "2:00 PM",
+        "bet_type": "Moneyline",
+        "selection": "Argentina",
+        "odds_taken": "-150",
+    })
+    assert mock_snapshot.called
+    # Snapshot is fetched for the prophetx book (region routing to us_ex is
+    # covered by test_region_for_book_key).
+    _args, kwargs = mock_snapshot.call_args
+    called = _args + tuple(kwargs.values())
+    assert "prophetx" in called
+    assert result["error"] is None
+    assert result["closing_odds"] == "-140"
 
 
 @patch("closing_odds.sport_has_odds_feed", return_value=True)

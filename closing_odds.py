@@ -33,7 +33,21 @@ _snapshot_cache: dict[tuple[str, str, str, str], list | None] = {}
 # Mirrors odds-tool's bookConstants.js regionForBookKey() and
 # Betting-Tracker's region_for_book_key() exactly.
 
+# Books served under The Odds API's us_ex region. All of these route their
+# historical snapshot request to regions=us_ex (see region_for_book_key).
+# Mirrors odds-tool bookConstants.js EXCHANGE_KEYS.
 _EXCHANGE_KEYS = {"polymarket", "kalshi", "novig", "betopenly", "prophetx"}
+
+# Books whose closing line is NOT retrievable from The Odds API historical feed
+# and therefore always route to manual entry (or a book-specific API, as Kalshi
+# does via its own candlesticks). This is a STRICT SUBSET of _EXCHANGE_KEYS:
+# ProphetX is intentionally excluded because it IS carried on The Odds API under
+# the us_ex region (same as odds-tool's live fetches), so its historical
+# snapshot can and should be queried like any other book. Conflating the two
+# sets is what previously made ProphetX bets always fall through to manual entry
+# and never return a closing price.
+_NON_ODDS_API_KEYS = {"polymarket", "kalshi", "novig", "betopenly"}
+
 _US2_KEYS = {
     "ballybet", "betanysports", "betparx", "espnbet", "fliff",
     "hardrockbet", "hardrockbet_az", "hardrockbet_fl",
@@ -42,8 +56,18 @@ _US2_KEYS = {
 
 
 def is_exchange_book(book_key: str) -> bool:
-    """Exchange / prediction-market books are not on The Odds API historical feed."""
+    """True for us_ex-region exchange / prediction-market books (includes ProphetX)."""
     return (book_key or "").strip().lower() in _EXCHANGE_KEYS
+
+
+def needs_manual_closing_odds(book_key: str) -> bool:
+    """
+    True for books whose closing line can't be pulled from The Odds API
+    historical feed (prediction markets priced via their own venue). ProphetX
+    is deliberately NOT here — it's on The Odds API us_ex region and is fetched
+    like a normal book.
+    """
+    return (book_key or "").strip().lower() in _NON_ODDS_API_KEYS
 
 
 def region_for_book_key(book_key: str) -> str:
@@ -277,12 +301,15 @@ def _fetch_closing_price(bet: dict, label: str) -> dict:
     def _permanent(code):
         return {"price": None, "error": code}
 
-    # Exchange books (Kalshi, etc.) price via their own API in odds-tool — never
-    # present on The Odds API historical endpoint. Skip the paid call entirely.
-    if is_exchange_book(book):
-        # Kalshi is an exchange, but its own public API exposes historical
-        # candlesticks -- if we captured the market ticker at log time, pull the
-        # real closing line from there instead of routing to manual entry.
+    # Prediction-market books (Kalshi, Polymarket, Novig, BetOpenly) price via
+    # their own venue and aren't on The Odds API historical endpoint — skip the
+    # paid call entirely. ProphetX is an exchange too, but IS carried on The
+    # Odds API (us_ex region), so it deliberately falls through to the normal
+    # historical fetch below rather than being routed to manual entry.
+    if needs_manual_closing_odds(book):
+        # Kalshi is a prediction market, but its own public API exposes
+        # historical candlesticks -- if we captured the market ticker at log
+        # time, pull the real closing line from there instead of manual entry.
         if book == "kalshi":
             ticker = (bet.get("kalshi_ticker") or "").strip()
             if ticker:

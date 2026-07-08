@@ -65,6 +65,10 @@ BET_COL = {
     "fee":             "Fee",
     "bet_category":    "Bet Category",
     "promo_id":        "Promo ID",
+    # TRUE when a Standard bet is a cash hedge placed against a promotion.
+    # Written by the odds-tool Log Bet Wizard; the poller only preserves it
+    # (settlement/promo logic never reads it). Blank for non-hedge bets.
+    "hedge":           "Hedge",
     "result":          "Result",
     "payout":          "Payout",
     "pl":              "P/L",
