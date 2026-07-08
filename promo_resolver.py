@@ -43,7 +43,8 @@ from config import (
     PROMO_STATUS_REALIZED, PROMO_STATUS_UNUSED, PROMO_TYPE_PROFIT_BOOST_DAILY,
     PROMO_TYPE_BONUS_BET, PROMO_TYPE_PROFIT_BOOST,
     PROMO_TYPE_DEPOSIT_BONUS, PROMO_TYPE_INSURANCE_BET, PROMO_TYPE_ODDS_BOOST,
-    REWARD_TIMING_PER_QUALIFYING_BET, PAYOUT_ROUND_NEAREST_BOOKS,
+    REWARD_TIMING_PER_QUALIFYING_BET, REWARD_TIMING_GRANTED,
+    PAYOUT_ROUND_NEAREST_BOOKS,
 )
 from resolver import calculate_pl_and_payout
 
@@ -139,65 +140,75 @@ def _evaluate_multi_grant_promo(promo: dict, linked_bets: list[dict], today: dat
         key=lambda b: _parse_date(b["date_placed"]) or date.min
     )
 
-    # ── "Never used at all" check ──────────────────────────────────────
-    if not qualifying_bets:
-        if expiration is None:
-            log.append("No qualifying bets linked yet, and no Expiration Date set -- "
-                        "cannot determine Unused. Leaving Pending.")
-            return {"qualifying_cost_fill": None, "finalize": None, "log": log}
-        if today > expiration:
-            log.append(f"Expiration ({expiration}) passed with zero qualifying bets "
-                        f"ever linked -- finalizing as Unused.")
-            return {
-                "qualifying_cost_fill": None,
-                "finalize": {"status": PROMO_STATUS_UNUSED, "realized_amount": 0.0},
-                "log": log,
-            }
-        log.append(f"No qualifying bets yet, expiration ({expiration}) hasn't passed -- "
-                    f"leaving Pending.")
-        return {"qualifying_cost_fill": None, "finalize": None, "log": log}
-
-    # ── Which qualifying bets actually count (placed in-window)? ───────
-    if expiration is not None:
-        counted_qualifiers = [
-            b for b in qualifying_bets
-            if (_parse_date(b["date_placed"]) or date.max) <= expiration
-        ]
-    else:
-        counted_qualifiers = qualifying_bets
-
     try:
         expected_count = int(promo["expected_reward_count"]) if promo["expected_reward_count"] else 1
     except ValueError:
         expected_count = 1
     expected_count = max(expected_count, 1)
 
-    earned_count = min(len(counted_qualifiers), expected_count)
+    reward_timing = promo["reward_timing"]
+    is_granted = reward_timing == REWARD_TIMING_GRANTED
 
-    # ── Has the qualifying window genuinely closed? ─────────────────────
-    window_closed = (expiration is not None and today > expiration) or (earned_count >= expected_count)
+    if is_granted:
+        earned_count = expected_count
+        window_closed = True
+        counted_qualifiers = []
+        qc_fill = None
+        log.append(f"Granted promo -- {earned_count} token(s) available without qualifying bet(s).")
+    else:
+        # ── "Never used at all" check ──────────────────────────────────────
+        if not qualifying_bets:
+            if expiration is None:
+                log.append("No qualifying bets linked yet, and no Expiration Date set -- "
+                            "cannot determine Unused. Leaving Pending.")
+                return {"qualifying_cost_fill": None, "finalize": None, "log": log}
+            if today > expiration:
+                log.append(f"Expiration ({expiration}) passed with zero qualifying bets "
+                            f"ever linked -- finalizing as Unused.")
+                return {
+                    "qualifying_cost_fill": None,
+                    "finalize": {"status": PROMO_STATUS_UNUSED, "realized_amount": 0.0},
+                    "log": log,
+                }
+            log.append(f"No qualifying bets yet, expiration ({expiration}) hasn't passed -- "
+                        f"leaving Pending.")
+            return {"qualifying_cost_fill": None, "finalize": None, "log": log}
 
-    if not window_closed:
-        log.append(f"Qualifying window still open ({len(counted_qualifiers)}/{expected_count} "
-                    f"qualifier(s) so far, expiration {expiration or 'none set'}) -- leaving Pending.")
-        return {"qualifying_cost_fill": None, "finalize": None, "log": log}
+        # ── Which qualifying bets actually count (placed in-window)? ───────
+        if expiration is not None:
+            counted_qualifiers = [
+                b for b in qualifying_bets
+                if (_parse_date(b["date_placed"]) or date.max) <= expiration
+            ]
+        else:
+            counted_qualifiers = qualifying_bets
 
-    qc_fill = None
-    if not promo["qualifying_cost"]:
-        qc_fill = round(sum(
-            _safe_float(b["stake"]) + _safe_float(b["fee"]) for b in counted_qualifiers
-        ), 2)
-        log.append(f"Qualifying window closed -- backfilling Qualifying Cost = {qc_fill} "
-                    f"(Stake+Fee across {len(counted_qualifiers)} qualifying bet(s)).")
+        earned_count = min(len(counted_qualifiers), expected_count)
 
-    if earned_count == 0:
-        log.append("Qualifying window closed with zero counted qualifying bets -- "
-                    "finalizing as Unused.")
-        return {
-            "qualifying_cost_fill": qc_fill,
-            "finalize": {"status": PROMO_STATUS_UNUSED, "realized_amount": 0.0},
-            "log": log,
-        }
+        # ── Has the qualifying window genuinely closed? ─────────────────────
+        window_closed = (expiration is not None and today > expiration) or (earned_count >= expected_count)
+
+        if not window_closed:
+            log.append(f"Qualifying window still open ({len(counted_qualifiers)}/{expected_count} "
+                        f"qualifier(s) so far, expiration {expiration or 'none set'}) -- leaving Pending.")
+            return {"qualifying_cost_fill": None, "finalize": None, "log": log}
+
+        qc_fill = None
+        if not promo["qualifying_cost"]:
+            qc_fill = round(sum(
+                _safe_float(b["stake"]) + _safe_float(b["fee"]) for b in counted_qualifiers
+            ), 2)
+            log.append(f"Qualifying window closed -- backfilling Qualifying Cost = {qc_fill} "
+                        f"(Stake+Fee across {len(counted_qualifiers)} qualifying bet(s)).")
+
+        if earned_count == 0:
+            log.append("Qualifying window closed with zero counted qualifying bets -- "
+                        "finalizing as Unused.")
+            return {
+                "qualifying_cost_fill": qc_fill,
+                "finalize": {"status": PROMO_STATUS_UNUSED, "realized_amount": 0.0},
+                "log": log,
+            }
 
     # ── Per-token usage deadlines ────────────────────────────────────────
     try:
@@ -205,21 +216,28 @@ def _evaluate_multi_grant_promo(promo: dict, linked_bets: list[dict], today: dat
     except ValueError:
         usage_days = None
 
-    reward_timing = promo["reward_timing"]
-
     token_deadlines = []
     for i in range(earned_count):
-        if reward_timing == REWARD_TIMING_PER_QUALIFYING_BET and i < len(counted_qualifiers):
+        if is_granted:
+            # Expiration is the hard "use by" date for granted tokens.
+            if expiration is not None:
+                token_deadlines.append(expiration)
+            else:
+                token_deadlines.append(None)
+        elif reward_timing == REWARD_TIMING_PER_QUALIFYING_BET and i < len(counted_qualifiers):
             anchor = _parse_date(counted_qualifiers[i]["date_placed"])
+            if anchor is not None and usage_days is not None:
+                token_deadlines.append(anchor + timedelta(days=usage_days))
+            else:
+                token_deadlines.append(None)
         else:
             anchor = expiration or (
                 _parse_date(counted_qualifiers[0]["date_placed"]) if counted_qualifiers else None
             )
-
-        if anchor is not None and usage_days is not None:
-            token_deadlines.append(anchor + timedelta(days=usage_days))
-        else:
-            token_deadlines.append(None)
+            if anchor is not None and usage_days is not None:
+                token_deadlines.append(anchor + timedelta(days=usage_days))
+            else:
+                token_deadlines.append(None)
 
     # ── FIFO-match claimed reward bets to earned tokens, oldest first ───
     token_values = []

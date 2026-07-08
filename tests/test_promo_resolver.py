@@ -18,6 +18,7 @@ from config import (
     PROMO_TYPE_PROFIT_BOOST,
     PROMO_TYPE_PROFIT_BOOST_DAILY,
     REWARD_TIMING_END_OF_WINDOW,
+    REWARD_TIMING_GRANTED,
 )
 from promo_resolver import evaluate_promo
 from conftest import make_bet, make_promo
@@ -119,6 +120,56 @@ def test_second_token_forfeited_after_deadline():
         "status": PROMO_STATUS_REALIZED,
         "realized_amount": 30.0,
     }
+
+
+# ── Granted (no qualifying bet) ──────────────────────────────────────────
+
+
+def test_granted_bonus_bet_pending_before_use_by():
+    promo = make_promo(
+        expiration_date="2026-07-01",
+        reward_timing=REWARD_TIMING_GRANTED,
+    )
+    verdict = evaluate_promo(promo, [], date(2026, 6, 15))
+    assert verdict["finalize"] is None
+    assert verdict["qualifying_cost_fill"] is None
+
+
+def test_granted_bonus_bet_finalizes_with_only_reward_bet():
+    promo = make_promo(
+        expiration_date="2026-07-01",
+        reward_timing=REWARD_TIMING_GRANTED,
+        expected_reward_count="1",
+    )
+    bets = [
+        make_bet(
+            bet_id="11",
+            bet_category=BET_CATEGORY_BONUS_BET,
+            date_placed="2026-06-15",
+            result="WIN",
+            pl="50",
+        ),
+    ]
+    verdict = evaluate_promo(promo, bets, date(2026, 6, 20))
+    assert verdict["finalize"] == {
+        "status": PROMO_STATUS_REALIZED,
+        "realized_amount": 50.0,
+    }
+    assert verdict["qualifying_cost_fill"] is None
+
+
+def test_granted_bonus_bet_expired_no_bets_realized_zero():
+    promo = make_promo(
+        expiration_date="2026-06-01",
+        reward_timing=REWARD_TIMING_GRANTED,
+        expected_reward_count="1",
+    )
+    verdict = evaluate_promo(promo, [], date(2026, 6, 15))
+    assert verdict["finalize"] == {
+        "status": PROMO_STATUS_REALIZED,
+        "realized_amount": 0.0,
+    }
+    assert verdict["qualifying_cost_fill"] is None
 
 
 # ── Profit Boost token value ─────────────────────────────────────────────
