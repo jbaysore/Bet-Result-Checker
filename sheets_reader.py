@@ -460,6 +460,7 @@ def load_bets_needing_closing_odds(tab_name: str) -> list[dict]:
         AUTOMATED_BET_TYPES, RESULT_NEEDS_REVIEW, BET_TYPE_PARLAY,
         CLOSING_ODDS_ERROR_CODES,
     )
+    from closing_odds_exhaustion import is_closing_odds_exhausted
     from parlay import parse_legs, all_legs_automatable
 
     rows = _get_bets_rows(tab_name)
@@ -516,6 +517,10 @@ def load_bets_needing_closing_odds(tab_name: str) -> list[dict]:
         if closing_odds and closing_odds not in CLOSING_ODDS_ERROR_CODES:
             continue  # already captured (real value, VOID, or N/A)
 
+        notes = _bet_cell(row, col, "notes")
+        if is_closing_odds_exhausted(notes):
+            continue
+
         bets.append({
             "row_idx":    row_idx,
             "bet_id":     _bet_cell(row, col, "bet_id"),
@@ -534,6 +539,90 @@ def load_bets_needing_closing_odds(tab_name: str) -> list[dict]:
             # Kalshi market ticker (blank for non-Kalshi) -- lets closing_odds
             # pull the real Kalshi closing line instead of MANUAL ENTRY.
             "kalshi_ticker": _bet_cell(row, col, "kalshi_ticker"),
+            # Odds API market key (blank for legacy rows).
+            "market_key": _bet_cell(row, col, "market_key"),
+        })
+
+    return bets
+
+
+def load_bets_for_closing_retry(
+    tab_name: str,
+    *,
+    include_na: bool = True,
+    include_errors: bool = False,
+    bet_id: str | None = None,
+) -> list[dict]:
+    """
+    Load bet rows eligible for the retry_closing_odds one-shot script.
+
+    By default returns rows whose ClosingOdds is N/A. With include_errors,
+    also includes rows holding a CLOSING_ODDS_ERROR_CODES value.
+    """
+    from config import CLOSING_ODDS_ERROR_CODES, BET_TYPE_PARLAY
+    from parlay import parse_legs
+
+    rows = _get_bets_rows(tab_name)
+    if not rows:
+        return []
+
+    headers = rows[0]
+    col = _resolve_bet_col_indices(headers)
+    if col.get("bet_id") is None:
+        raise RuntimeError(
+            "[sheets_reader] Bets tab is missing 'BetID' column -- cannot proceed."
+        )
+
+    allowed_closing = set()
+    if include_na:
+        allowed_closing.add("N/A")
+    if include_errors:
+        allowed_closing |= CLOSING_ODDS_ERROR_CODES
+
+    if not allowed_closing:
+        return []
+
+    target_id = str(bet_id).strip() if bet_id is not None else None
+    duplicate_ids = _duplicate_bet_ids(rows, col)
+    bets = []
+
+    for row_idx, row in enumerate(rows[1:], start=2):
+        row = _pad_bet_row(row, col)
+        row_bet_id = _bet_cell(row, col, "bet_id")
+        if row_bet_id in duplicate_ids:
+            continue
+        if target_id is not None and row_bet_id != target_id:
+            continue
+
+        closing_odds = _bet_cell(row, col, "closing_odds")
+        if closing_odds not in allowed_closing:
+            continue
+
+        bet_type = _bet_cell(row, col, "bet_type")
+        legs = []
+        is_parlay = bet_type == BET_TYPE_PARLAY
+        if is_parlay:
+            legs = parse_legs(_bet_cell(row, col, "legs"))
+
+        bets.append({
+            "row_idx": row_idx,
+            "bet_id": row_bet_id,
+            "sport": _bet_cell(row, col, "sport"),
+            "book": _bet_cell(row, col, "book"),
+            "team1": _bet_cell(row, col, "team1"),
+            "team2": _bet_cell(row, col, "team2"),
+            "game_date": _bet_cell(row, col, "game_date"),
+            "game_start": _bet_cell(row, col, "game_start"),
+            "selection": _bet_cell(row, col, "selection"),
+            "bet_type": bet_type,
+            "odds_taken": _bet_cell(row, col, "odds_taken"),
+            "result": _bet_cell(row, col, "result"),
+            "notes": _bet_cell(row, col, "notes"),
+            "closing_odds": closing_odds,
+            "is_parlay": is_parlay,
+            "legs": legs,
+            "kalshi_ticker": _bet_cell(row, col, "kalshi_ticker"),
+            "market_key": _bet_cell(row, col, "market_key"),
         })
 
     return bets

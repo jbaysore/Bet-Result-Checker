@@ -80,6 +80,18 @@ def test_parse_legs_normalizes_camel_case():
     assert legs[0]["odds_taken"] == "-150"
 
 
+def test_parse_legs_preserves_market_key():
+    raw = json.dumps([{
+        "sport": "baseball_mlb", "book": "draftkings",
+        "team1": "Cubs", "team2": "Cardinals",
+        "gameDate": "2026-07-08", "gameStart": "19:05",
+        "betType": "Spread", "selection": "Cubs -7.5", "oddsTaken": "+140",
+        "marketKey": "alternate_spreads",
+    }])
+    legs = parlay.parse_legs(raw)
+    assert legs[0]["market_key"] == "alternate_spreads"
+
+
 def test_parse_legs_bad_json_returns_empty():
     assert parlay.parse_legs("not json") == []
     assert parlay.parse_legs("") == []

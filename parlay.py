@@ -56,6 +56,7 @@ def parse_legs(legs_raw: str) -> list[dict]:
             "bet_type":   str(leg.get("betType", leg.get("bet_type", ""))).strip(),
             "selection":  str(leg.get("selection", "")).strip(),
             "odds_taken": str(leg.get("oddsTaken", leg.get("odds_taken", ""))).strip(),
+            "market_key": str(leg.get("marketKey", leg.get("market_key", ""))).strip(),
         })
     return legs
 

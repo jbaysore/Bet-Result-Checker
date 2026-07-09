@@ -488,6 +488,159 @@ def write_closing_odds(row_idx: int, bet_id: str,
         return False
 
 
+def clear_closing_odds_cells(row_idx: int, bet_id: str) -> bool:
+    """
+    Clears ClosingOdds, DecimalClosingOdds, and CLV for a one-shot retry.
+
+    Unlike write_closing_odds, this intentionally clears final values
+    including N/A so fetch_closing_odds can run again.
+    """
+    idx = _bets_col_letter_lookup()
+    closing_col = idx.get("closing_odds")
+    decimal_col = idx.get("decimal_closing")
+    clv_col = idx.get("clv")
+    bet_id_col = idx.get("bet_id")
+
+    if None in (closing_col, bet_id_col):
+        print(f"[sheets_writer] ⚠️  Bets tab is missing ClosingOdds or BetID column -- "
+              f"cannot clear closing odds on row {row_idx}.")
+        return False
+
+    try:
+        sheet = _get_sheet()
+        row = _read_bet_row(sheet, row_idx)
+
+        if not _bet_id_matches(row, bet_id_col, bet_id):
+            current_bet_id = _cell_at(row, bet_id_col)
+            print(f"[sheets_writer] ⚠️  Row {row_idx} BetID mismatch. "
+                  f"Expected '{bet_id}', found '{current_bet_id}'. Skipping clear.")
+            return False
+
+        cells = [gspread.Cell(row_idx, closing_col, "")]
+        if decimal_col is not None:
+            cells.append(gspread.Cell(row_idx, decimal_col, ""))
+        if clv_col is not None:
+            cells.append(gspread.Cell(row_idx, clv_col, ""))
+
+        sheet.update_cells(cells)
+        print(f"[sheets_writer] ✅ Row {row_idx} (BetID: {bet_id}) closing columns cleared.")
+        return True
+
+    except gspread.exceptions.APIError as e:
+        print(f"[sheets_writer] ❌ Sheets API error clearing closing odds on row {row_idx} "
+              f"(BetID: {bet_id}): {e}")
+        return False
+    except Exception as e:
+        print(f"[sheets_writer] ❌ Unexpected error clearing closing odds on row {row_idx} "
+              f"(BetID: {bet_id}): {e}")
+        return False
+
+
+def write_market_key_if_blank(row_idx: int, bet_id: str, market_key: str) -> bool:
+    """Stamp Market Key when the column exists and the cell is blank."""
+    mk = (market_key or "").strip()
+    if not mk:
+        return True
+
+    idx = _bets_col_letter_lookup()
+    market_col = idx.get("market_key")
+    bet_id_col = idx.get("bet_id")
+
+    if market_col is None:
+        return True  # column not on sheet — optional
+
+    if bet_id_col is None:
+        print(f"[sheets_writer] ⚠️  Bets tab is missing BetID column -- "
+              f"cannot write Market Key on row {row_idx}.")
+        return False
+
+    try:
+        sheet = _get_sheet()
+        row = _read_bet_row(sheet, row_idx)
+
+        if not _bet_id_matches(row, bet_id_col, bet_id):
+            return False
+
+        if _cell_at(row, market_col):
+            return True  # already set
+
+        sheet.update_cell(row_idx, market_col, mk)
+        print(f"[sheets_writer] ✅ Row {row_idx} (BetID: {bet_id}) → Market Key={mk}")
+        return True
+
+    except gspread.exceptions.APIError as e:
+        print(f"[sheets_writer] ❌ Sheets API error writing Market Key on row {row_idx}: {e}")
+        return False
+    except Exception as e:
+        print(f"[sheets_writer] ❌ Unexpected error writing Market Key on row {row_idx}: {e}")
+        return False
+
+
+def bump_closing_odds_fail_streak(row_idx: int, bet_id: str, error_code: str) -> bool:
+    """
+    Increment the identical-failure streak in Notes; mark exhausted at threshold.
+    Called when write_closing_odds no-ops on the same error code.
+    """
+    from closing_odds_exhaustion import next_fail_streak_notes, parse_fail_streak
+
+    idx = _bets_col_letter_lookup()
+    notes_col = idx.get("notes")
+    bet_id_col = idx.get("bet_id")
+
+    if None in (notes_col, bet_id_col):
+        return False
+
+    try:
+        sheet = _get_sheet()
+        row = _read_bet_row(sheet, row_idx)
+        if not _bet_id_matches(row, bet_id_col, bet_id):
+            return False
+
+        existing = _cell_at(row, notes_col)
+        new_notes, exhausted = next_fail_streak_notes(existing, error_code)
+        if new_notes == existing:
+            return True
+
+        sheet.update_cell(row_idx, notes_col, new_notes)
+        count, _ = parse_fail_streak(new_notes)
+        if exhausted:
+            print(f"[sheets_writer] Row {row_idx} (BetID: {bet_id}) closing-odds retries "
+                  f"exhausted after {count} identical '{error_code}' failures.")
+        return True
+    except Exception as e:
+        print(f"[sheets_writer] ⚠️  Could not update closing-odds fail streak on row "
+              f"{row_idx}: {e}")
+        return False
+
+
+def clear_closing_odds_fail_streak(row_idx: int, bet_id: str) -> bool:
+    """Remove fail-streak markers after a successful closing-odds capture."""
+    from closing_odds_exhaustion import clear_fail_streak_notes, parse_fail_streak, is_closing_odds_exhausted
+
+    idx = _bets_col_letter_lookup()
+    notes_col = idx.get("notes")
+    bet_id_col = idx.get("bet_id")
+
+    if None in (notes_col, bet_id_col):
+        return False
+
+    try:
+        sheet = _get_sheet()
+        row = _read_bet_row(sheet, row_idx)
+        if not _bet_id_matches(row, bet_id_col, bet_id):
+            return False
+
+        existing = _cell_at(row, notes_col)
+        if not parse_fail_streak(existing)[0] and not is_closing_odds_exhausted(existing):
+            return True
+
+        new_notes = clear_fail_streak_notes(existing)
+        sheet.update_cell(row_idx, notes_col, new_notes)
+        return True
+    except Exception:
+        return False
+
+
 PL_BLOCKED_PREFIX = "⚠ P/L not calculated:"
 DUPLICATE_BET_ID_PREFIX = "⚠ Duplicate BetID:"
 

@@ -252,6 +252,8 @@ def main():
                             result["clv"],
                         )
                         if success:
+                            from sheets_writer import clear_closing_odds_fail_streak
+                            clear_closing_odds_fail_streak(bet["row_idx"], bet["bet_id"])
                             closing_results["captured"] += 1
                         else:
                             closing_results["skipped"] += 1
@@ -260,13 +262,17 @@ def main():
                         # Permanent failure (game/book/selection not found in
                         # snapshot) — write the error code to the ClosingOdds
                         # column so the odds-tool notification bell surfaces it
-                        # for human review. The cell is no longer blank after
-                        # this, so this bet won't be retried automatically;
-                        # clear the cell manually to trigger a retry.
-                        write_closing_odds(
+                        # for human review. Re-scans retry error codes until
+                        # exhausted (see closing_odds_exhaustion.py).
+                        wrote = write_closing_odds(
                             bet["row_idx"], bet["bet_id"],
                             result["error"], None, None,
                         )
+                        if not wrote:
+                            from sheets_writer import bump_closing_odds_fail_streak
+                            bump_closing_odds_fail_streak(
+                                bet["row_idx"], bet["bet_id"], result["error"],
+                            )
                         closing_results["skipped"] += 1
                     else:
                         # Transient failure (API timeout, quota) — leave blank,

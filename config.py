@@ -75,7 +75,8 @@ BET_COL = {
     "notes":           "Notes",
     # JSON array of leg dicts for a Parlay row (written by the odds-tool Log
     # Bet Wizard). Blank for every single-selection bet. Each leg:
-    #   {sport, book, team1, team2, gameDate, gameStart, betType, selection, oddsTaken}
+    #   {sport, book, team1, team2, gameDate, gameStart, betType, selection,
+    #    oddsTaken, marketKey?}
     # The parlay row's OddsTaken is the combined American price; its Game
     # Date/Start are the LATEST leg, so the poller waits for every leg to
     # finish before settling. See parlay.py for parse/combine logic.
@@ -85,6 +86,10 @@ BET_COL = {
     # closing line from Kalshi's candlesticks API instead of falling back to
     # MANUAL ENTRY. Blank for non-Kalshi bets. See sources/kalshi.py.
     "kalshi_ticker":   "Kalshi Ticker",
+    # Odds API market key for this bet (spreads, alternate_spreads, totals, etc.).
+    # Written by the odds-tool at log time so closing odds can query the
+    # correct market in one call. Blank for legacy rows — cascade handles them.
+    "market_key":      "Market Key",
 }
 
 # ── Bet types ─────────────────────────────────────────────────────
@@ -229,6 +234,10 @@ CLOSING_ODDS_ERROR_CODES = {
     CLOSING_ODDS_MANUAL_REQUIRED,
     CLOSING_ODDS_SPORT_NOT_ON_API,
 }
+
+# After this many consecutive identical failure codes on a row (tracked in
+# Notes via closing_odds_exhaustion.py), the cron checker stops re-fetching.
+CLOSING_ODDS_EXHAUSTION_THRESHOLD = 5
 
 # ── Game status values ────────────────────────────────────────────
 # Contract that any upstream game-result source (ESPN, Odds API, etc.)

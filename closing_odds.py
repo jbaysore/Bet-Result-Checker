@@ -28,6 +28,12 @@ from sources.odds_api import sport_has_odds_feed
 # multiple bets on the same game/book reuse the same API response.
 _snapshot_cache: dict[tuple[str, str, str, str], list | None] = {}
 
+# Odds API market keys that share spread-style extraction (team + point).
+_SPREAD_MARKETS = frozenset({"spreads", "alternate_spreads"})
+# Odds API market keys that share game-total extraction (Over/Under + point).
+_TOTAL_MARKETS = frozenset({"totals", "alternate_totals"})
+_TEAM_TOTAL_MARKET = "team_totals"
+
 
 # ── Region routing ────────────────────────────────────────────────────────────
 # Mirrors odds-tool's bookConstants.js regionForBookKey() and
@@ -79,24 +85,68 @@ def region_for_book_key(book_key: str) -> str:
     return "us"
 
 
+def _points_equal(a, b) -> bool:
+    """Tolerant float compare for spread/total lines (3 vs 3.0)."""
+    try:
+        return abs(float(a) - float(b)) < 1e-6
+    except (TypeError, ValueError):
+        return False
+
+
+def _extract_mode_for_market(market: str) -> str:
+    if market in _SPREAD_MARKETS:
+        return "spread"
+    if market in _TOTAL_MARKETS:
+        return "total"
+    if market == _TEAM_TOTAL_MARKET:
+        return "team_total"
+    if market == "h2h":
+        return "h2h"
+    return "unknown"
+
+
+def _apply_market_key_override(sel: dict, market_key: str) -> dict:
+    """When Market Key is set on the sheet, query only that market."""
+    mk = (market_key or "").strip()
+    if not mk:
+        return sel
+    out = dict(sel)
+    out["markets_to_try"] = [mk]
+    out["extract_mode"] = _extract_mode_for_market(mk)
+    return out
+
+
 # ── Selection parsing ─────────────────────────────────────────────────────────
-# Ports backfillClosingOdds.js:parseSelection().
+# Ports backfillClosingOdds.js:parseSelection() with alternate/team-total support.
 
 def parse_selection(bet_type: str, selection: str) -> dict | None:
     """
-    Maps bet_type + selection string to the Odds API market + lookup fields.
+    Maps bet_type + selection string to Odds API markets + lookup fields.
 
-    Returns a dict with keys: market, selection_team, selection_side, selection_point.
+    Returns a dict with keys:
+        markets_to_try, extract_mode, selection_team, selection_side, selection_point
     Returns None for unsupported types (Parlay, Prop) or unparseable formats.
     """
     t = (bet_type or "").strip()
     s = (selection or "").strip()
 
     if t == BET_TYPE_MONEYLINE:
-        return {"market": "h2h", "selection_team": s, "selection_side": None, "selection_point": None}
+        return {
+            "markets_to_try": ["h2h"],
+            "extract_mode": "h2h",
+            "selection_team": s,
+            "selection_side": None,
+            "selection_point": None,
+        }
 
     if t == BET_TYPE_DRAW:
-        return {"market": "h2h", "selection_team": "Draw", "selection_side": None, "selection_point": None}
+        return {
+            "markets_to_try": ["h2h"],
+            "extract_mode": "h2h",
+            "selection_team": "Draw",
+            "selection_side": None,
+            "selection_point": None,
+        }
 
     if t == BET_TYPE_SPREAD:
         # Format: "Team Name +/-X.X"
@@ -105,20 +155,37 @@ def parse_selection(bet_type: str, selection: str) -> dict | None:
             print(f"[closing_odds] Unrecognised spread format: '{s}'")
             return None
         return {
-            "market": "spreads",
+            "markets_to_try": ["spreads", "alternate_spreads"],
+            "extract_mode": "spread",
             "selection_team": m.group(1).strip(),
             "selection_side": None,
             "selection_point": float(m.group(2)),
         }
 
     if t == BET_TYPE_TOTAL:
-        # Format: "Over X.X" or "Under X.X"
+        # Team total: "Braves Team Total Over 4.5" (odds-tool scanner format)
+        tm = re.match(
+            r"^(.+?)\s+Team Total\s+(Over|Under)\s+([\d.]+)\s*$",
+            s,
+            re.IGNORECASE,
+        )
+        if tm:
+            return {
+                "markets_to_try": [_TEAM_TOTAL_MARKET],
+                "extract_mode": "team_total",
+                "selection_team": tm.group(1).strip(),
+                "selection_side": tm.group(2).lower(),
+                "selection_point": float(tm.group(3)),
+            }
+
+        # Game total: "Over X.X" or "Under X.X"
         m = re.match(r"^(Over|Under)\s+([\d.]+)\s*$", s, re.IGNORECASE)
         if not m:
             print(f"[closing_odds] Unrecognised total format: '{s}'")
             return None
         return {
-            "market": "totals",
+            "markets_to_try": ["totals", "alternate_totals"],
+            "extract_mode": "total",
             "selection_team": None,
             "selection_side": m.group(1).lower(),
             "selection_point": float(m.group(2)),
@@ -146,10 +213,10 @@ def find_event(events: list, team1: str, team2: str) -> dict | None:
 # ── Odds extraction ───────────────────────────────────────────────────────────
 # Ports backfillClosingOdds.js:extractOdds().
 
-def extract_odds(market: str, outcomes: list,
+def extract_odds(extract_mode: str, outcomes: list,
                  selection_team: str | None, selection_side: str | None,
                  selection_point: float | None) -> int | None:
-    if market == "h2h":
+    if extract_mode == "h2h":
         sel = (selection_team or "").lower()
         if sel == "draw":
             o = next((o for o in outcomes if o.get("name", "").lower() == "draw"), None)
@@ -157,19 +224,32 @@ def extract_odds(market: str, outcomes: list,
             o = next((o for o in outcomes if sel in o.get("name", "").lower()), None)
         return o["price"] if o else None
 
-    if market == "spreads":
+    if extract_mode == "spread":
         sel = (selection_team or "").lower()
         o = next(
             (o for o in outcomes
-             if sel in o.get("name", "").lower() and o.get("point") == selection_point),
+             if sel in o.get("name", "").lower()
+             and _points_equal(o.get("point"), selection_point)),
             None,
         )
         return o["price"] if o else None
 
-    if market == "totals":
+    if extract_mode == "total":
         o = next(
             (o for o in outcomes
-             if o.get("name", "").lower() == selection_side and o.get("point") == selection_point),
+             if o.get("name", "").lower() == selection_side
+             and _points_equal(o.get("point"), selection_point)),
+            None,
+        )
+        return o["price"] if o else None
+
+    if extract_mode == "team_total":
+        sel = (selection_team or "").lower()
+        o = next(
+            (o for o in outcomes
+             if o.get("name", "").lower() == selection_side
+             and sel in (o.get("description") or "").lower()
+             and _points_equal(o.get("point"), selection_point)),
             None,
         )
         return o["price"] if o else None
@@ -268,6 +348,59 @@ def _fetch_historical_snapshot(sport: str, date_iso: str, book_key: str,
     return None
 
 
+def _price_from_snapshot(events: list | None, sport: str, book: str,
+                         team1: str, team2: str, market: str, sel: dict,
+                         label: str) -> dict | None:
+    """
+    Try to extract closing price from an already-fetched snapshot.
+    Returns {"price": int} on success, or a permanent-failure dict, or None
+    if this market should be skipped (missing market/outcome — try next).
+    """
+    def _permanent(code):
+        return {"price": None, "error": code}
+
+    if events is None:
+        return None  # transient — caller handles
+
+    event = find_event(events, team1, team2)
+    if event is None:
+        print(f"[closing_odds] {label}: game not found in {market} snapshot "
+              f"({team1} vs {team2}, {sport}).")
+        return _permanent(CLOSING_ODDS_GAME_NOT_FOUND)
+
+    bk = next(
+        (b for b in event.get("bookmakers", [])
+         if b.get("key", "").lower() == book),
+        None,
+    )
+    if bk is None:
+        print(f"[closing_odds] {label}: book '{book}' not in {market} snapshot.")
+        return _permanent(CLOSING_ODDS_BOOK_NOT_FOUND)
+
+    mkt = next(
+        (m for m in bk.get("markets", [])
+         if m.get("key") == market),
+        None,
+    )
+    if mkt is None:
+        # Book/game found but this market absent — try next market in cascade.
+        return None
+
+    price = extract_odds(
+        sel["extract_mode"],
+        mkt.get("outcomes", []),
+        sel.get("selection_team"),
+        sel.get("selection_side"),
+        sel.get("selection_point"),
+    )
+
+    if price is None:
+        # Market present but exact line missing — try next market.
+        return None
+
+    return {"price": price, "error": None}
+
+
 # ── Per-bet/leg closing price lookup ──────────────────────────────────────────
 
 def _fetch_closing_price(bet: dict, label: str) -> dict:
@@ -278,9 +411,7 @@ def _fetch_closing_price(bet: dict, label: str) -> dict:
 
     Args:
         bet:   A dict with keys sport, book, team1, team2, game_date,
-               game_start, bet_type, selection. (odds_taken is NOT used here;
-               CLV is computed by the caller, which knows whether it's pricing
-               a single bet or combining legs.)
+               game_start, bet_type, selection, and optional market_key.
         label: A short identifier for log lines, e.g. "BetID 42" or
                "BetID 42 leg 2/3".
 
@@ -301,15 +432,7 @@ def _fetch_closing_price(bet: dict, label: str) -> dict:
     def _permanent(code):
         return {"price": None, "error": code}
 
-    # Prediction-market books (Kalshi, Polymarket, Novig, BetOpenly) price via
-    # their own venue and aren't on The Odds API historical endpoint — skip the
-    # paid call entirely. ProphetX is an exchange too, but IS carried on The
-    # Odds API (us_ex region), so it deliberately falls through to the normal
-    # historical fetch below rather than being routed to manual entry.
     if needs_manual_closing_odds(book):
-        # Kalshi is a prediction market, but its own public API exposes
-        # historical candlesticks -- if we captured the market ticker at log
-        # time, pull the real closing line from there instead of manual entry.
         if book == "kalshi":
             ticker = (bet.get("kalshi_ticker") or "").strip()
             if ticker:
@@ -318,10 +441,6 @@ def _fetch_closing_price(bet: dict, label: str) -> dict:
                 american = get_closing_american(ticker, game_dt, label)
                 if american is not None:
                     return {"price": american, "error": None}
-                # Ticker present but no closing price yet (illiquid, or a
-                # transient API issue). Fall back to MANUAL ENTRY, which the
-                # re-scan pass will re-attempt against Kalshi on the next run.
-            # else: no ticker (older bet, or couldn't be resolved) -> manual.
         print(f"[closing_odds] {label}: book '{book}' closing line not available "
               f"automatically — manual entry required.")
         return _permanent(CLOSING_ODDS_MANUAL_REQUIRED)
@@ -336,6 +455,8 @@ def _fetch_closing_price(bet: dict, label: str) -> dict:
         print(f"[closing_odds] {label}: unsupported bet type '{bet_type}' — skipping.")
         return _transient
 
+    sel = _apply_market_key_override(sel, bet.get("market_key", ""))
+
     game_dt = _parse_game_datetime(bet.get("game_date", ""), bet.get("game_start", ""))
     if game_dt is None:
         print(f"[closing_odds] {label}: could not parse game datetime — skipping.")
@@ -344,51 +465,41 @@ def _fetch_closing_price(bet: dict, label: str) -> dict:
     snapshot_dt = game_dt.astimezone(timezone.utc) - timedelta(minutes=1)
     date_iso = snapshot_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    print(f"[closing_odds] {label}: fetching {sel['market']} snapshot "
-          f"for {team1} vs {team2} at {date_iso} (book: {book})")
+    markets_to_try = sel["markets_to_try"]
+    had_transient = False
+    last_permanent = None
 
-    events = _fetch_historical_snapshot(sport, date_iso, book, sel["market"])
-    if events is None:
-        return _transient  # API error (timeout, quota, network) — retry next run
+    for market in markets_to_try:
+        print(f"[closing_odds] {label}: fetching {market} snapshot "
+              f"for {team1} vs {team2} at {date_iso} (book: {book})")
 
-    event = find_event(events, team1, team2)
-    if event is None:
-        print(f"[closing_odds] {label}: game not found in snapshot "
-              f"({team1} vs {team2}, {sport}).")
-        return _permanent(CLOSING_ODDS_GAME_NOT_FOUND)
+        events = _fetch_historical_snapshot(sport, date_iso, book, market)
+        if events is None:
+            had_transient = True
+            continue
 
-    bk = next(
-        (b for b in event.get("bookmakers", [])
-         if b.get("key", "").lower() == book),
-        None,
-    )
-    if bk is None:
-        print(f"[closing_odds] {label}: book '{book}' not in snapshot.")
-        return _permanent(CLOSING_ODDS_BOOK_NOT_FOUND)
+        result = _price_from_snapshot(
+            events, sport, book, team1, team2, market, sel, label,
+        )
+        if result is None:
+            continue  # try next market in cascade
+        if result.get("price") is not None:
+            return result
+        # Permanent game/book failure — don't cascade to other markets.
+        if result.get("error") in (
+            CLOSING_ODDS_GAME_NOT_FOUND,
+            CLOSING_ODDS_BOOK_NOT_FOUND,
+        ):
+            return result
+        last_permanent = result
 
-    mkt = next(
-        (m for m in bk.get("markets", [])
-         if m.get("key") == sel["market"]),
-        None,
-    )
-    if mkt is None:
-        print(f"[closing_odds] {label}: market '{sel['market']}' not in snapshot.")
-        return _permanent(CLOSING_ODDS_SELECTION_NOT_FOUND)
+    if had_transient and last_permanent is None:
+        return _transient
 
-    price = extract_odds(
-        sel["market"],
-        mkt.get("outcomes", []),
-        sel.get("selection_team"),
-        sel.get("selection_side"),
-        sel.get("selection_point"),
-    )
-
-    if price is None:
-        print(f"[closing_odds] {label}: could not extract price for "
-              f"selection '{selection}' from snapshot.")
-        return _permanent(CLOSING_ODDS_SELECTION_NOT_FOUND)
-
-    return {"price": price, "error": None}
+    print(f"[closing_odds] {label}: could not extract price for "
+          f"selection '{selection}' from any market tried "
+          f"({', '.join(markets_to_try)}).")
+    return last_permanent or _permanent(CLOSING_ODDS_SELECTION_NOT_FOUND)
 
 
 def _clv_from_decimals(decimal_taken: float | None, decimal_closing: float | None) -> float | None:
@@ -406,7 +517,7 @@ def fetch_closing_odds(bet: dict) -> dict:
     Args:
         bet: A dict from sheets_reader.load_bets_needing_closing_odds(),
              with keys: sport, book, team1, team2, game_date, game_start,
-             bet_type, selection, odds_taken.
+             bet_type, selection, odds_taken, and optional market_key.
 
     Returns a dict with:
         closing_odds:     American odds string (e.g. "-110") or None on failure
@@ -419,7 +530,6 @@ def fetch_closing_odds(bet: dict) -> dict:
     res = _fetch_closing_price(bet, f"BetID {bet_id}")
 
     if res["price"] is None:
-        # Transient (error=None) or permanent (error=<code>) — same shape out.
         return {"closing_odds": None, "decimal_closing": None, "clv": None,
                 "error": res["error"]}
 
@@ -432,7 +542,7 @@ def fetch_closing_odds(bet: dict) -> dict:
         odds_taken = float(str(bet.get("odds_taken", "")).replace("+", "").strip())
         clv = _clv_from_decimals(to_decimal_odds(odds_taken), decimal_closing)
     except (ValueError, TypeError):
-        pass  # Missing or unparseable OddsTaken — CLV left as None, not a blocker
+        pass
 
     print(f"[closing_odds] BetID {bet_id}: ClosingOdds={closing_odds_str}, "
           f"DecimalClosing={decimal_closing}, CLV={clv}")
@@ -450,19 +560,6 @@ def fetch_parlay_closing_odds(bet: dict) -> dict:
     Fetches the combined historical closing line for a parlay: the product of
     each leg's closing decimal odds. CLV compares the parlay's combined OddsTaken
     against this combined closing line.
-
-    Args:
-        bet: A parlay dict from sheets_reader.load_bets_needing_closing_odds()
-             with is_parlay=True and a parsed `legs` list (each leg carrying
-             sport, book, team1, team2, game_date, game_start, bet_type,
-             selection), plus the parlay row's own combined `odds_taken`.
-
-    Failure handling mirrors the single-bet path, but ANY leg failing decides
-    the whole parlay:
-        - any leg transient  -> whole parlay transient (retry next run)
-        - any leg permanent  -> whole parlay permanent with that leg's error
-                                code (surfaces in the bell / N-A flow)
-    A combined closing line is only meaningful if every leg priced.
     """
     from parlay import american_to_decimal, decimal_to_american, fmt_american, combined_decimal
 
@@ -477,7 +574,6 @@ def fetch_parlay_closing_odds(bet: dict) -> dict:
     for i, leg in enumerate(legs, start=1):
         res = _fetch_closing_price(leg, f"BetID {bet_id} leg {i}/{len(legs)}")
         if res["price"] is None:
-            # First failing leg decides the parlay — transient or permanent.
             return {"closing_odds": None, "decimal_closing": None, "clv": None,
                     "error": res["error"]}
         leg_decimals.append(to_decimal_odds(res["price"]))

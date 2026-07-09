@@ -32,6 +32,42 @@ Each run (`trigger.py`) does four work passes over the `Bets` tab, then prints a
    Writes `ClosingOdds`, `DecimalClosingOdds`, and `CLV`. `VOID` results
    get `ClosingOdds = VOID` with no API call. Skips `NEEDS_REVIEW` rows.
 
+   Supported markets: `h2h`, `spreads`, `alternate_spreads`, `totals`,
+   `alternate_totals`, and `team_totals`. Legacy rows without a `Market Key`
+   column value cascade across main then alternate markets; new bets logged
+   from odds-tool stamp `Market Key` for a direct lookup. Team-total
+   selections use the format `Braves Team Total Over 4.5`.
+
+### ClosingOdds retry semantics
+
+| `ClosingOdds` value | GitHub checker (~30 min) | API credits |
+|---------------------|--------------------------|-------------|
+| Blank | Retries (transient) | Spent each run |
+| Error code (`SELECTION NOT FOUND`, `MANUAL ENTRY`, etc.) | Retries until exhausted (5 identical failures → `[closing-odds-exhausted]` in Notes) | Spent each run |
+| Real odds, `VOID`, or **`N/A`** | Never touched (final) | None |
+
+**`N/A` is the “stop trying” signal.** Rows you dismissed in the odds-tool bell stay quiet forever unless you clear them manually or run the one-shot retry script.
+
+### Retry N/A rows (`scripts/retry_closing_odds.py`)
+
+For rows marked `N/A` that might price now (e.g. after the alternate-market cascade fix):
+
+```bash
+# Preview buckets: skip / manual / retry
+python scripts/retry_closing_odds.py --all-na
+
+# Retry only the retry bucket once; failures restore N/A (no cron spam)
+python scripts/retry_closing_odds.py --write --all-na --backfill-market-key
+
+# Single row; --force overrides skip/manual buckets
+python scripts/retry_closing_odds.py --write --bet-id 42 --force
+
+# Surface failures in the bell instead of restoring N/A (cron will re-try)
+python scripts/retry_closing_odds.py --write --all-na --leave-error
+```
+
+Requires the same `.env` / `GOOGLE_APPLICATION_CREDENTIALS` as `trigger.py`. After success, use odds-tool **Fix Decimal & CLV** if derived columns are still blank.
+
 ## Promotion Updater
 
 After bet resolution finishes, the same workflow run also executes
