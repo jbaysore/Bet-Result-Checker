@@ -57,6 +57,9 @@ For rows marked `N/A` that might price now (e.g. after the alternate-market casc
 python scripts/retry_closing_odds.py --all-na
 
 # Retry only the retry bucket once; failures restore N/A (no cron spam)
+python scripts/retry_closing_odds.py --write --all-na --include-blank
+
+# Stamp Market Key after success only (fetch always cascades main → alternate)
 python scripts/retry_closing_odds.py --write --all-na --backfill-market-key
 
 # Single row; --force overrides skip/manual buckets

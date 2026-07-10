@@ -536,6 +536,32 @@ def clear_closing_odds_cells(row_idx: int, bet_id: str) -> bool:
         return False
 
 
+def clear_market_key_cell(row_idx: int, bet_id: str) -> bool:
+    """Clear Market Key so a retry can cascade across main + alternate markets."""
+    idx = _bets_col_letter_lookup()
+    market_col = idx.get("market_key")
+    bet_id_col = idx.get("bet_id")
+
+    if market_col is None:
+        return True
+    if bet_id_col is None:
+        return False
+
+    try:
+        sheet = _get_sheet()
+        row = _read_bet_row(sheet, row_idx)
+        if not _bet_id_matches(row, bet_id_col, bet_id):
+            return False
+        if not _cell_at(row, market_col):
+            return True
+        sheet.update_cell(row_idx, market_col, "")
+        print(f"[sheets_writer] ✅ Row {row_idx} (BetID: {bet_id}) Market Key cleared.")
+        return True
+    except Exception as e:
+        print(f"[sheets_writer] ⚠️  Could not clear Market Key on row {row_idx}: {e}")
+        return False
+
+
 def write_market_key_if_blank(row_idx: int, bet_id: str, market_key: str) -> bool:
     """Stamp Market Key when the column exists and the cell is blank."""
     mk = (market_key or "").strip()

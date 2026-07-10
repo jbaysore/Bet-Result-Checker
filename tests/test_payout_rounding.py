@@ -1,9 +1,16 @@
 """Per-book fractional-cent rounding: truncate (default) vs nearest (FanDuel)."""
 
+import math
+
 import pytest
 
 from resolver import calculate_pl_and_payout, _american_odds_profit, _decimal_odds_profit
-from config import BET_CATEGORY_STANDARD, RESULT_WIN, PAYOUT_ROUND_NEAREST_BOOKS
+from config import (
+    BET_CATEGORY_STANDARD,
+    RESULT_WIN,
+    PAYOUT_ROUND_NEAREST_BOOKS,
+    MANUAL_PAYOUT_REQUIRED_BOOKS,
+)
 
 
 def test_fanduel_is_configured_nearest():
@@ -17,6 +24,32 @@ def test_prophetx_is_configured_nearest():
 def test_fanatics_is_configured_nearest():
     assert "fanatics" in PAYOUT_ROUND_NEAREST_BOOKS
 
+
+def test_rebet_requires_manual_payout_not_nearest():
+    # Rebet WIN payouts disagree with truncate/nearest/ceil — see config docstring.
+    assert "rebet" in MANUAL_PAYOUT_REQUIRED_BOOKS
+    assert "rebet" not in PAYOUT_ROUND_NEAREST_BOOKS
+
+
+def test_rebet_confirmed_settlements_match_no_rounding_mode():
+    # Guard against "just add rebet to PAYOUT_ROUND_NEAREST_BOOKS".
+    # Confirmed 2026-07-10: no single mode (truncate / nearest / ceil) matches both.
+    france_trunc = 36.28 + _american_odds_profit(36.28, -167, round_to_nearest=False)
+    france_nearest = 36.28 + _american_odds_profit(36.28, -167, round_to_nearest=True)
+    france_ceil = 36.28 + math.ceil(36.28 * 100 / 167 * 100 - 1e-12) / 100
+    assert france_trunc == pytest.approx(58.00)
+    assert france_nearest == pytest.approx(58.00)
+    assert france_ceil == pytest.approx(58.01)  # ceil happens to match France only
+
+    dbacks_trunc = 28.61 + _american_odds_profit(28.61, -141, round_to_nearest=False)
+    dbacks_nearest = 28.61 + _american_odds_profit(28.61, -141, round_to_nearest=True)
+    dbacks_ceil = 28.61 + math.ceil(28.61 * 100 / 141 * 100 - 1e-12) / 100
+    assert dbacks_trunc == pytest.approx(48.90)
+    assert dbacks_nearest == pytest.approx(48.90)
+    assert dbacks_ceil == pytest.approx(48.91)  # ceil still misses actual 48.92
+    # Actuals that no mode fully covers:
+    assert france_trunc != pytest.approx(58.01) or dbacks_nearest != pytest.approx(48.92)
+    assert dbacks_ceil != pytest.approx(48.92)
 
 def test_real_fanatics_settlement_rounds_up():
     # Confirmed real settlement: stake $1,017 @ -270, payout $1,393.67 (profit 376.6666..)

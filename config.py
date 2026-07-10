@@ -131,19 +131,26 @@ BOOK_FEE_TYPE_PERCENT_OF_STAKE_ON_WIN = "Percent Of Stake On Win"
 # Books whose real-money WIN payout can't be reliably computed from
 # American odds at all -- not a rounding-rule difference (like
 # DraftKings' cent-truncation, handled inside resolver._american_odds_profit),
-# but a fundamentally different settlement mechanism. Kalshi is a
-# contracts-based exchange (you buy a whole number of $1-payout contracts
-# at a cents-denominated price) rather than a fixed-odds sportsbook, and
-# two real settlements (2026-06-26) came back several percent off from
-# the American-odds approximation -- too large to be cent rounding, and
-# in the OPPOSITE direction from what Kalshi's own published 7% taker-fee
-# formula (kalshiOdds.js) would predict. Rather than guess at a contract-
-# count/fee model from two data points, these books are routed to manual
-# Payout entry instead: poller._safe_calculate_pl_payout() flags the row
-# (PL_BLOCKED_PREFIX) asking for the real Payout from the book's own
-# account, and poller.complete_manual_payout_pl() derives P/L from
-# whatever Payout gets entered, once it's there.
-MANUAL_PAYOUT_REQUIRED_BOOKS = {"kalshi"}
+# but a settlement that disagrees with every odds-based formula we trust.
+# These books are routed to manual Payout entry instead:
+# poller._safe_calculate_pl_payout() flags the row (PL_BLOCKED_PREFIX)
+# asking for the real Payout from the book's own account, and
+# poller.complete_manual_payout_pl() derives P/L from whatever Payout
+# gets entered, once it's there.
+#
+# kalshi: contracts-based exchange (you buy a whole number of $1-payout
+# contracts at a cents-denominated price) rather than a fixed-odds
+# sportsbook. Two real settlements (2026-06-26) came back several percent
+# off from the American-odds approximation -- too large to be cent
+# rounding, and in the OPPOSITE direction from what Kalshi's own published
+# 7% taker-fee formula (kalshiOdds.js) would predict.
+#
+# rebet: fixed-odds book, but confirmed 2026-07-10 against two real WIN
+# settlements that no single cent-rounding mode matches:
+#   $36.28 @ -167 -> actual payout $58.01 (truncate/nearest $58.00; ceil $58.01)
+#   $28.61 @ -141 -> actual payout $48.92 (truncate/nearest $48.90; ceil $48.91)
+# Do NOT add rebet to PAYOUT_ROUND_NEAREST_BOOKS -- nearest still misses both.
+MANUAL_PAYOUT_REQUIRED_BOOKS = {"kalshi", "rebet"}
 
 # Books that settle a winning payout by ROUNDING the fractional cent to the
 # NEAREST cent, rather than truncating it in the house's favor. The default

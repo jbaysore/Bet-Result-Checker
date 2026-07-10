@@ -551,13 +551,15 @@ def load_bets_for_closing_retry(
     *,
     include_na: bool = True,
     include_errors: bool = False,
+    include_blank: bool = False,
     bet_id: str | None = None,
 ) -> list[dict]:
     """
     Load bet rows eligible for the retry_closing_odds one-shot script.
 
     By default returns rows whose ClosingOdds is N/A. With include_errors,
-    also includes rows holding a CLOSING_ODDS_ERROR_CODES value.
+    also includes rows holding a CLOSING_ODDS_ERROR_CODES value. With
+    include_blank, also includes rows left blank by a prior failed retry.
     """
     from config import CLOSING_ODDS_ERROR_CODES, BET_TYPE_PARLAY
     from parlay import parse_legs
@@ -578,6 +580,8 @@ def load_bets_for_closing_retry(
         allowed_closing.add("N/A")
     if include_errors:
         allowed_closing |= CLOSING_ODDS_ERROR_CODES
+    if include_blank:
+        allowed_closing.add("")
 
     if not allowed_closing:
         return []

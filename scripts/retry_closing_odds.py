@@ -8,7 +8,7 @@ spin forever on hopeless lines.
 
 Usage (from Bet-Result-Checker-github/):
   python scripts/retry_closing_odds.py --dry-run --all-na
-  python scripts/retry_closing_odds.py --write --all-na --backfill-market-key
+  python scripts/retry_closing_odds.py --write --all-na --include-blank
   python scripts/retry_closing_odds.py --write --bet-id 42 --force
 """
 
@@ -28,6 +28,7 @@ from retry_bucketing import classify_closing_retry_row
 from sheets_reader import load_bets_for_closing_retry
 from sheets_writer import (
     clear_closing_odds_cells,
+    clear_market_key_cell,
     write_closing_odds,
     write_market_key_if_blank,
     clear_closing_odds_fail_streak,
@@ -57,7 +58,7 @@ def _process_bet(
     backfill_market_key: bool,
     leave_error: bool,
 ) -> dict:
-    """Clear, optionally backfill Market Key, fetch once, write result."""
+    """Clear, fetch once with market cascade, write result or restore N/A."""
     bet_id = bet["bet_id"]
     row_idx = bet["row_idx"]
     outcome = {"bet_id": bet_id, "status": "failed", "detail": ""}
@@ -66,17 +67,16 @@ def _process_bet(
         outcome["detail"] = "could not clear closing columns"
         return outcome
 
-    if backfill_market_key:
-        inferred = classification.get("inferred_market_key") or ""
-        if inferred and not (bet.get("market_key") or "").strip():
-            write_market_key_if_blank(row_idx, bet_id, inferred)
-            bet = dict(bet, market_key=inferred)
+    clear_market_key_cell(row_idx, bet_id)
+
+    # Always cascade main → alternate markets; ignore any prior Market Key stamp.
+    fetch_bet = {**bet, "market_key": ""}
 
     try:
         result = (
-            fetch_parlay_closing_odds(bet)
-            if bet.get("is_parlay")
-            else fetch_closing_odds(bet)
+            fetch_parlay_closing_odds(fetch_bet)
+            if fetch_bet.get("is_parlay")
+            else fetch_closing_odds(fetch_bet)
         )
     except Exception as e:
         if leave_error:
@@ -95,6 +95,10 @@ def _process_bet(
             result.get("clv"),
         )
         if ok:
+            if backfill_market_key:
+                inferred = classification.get("inferred_market_key") or ""
+                if inferred:
+                    write_market_key_if_blank(row_idx, bet_id, inferred)
             clear_closing_odds_fail_streak(row_idx, bet_id)
             outcome["status"] = "success"
             outcome["detail"] = result["closing_odds"]
@@ -112,8 +116,13 @@ def _process_bet(
             outcome["detail"] = f"restored N/A ({error_code})"
         return outcome
 
-    # Transient — leave blank; user can re-run script or wait for cron
-    outcome["detail"] = "transient failure — left blank"
+    # Transient (API timeout, 422 on a market, etc.) — restore N/A, not blank.
+    if leave_error:
+        write_closing_odds(row_idx, bet_id, "SELECTION NOT FOUND", None, None)
+        outcome["detail"] = "transient failure — wrote SELECTION NOT FOUND"
+    else:
+        _restore_na(bet)
+        outcome["detail"] = "restored N/A (transient failure)"
     return outcome
 
 
@@ -136,11 +145,16 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Also include error-code ClosingOdds rows",
     )
+    parser.add_argument(
+        "--include-blank",
+        action="store_true",
+        help="Also include rows left blank by a prior failed retry",
+    )
     parser.add_argument("--bet-id", help="Process a single BetID")
     parser.add_argument(
         "--backfill-market-key",
         action="store_true",
-        help="Stamp inferred Market Key when blank before fetch",
+        help="Stamp inferred Market Key after a successful fetch (does not affect cascade)",
     )
     parser.add_argument(
         "--leave-error",
@@ -162,6 +176,7 @@ def main(argv: list[str] | None = None) -> int:
         SHEET_TAB,
         include_na=include_na,
         include_errors=args.include_errors,
+        include_blank=args.include_blank,
         bet_id=args.bet_id,
     )
 

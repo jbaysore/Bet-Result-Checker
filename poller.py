@@ -514,11 +514,19 @@ def _safe_calculate_pl_payout(bet: dict, result: str,
             rough_estimate = f"${stake + rough_profit:.2f}" if bet_category != BET_CATEGORY_BONUS_BET else f"${rough_profit:.2f}"
         except Exception:
             rough_estimate = "(could not estimate)"
-        reason = (f"{book} payout can't be reliably computed from American odds (contracts-based "
-                  f"settlement, confirmed off by several percent on real bets, 2026-06-26). Enter the "
-                  f"exact Payout from your {book} account in this row's Payout column -- P/L will be "
-                  f"derived automatically once you do. Rough odds-based estimate for reference only "
-                  f"(don't enter this blindly): {rough_estimate}.")
+        if book_lower == "kalshi":
+            why = ("contracts-based settlement, confirmed off by several percent "
+                   "on real bets, 2026-06-26")
+        elif book_lower == "rebet":
+            why = ("odds-based payout disagrees with truncate, nearest-cent, and "
+                   "ceil on confirmed real settlements, 2026-07-10")
+        else:
+            why = "payout can't be reliably computed from American odds for this book"
+        reason = (f"{book} payout can't be reliably computed from American odds ({why}). "
+                  f"Enter the exact Payout from your {book} account in this row's Payout "
+                  f"column -- P/L will be derived automatically once you do. Rough "
+                  f"odds-based estimate for reference only (don't enter this blindly): "
+                  f"{rough_estimate}.")
         print(f"[poller] ⚠️  BetID {bet_id}: {reason}")
         flag_pl_blocked(row_idx, bet_id, reason)
         return None, None
