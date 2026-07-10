@@ -175,6 +175,7 @@ def test_restore_na_on_failure_default(monkeypatch):
     classification = classify_closing_retry_row(bet)
 
     monkeypatch.setattr(retry_mod, "clear_closing_odds_cells", lambda *a: True)
+    monkeypatch.setattr(retry_mod, "clear_market_key_cell", lambda *a: True)
     monkeypatch.setattr(
         retry_mod,
         "fetch_closing_odds",
@@ -204,6 +205,7 @@ def test_leave_error_writes_code(monkeypatch):
     classification = classify_closing_retry_row(bet)
 
     monkeypatch.setattr(retry_mod, "clear_closing_odds_cells", lambda *a: True)
+    monkeypatch.setattr(retry_mod, "clear_market_key_cell", lambda *a: True)
     monkeypatch.setattr(
         retry_mod,
         "fetch_closing_odds",
