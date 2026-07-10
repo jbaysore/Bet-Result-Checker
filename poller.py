@@ -7,6 +7,7 @@ from config import (
     RESULT_NEEDS_REVIEW,
     RESULT_WIN,
     RESULT_LOSS,
+    RESULT_CASHOUT,
     BET_CATEGORY_PROFIT_BOOST,
     BET_CATEGORY_BONUS_BET,
     BOOK_FEE_TYPE_PERCENT_OF_WIN_PROFIT,
@@ -19,7 +20,7 @@ from config import (
 from sources import odds_api, espn_tennis
 from resolver import (
     resolve, resolve_parlay, calculate_pl_and_payout, derive_pl_from_payout,
-    _american_odds_profit,
+    derive_cashout_pl, _american_odds_profit,
 )
 from sheets_writer import (
     write_result, write_pl_payout, write_pl_only,
@@ -368,7 +369,18 @@ def complete_manual_payout_pl(bet: dict) -> str:
               f"P/L derivation ({e}). Skipping.")
         return "skipped"
 
-    if result != RESULT_WIN:
+    if result == RESULT_CASHOUT:
+        # Cashout P/L is based on the actual dollars returned, not on the
+        # original odds. This is the GitHub-worker fallback for a CASHOUT row
+        # whose Payout was entered without P/L (the odds-tool endpoint normally
+        # writes Result, Payout, and P/L together).
+        book = (bet.get("book") or "").strip()
+        fee_before_odds = get_book_fee_before_odds(book) if book else False
+        pl = derive_cashout_pl(
+            payout, stake, fee, bet_category,
+            fee_before_odds=fee_before_odds,
+        )
+    elif result != RESULT_WIN:
         # Category-aware math (Bonus Bet LOSS is P/L 0, not -stake). The naive
         # payout - stake - fee formula is only valid for real-money categories.
         book = (bet.get("book") or "").strip()
@@ -439,6 +451,19 @@ def complete_pl_payout(bet: dict) -> str:
     bet_id = bet["bet_id"]
     row_idx = bet["row_idx"]
     result = bet["result"]
+
+    if result == RESULT_CASHOUT:
+        # A cashout cannot be reconstructed from the original odds. The exact
+        # amount returned by the book is the required input; once entered, the
+        # manual-Payout pass will derive P/L on the next scheduled run.
+        reason = (
+            "CASHOUT requires the exact Payout returned by the book before P/L "
+            "can be calculated. Enter that amount in this row's Payout column -- "
+            "P/L will be derived automatically on the next scheduled run."
+        )
+        print(f"[poller] BetID {bet_id}: {reason}")
+        flag_pl_blocked(row_idx, bet_id, reason)
+        return "skipped"
 
     # For a manually-resolved parlay, settle a WIN from the exact combined
     # decimal stored in DecimalOddsTaken (if present) rather than the rounded
