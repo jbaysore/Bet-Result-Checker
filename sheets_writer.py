@@ -410,7 +410,8 @@ def write_pl_only(row_idx: int, bet_id: str, pl: float) -> bool:
 def write_closing_odds(row_idx: int, bet_id: str,
                        closing_odds: str,
                        decimal_closing: float | None,
-                       clv: float | None) -> bool:
+                       clv: float | None,
+                       overwrite_errors: bool = True) -> bool:
     """
     Writes ClosingOdds, DecimalClosingOdds, and CLV to a bet row atomically.
 
@@ -453,7 +454,9 @@ def write_closing_odds(row_idx: int, bet_id: str,
         # Never overwrite a real value, "VOID", or "N/A" -- only a blank cell or
         # a prior failure code (so a re-scan can replace BOOK NOT FOUND etc.
         # with a real value, or update it to a different code).
-        if current_closing and current_closing not in CLOSING_ODDS_ERROR_CODES:
+        if current_closing and (
+            not overwrite_errors or current_closing not in CLOSING_ODDS_ERROR_CODES
+        ):
             print(f"[sheets_writer] Row {row_idx} (BetID: {bet_id}) already has "
                   f"ClosingOdds ('{current_closing}'). Skipping.")
             return False

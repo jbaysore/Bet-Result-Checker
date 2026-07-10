@@ -73,6 +73,15 @@ def test_writer_overwrites_error_code_with_real_value(monkeypatch):
     assert len(sheet.updates) == 1  # actually wrote
 
 
+def test_proactive_writer_refuses_to_overwrite_error_code(monkeypatch):
+    sheet = _patch_writer(monkeypatch, CLOSING_ODDS_BOOK_NOT_FOUND)
+    ok = sheets_writer.write_closing_odds(
+        2, "42", "-110", 1.909, 0.02, overwrite_errors=False,
+    )
+    assert ok is False
+    assert sheet.updates == []
+
+
 def test_writer_refuses_to_overwrite_real_value(monkeypatch):
     sheet = _patch_writer(monkeypatch, "-110")
     ok = sheets_writer.write_closing_odds(2, "42", "-120", 1.83, 0.01)

@@ -101,6 +101,47 @@ There used to be a Cloud Run Job + Cloud Scheduler version of this (Docker-based
 It's been fully retired in favor of this GitHub Actions setup -- no GCP
 infrastructure, no Docker, is needed to run or deploy this anymore.
 
+## Proactive closing-odds worker (Railway)
+
+`closing_capture_worker.py` is a separate always-on process that captures live
+pregame prices before kickoff. It complements (and does not replace) the
+historical closing-odds pass in `trigger.py`.
+
+The worker uses a durable `ClosingCapture` tab in the tracking spreadsheet:
+
+1. `odds-tool` registers eligible single-selection pregame bets when they are
+   logged. The worker also reconciles the Bets tab every 15 minutes so manual
+   rows and temporary registration failures are recovered.
+2. The worker captures one live sample in each T-10, T-5, and T-1 window.
+3. At T-1 it writes the latest successful sample to `ClosingOdds`,
+   `DecimalClosingOdds`, and `CLV`.
+4. It never overwrites any nonblank `ClosingOdds` value. If no proactive sample
+   succeeds, the queue row becomes `FALLBACK` and the existing historical
+   checker handles it after kickoff.
+
+V1 deliberately excludes live bets, parlays, props, and books that require a
+venue-specific/manual source (Kalshi, Polymarket, Novig, BetOpenly). Their
+existing historical, Kalshi-specific, or manual paths remain unchanged.
+
+### Railway deployment
+
+Create a Railway service from this repository. `railway.json` supplies the
+start command and restart policy. Set these service variables:
+
+| Variable | Required | Value |
+|---|---:|---|
+| `SHEET_ID` | Yes | Tracking spreadsheet ID |
+| `SHEET_TAB` | No | `Bets` (default) |
+| `ODDS_API_KEY` | Yes | The Odds API key |
+| `GOOGLE_APPLICATION_CREDENTIALS_JSON` | Yes | Full service-account JSON, entered as one Railway secret |
+| `CLOSING_CAPTURE_TAB` | No | `ClosingCapture` (default) |
+| `CLOSING_CAPTURE_POLL_SECONDS` | No | `30` (minimum 10) |
+| `CLOSING_CAPTURE_RECONCILE_SECONDS` | No | `900` (minimum 300) |
+
+The service account needs edit access to the spreadsheet. On first startup the
+worker creates the queue tab if `odds-tool` has not already created it. A healthy
+deployment logs `worker started`, then remains running between capture windows.
+
 ### Why it doesn't sleep or loop internally
 
 Each run does **exactly one check per pending bet, then exits** -- it never

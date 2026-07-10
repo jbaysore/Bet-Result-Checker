@@ -12,6 +12,7 @@ from closing_odds import (
     clv_for_sheet,
     region_for_book_key,
     fetch_closing_odds,
+    fetch_live_closing_odds,
     _fetch_closing_price,
     is_exchange_book,
     needs_manual_closing_odds,
@@ -307,3 +308,24 @@ def test_fetch_closing_price_all_markets_miss_selection(mock_snapshot, _mock_fee
         "selection": "Cubs -7.5",
     }, "BetID 9")
     assert res["error"] == CLOSING_ODDS_SELECTION_NOT_FOUND
+
+
+@patch("closing_odds._fetch_live_snapshot")
+def test_fetch_live_closing_odds_reuses_selection_extraction(mock_snapshot):
+    mock_snapshot.return_value = [{
+        "home_team": "Chicago Cubs",
+        "away_team": "St. Louis Cardinals",
+        "bookmakers": [{
+            "key": "draftkings",
+            "markets": [{
+                "key": "alternate_spreads",
+                "outcomes": [{"name": "Chicago Cubs", "point": -7.5, "price": 145}],
+            }],
+        }],
+    }]
+    result = fetch_live_closing_odds({
+        "bet_id": "302", "sport": "baseball_mlb", "book": "draftkings",
+        "team1": "Cubs", "team2": "Cardinals", "bet_type": "Spread",
+        "selection": "Cubs -7.5", "market_key": "alternate_spreads",
+    })
+    assert result == {"closing_odds": "+145", "decimal_closing": 2.45, "error": None}

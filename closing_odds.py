@@ -27,6 +27,11 @@ from sources.odds_api import sport_has_odds_feed
 # One historical snapshot per (sport, timestamp, book, market) per process —
 # multiple bets on the same game/book reuse the same API response.
 _snapshot_cache: dict[tuple[str, str, str, str], list | None] = {}
+# Proactive worker dedupe: bets sharing sport/book/market in one queue cycle
+# reuse a live response. The TTL stays below the worker's default 30s poll so a
+# later ladder step always receives a fresh quote.
+_live_snapshot_cache: dict[tuple[str, str, str], tuple[float, list]] = {}
+_LIVE_SNAPSHOT_TTL_SECONDS = 20
 
 # Odds API market keys that share spread-style extraction (team + point).
 _SPREAD_MARKETS = frozenset({"spreads", "alternate_spreads"})
@@ -346,6 +351,93 @@ def _fetch_historical_snapshot(sport: str, date_iso: str, book_key: str,
                 return None
 
     return None
+
+
+def _fetch_live_snapshot(sport: str, book_key: str, market: str) -> list | None:
+    """Fetch the current pregame board for one sport/book/market."""
+    cache_key = (sport, book_key.lower(), market)
+    cached = _live_snapshot_cache.get(cache_key)
+    if cached and time.monotonic() - cached[0] < _LIVE_SNAPSHOT_TTL_SECONDS:
+        return cached[1]
+
+    url = f"{ODDS_API_BASE}/sports/{sport}/odds"
+    params = {
+        "apiKey": ODDS_API_KEY,
+        "regions": region_for_book_key(book_key),
+        "markets": market,
+        "oddsFormat": "american",
+        "dateFormat": "iso",
+        "bookmakers": book_key,
+    }
+    try:
+        resp = requests.get(url, params=params, timeout=15)
+        if resp.status_code == 401:
+            raise RuntimeError("invalid Odds API key")
+        if resp.status_code == 422:
+            raise RuntimeError(f"sport/market unavailable: {sport}/{market}")
+        if resp.status_code == 429:
+            raise RuntimeError("Odds API quota exceeded")
+        resp.raise_for_status()
+        remaining = resp.headers.get("x-requests-remaining", "unknown")
+        print(f"[closing-capture] live {sport}/{market}/{book_key}; credits remaining: {remaining}")
+        events = resp.json()
+        _live_snapshot_cache[cache_key] = (time.monotonic(), events)
+        return events
+    except requests.RequestException as exc:
+        raise RuntimeError(f"live Odds API request failed: {exc}") from exc
+
+
+def fetch_live_closing_odds(bet: dict) -> dict:
+    """
+    Capture the current live pregame price for one queued single-selection bet.
+
+    Unlike fetch_closing_odds(), this uses the current /odds endpoint and does
+    not write anything. The worker keeps ladder samples in ClosingCapture and
+    finalizes the latest success separately.
+    """
+    sport = (bet.get("sport") or "").strip()
+    book = (bet.get("book") or "").strip().lower()
+    team1 = bet.get("team1", "")
+    team2 = bet.get("team2", "")
+    bet_type = bet.get("bet_type", "")
+    selection = bet.get("selection", "")
+
+    if needs_manual_closing_odds(book):
+        return {"closing_odds": None, "decimal_closing": None,
+                "error": CLOSING_ODDS_MANUAL_REQUIRED}
+
+    sel = parse_selection(bet_type, selection)
+    if sel is None:
+        return {"closing_odds": None, "decimal_closing": None,
+                "error": f"unsupported bet type/selection: {bet_type} / {selection}"}
+    sel = _apply_market_key_override(sel, bet.get("market_key", ""))
+
+    last_error = None
+    for market in sel["markets_to_try"]:
+        try:
+            events = _fetch_live_snapshot(sport, book, market)
+        except RuntimeError as exc:
+            last_error = str(exc)
+            continue
+        result = _price_from_snapshot(
+            events, sport, book, team1, team2, market, sel,
+            f"BetID {bet.get('bet_id', '?')} live",
+        )
+        if result and result.get("price") is not None:
+            price = result["price"]
+            return {
+                "closing_odds": fmt_odds(price),
+                "decimal_closing": to_decimal_odds(price),
+                "error": None,
+            }
+        if result and result.get("error"):
+            last_error = result["error"]
+
+    return {
+        "closing_odds": None,
+        "decimal_closing": None,
+        "error": last_error or CLOSING_ODDS_SELECTION_NOT_FOUND,
+    }
 
 
 def _price_from_snapshot(events: list | None, sport: str, book: str,
