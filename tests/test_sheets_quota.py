@@ -8,11 +8,12 @@ import pytest
 import sheets_quota
 
 
-def _make_api_error(message: str) -> gspread.exceptions.APIError:
+def _make_api_error(message: str, code: int = 500) -> gspread.exceptions.APIError:
     """Build a gspread APIError without needing a real HTTP response."""
     resp = MagicMock()
-    resp.json.return_value = {"error": {"message": message, "code": 429}}
+    resp.json.return_value = {"error": {"message": message, "code": code}}
     resp.text = message
+    resp.status_code = code
     try:
         return gspread.exceptions.APIError(resp)
     except TypeError:
@@ -34,7 +35,10 @@ def test_call_with_sheets_retry_retries_on_429(monkeypatch):
     sleeps = []
     monkeypatch.setattr(sheets_quota.time, "sleep", lambda s: sleeps.append(s))
 
-    err = _make_api_error("[429]: Quota exceeded for quota metric 'Read requests'")
+    err = _make_api_error(
+        "[429]: Quota exceeded for quota metric 'Read requests'",
+        code=429,
+    )
     fn = MagicMock(side_effect=[err, "recovered"])
     assert sheets_quota.call_with_sheets_retry(
         "test", fn, max_attempts=3, base_sleep_sec=1
@@ -44,7 +48,12 @@ def test_call_with_sheets_retry_retries_on_429(monkeypatch):
 
 
 def test_call_with_sheets_retry_raises_non_quota():
-    err = _make_api_error("[500]: Internal error")
+    err = _make_api_error("[500]: Internal error", code=500)
+    # Guard against accidental "429" leaking into the exception string —
+    # that would make the quota detector retry incorrectly.
+    assert "429" not in str(err).lower()
+    assert not sheets_quota._is_quota_error(err)
+
     fn = MagicMock(side_effect=err)
     with pytest.raises(gspread.exceptions.APIError):
         sheets_quota.call_with_sheets_retry("test", fn, max_attempts=3, base_sleep_sec=1)
