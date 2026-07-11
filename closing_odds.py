@@ -322,8 +322,14 @@ def _fetch_historical_snapshot(sport: str, date_iso: str, book_key: str,
                 print("[closing_odds] Invalid API key.")
                 return None
             if resp.status_code == 422:
-                print(f"[closing_odds] Sport key '{sport}' not active or not recognised "
-                      f"by the historical endpoint.")
+                detail = ""
+                try:
+                    err = resp.json()
+                    detail = f" — {err.get('error_code') or ''}: {err.get('message') or resp.text[:200]}"
+                except ValueError:
+                    detail = f" — {resp.text[:200]}"
+                print(f"[closing_odds] Historical odds request rejected for sport '{sport}' "
+                      f"(HTTP 422){detail}")
                 return None
             if resp.status_code == 429:
                 print("[closing_odds] Odds API quota exceeded.")

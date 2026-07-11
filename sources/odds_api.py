@@ -142,9 +142,13 @@ def _fetch_scores(sport_key: str) -> list | None:
 
     url = f"{ODDS_API_BASE}/sports/{sport_key}/scores"
 
+    # The Odds API only accepts daysFrom in 1..3 for /scores. Using a larger
+    # value returns HTTP 422 INVALID_SCORES_DAYS_FROM — previously mislabeled
+    # as "sport key not recognised", which made valid keys like baseball_mlb
+    # look broken.
     params = {
         "apiKey":        ODDS_API_KEY,
-        "daysFrom":      7,   # look back up to 7 days for completed games
+        "daysFrom":      3,
         "dateFormat":    "iso",
     }
 
@@ -155,8 +159,31 @@ def _fetch_scores(sport_key: str) -> list | None:
         if response.status_code == 401:
             print("[odds_api] Invalid API key. Check ODDS_API_KEY in your .env.")
             return None
+        if response.status_code == 404:
+            print(f"[odds_api] Sport key '{sport_key}' unknown to Odds API (HTTP 404).")
+            # #region agent log
+            try:
+                import json as _json
+                open(r"C:\Users\Joshua\APIs\debug-b305af.log", "a", encoding="utf-8").write(_json.dumps({"sessionId": "b305af", "runId": "post-fix", "hypothesisId": "H-daysFrom", "location": "odds_api.py:404", "message": "scores 404 unknown sport", "data": {"sport_key": sport_key, "body": response.text[:300]}, "timestamp": __import__("time").time() * 1000}) + "\n")
+            except Exception:
+                pass
+            # #endregion
+            return None
         if response.status_code == 422:
-            print(f"[odds_api] Sport key '{sport_key}' not recognised by Odds API.")
+            # #region agent log
+            try:
+                import json as _json
+                open(r"C:\Users\Joshua\APIs\debug-b305af.log", "a", encoding="utf-8").write(_json.dumps({"sessionId": "b305af", "runId": "post-fix", "hypothesisId": "H-daysFrom", "location": "odds_api.py:422", "message": "scores 422 body", "data": {"sport_key": sport_key, "daysFrom": params.get("daysFrom"), "status": 422, "body": response.text[:400]}, "timestamp": __import__("time").time() * 1000}) + "\n")
+            except Exception:
+                pass
+            # #endregion
+            detail = ""
+            try:
+                err = response.json()
+                detail = f" — {err.get('error_code') or ''}: {err.get('message') or response.text[:200]}"
+            except ValueError:
+                detail = f" — {response.text[:200]}"
+            print(f"[odds_api] Scores request rejected for '{sport_key}' (HTTP 422){detail}")
             return None
         if response.status_code == 429:
             print("[odds_api] Odds API quota exceeded.")
@@ -182,6 +209,14 @@ def _fetch_scores(sport_key: str) -> list | None:
     remaining = response.headers.get("x-requests-remaining", "unknown")
     used = response.headers.get("x-requests-used", "unknown")
     print(f"[odds_api] Credits used: {used} | Remaining: {remaining}")
+
+    # #region agent log
+    try:
+        import json as _json
+        open(r"C:\Users\Joshua\APIs\debug-b305af.log", "a", encoding="utf-8").write(_json.dumps({"sessionId": "b305af", "runId": "post-fix", "hypothesisId": "H-daysFrom", "location": "odds_api.py:success", "message": "scores fetch ok", "data": {"sport_key": sport_key, "daysFrom": 3, "game_count": len(games), "completed": sum(1 for g in games if g.get("completed"))}, "timestamp": __import__("time").time() * 1000}) + "\n")
+    except Exception:
+        pass
+    # #endregion
 
     _scores_cache[sport_key] = games
     return games
