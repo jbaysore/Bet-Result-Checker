@@ -22,10 +22,45 @@ def main():
     today = datetime.now(CENTRAL).date()
 
     # ── Load pending promotions ──────────────────────────────────
+    # #region agent log
+    try:
+        import json as _json, time as _time
+        open(r"C:\Users\Joshua\APIs\debug-b305af.log", "a", encoding="utf-8").write(
+            _json.dumps({
+                "sessionId": "b305af",
+                "runId": "post-fix",
+                "hypothesisId": "H-quota",
+                "location": "promo_trigger.py:load_pending",
+                "message": "promo_trigger starting Promotions load",
+                "data": {},
+                "timestamp": _time.time() * 1000,
+            }) + "\n"
+        )
+    except Exception:
+        pass
+    # #endregion
+
     print(f"[promo_trigger] Loading Pending promotions...")
     try:
         pending_promos = load_pending_promotions()
     except Exception as e:
+        # #region agent log
+        try:
+            import json as _json, time as _time
+            open(r"C:\Users\Joshua\APIs\debug-b305af.log", "a", encoding="utf-8").write(
+                _json.dumps({
+                    "sessionId": "b305af",
+                    "runId": "post-fix",
+                    "hypothesisId": "H-quota",
+                    "location": "promo_trigger.py:load_failed",
+                    "message": "promo_trigger load failed",
+                    "data": {"error": str(e)[:300]},
+                    "timestamp": _time.time() * 1000,
+                }) + "\n"
+            )
+        except Exception:
+            pass
+        # #endregion
         print(f"[promo_trigger] ❌ Failed to load Promotions tab: {e}")
         sys.exit(1)
 

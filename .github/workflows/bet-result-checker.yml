@@ -30,6 +30,12 @@ jobs:
           SHEET_ID: ${{ secrets.SHEET_ID }}
           SHEET_TAB: Bets
         run: python trigger.py
+      # Checker writes can exhaust the Sheets per-minute read quota; promo
+      # updater is a fresh process (cold cache) and would 429 immediately.
+      # Wait for the quota window to recover, and sheets_quota.py also
+      # retries on 429 if the pause isn't enough.
+      - name: Wait for Sheets quota window
+        run: sleep 65
       - name: Run Promotion Updater
         env:
           GOOGLE_APPLICATION_CREDENTIALS_JSON: ${{ secrets.SERVICE_ACCOUNT_JSON }}

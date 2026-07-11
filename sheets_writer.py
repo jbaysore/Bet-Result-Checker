@@ -4,6 +4,7 @@ from config import (
     SHEET_ID, SHEET_TAB, RESULT_VOID, RESULT_NEEDS_REVIEW, get_credentials_info,
     CLOSING_ODDS_ERROR_CODES,
 )
+from sheets_quota import call_with_sheets_retry
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -40,12 +41,20 @@ def _promo_id_matches(row: list[str], promo_id_col: int, promo_id: str) -> bool:
 
 def _read_bet_row(sheet, row_idx: int) -> list[str]:
     """One Sheets API read for the full Bets row."""
-    return sheet.row_values(row_idx)
+    return call_with_sheets_retry(
+        f"Bets row_values({row_idx})",
+        sheet.row_values,
+        row_idx,
+    )
 
 
 def _read_promo_row(sheet, row_idx: int) -> list[str]:
     """One Sheets API read for the full Promotions row."""
-    return sheet.row_values(row_idx)
+    return call_with_sheets_retry(
+        f"Promotions row_values({row_idx})",
+        sheet.row_values,
+        row_idx,
+    )
 
 
 def _get_client():
@@ -67,7 +76,11 @@ def _get_spreadsheet():
     """Cached spreadsheet handle shared by Bets, Promotions, and Book Settings."""
     global _spreadsheet_cache
     if _spreadsheet_cache is None:
-        _spreadsheet_cache = _get_client().open_by_key(SHEET_ID)
+        _spreadsheet_cache = call_with_sheets_retry(
+            "open_by_key",
+            _get_client().open_by_key,
+            SHEET_ID,
+        )
     return _spreadsheet_cache
 
 
@@ -85,7 +98,11 @@ def _get_sheet():
     """
     global _sheet_cache
     if _sheet_cache is None:
-        _sheet_cache = _get_spreadsheet().worksheet(SHEET_TAB)
+        _sheet_cache = call_with_sheets_retry(
+            f"worksheet({SHEET_TAB})",
+            _get_spreadsheet().worksheet,
+            SHEET_TAB,
+        )
     return _sheet_cache
 
 
@@ -106,7 +123,11 @@ def _bets_col_letter_lookup():
     from config import BET_COL
 
     sheet = _get_sheet()
-    headers = sheet.row_values(1)
+    headers = call_with_sheets_retry(
+        "Bets row_values(1)",
+        sheet.row_values,
+        1,
+    )
 
     idx = {}
     for key, header_name in BET_COL.items():
@@ -138,8 +159,15 @@ def _get_book_refunds_fee_on_void(book: str) -> bool:
     """
     global _book_refunds_cache
     if _book_refunds_cache is None:
-        tab = _get_spreadsheet().worksheet("Book Settings")
-        rows = tab.get_all_values()
+        tab = call_with_sheets_retry(
+            "worksheet(Book Settings)",
+            _get_spreadsheet().worksheet,
+            "Book Settings",
+        )
+        rows = call_with_sheets_retry(
+            "Book Settings get_all_values",
+            tab.get_all_values,
+        )
         mapping: dict[str, bool] = {}
         if rows:
             headers = rows[0]
@@ -923,7 +951,11 @@ def _get_promotions_sheet():
     global _promo_sheet_cache
     if _promo_sheet_cache is None:
         from config import PROMOTIONS_TAB
-        _promo_sheet_cache = _get_spreadsheet().worksheet(PROMOTIONS_TAB)
+        _promo_sheet_cache = call_with_sheets_retry(
+            f"worksheet({PROMOTIONS_TAB})",
+            _get_spreadsheet().worksheet,
+            PROMOTIONS_TAB,
+        )
     return _promo_sheet_cache
 
 
@@ -941,7 +973,10 @@ def _promo_col_letter_lookup():
     from sheets_reader import _resolve_promotions_headers_from_rows
 
     sheet = _get_promotions_sheet()
-    rows = sheet.get_all_values()
+    rows = call_with_sheets_retry(
+        "Promotions get_all_values",
+        sheet.get_all_values,
+    )
     _, headers = _resolve_promotions_headers_from_rows(rows)
 
     idx = {}

@@ -1,6 +1,7 @@
 import gspread
 from google.oauth2.service_account import Credentials
 from config import SHEET_ID, get_credentials_info
+from sheets_quota import call_with_sheets_retry
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -22,7 +23,10 @@ def _get_book_settings_rows() -> list:
     mid-run."""
     global _book_settings_rows_cache
     if _book_settings_rows_cache is None:
-        _book_settings_rows_cache = _get_tab("Book Settings").get_all_values()
+        _book_settings_rows_cache = call_with_sheets_retry(
+            "Book Settings get_all_values",
+            _get_tab("Book Settings").get_all_values,
+        )
     return _book_settings_rows_cache
 
 
@@ -32,7 +36,10 @@ def _get_promotions_rows() -> list:
     mid-run."""
     global _promotions_rows_cache
     if _promotions_rows_cache is None:
-        _promotions_rows_cache = _get_tab("Promotions").get_all_values()
+        _promotions_rows_cache = call_with_sheets_retry(
+            "Promotions get_all_values",
+            _get_tab("Promotions").get_all_values,
+        )
     return _promotions_rows_cache
 
 
@@ -64,7 +71,11 @@ def _get_spreadsheet():
     """
     global _spreadsheet_cache
     if _spreadsheet_cache is None:
-        _spreadsheet_cache = _get_client().open_by_key(SHEET_ID)
+        _spreadsheet_cache = call_with_sheets_retry(
+            "open_by_key",
+            _get_client().open_by_key,
+            SHEET_ID,
+        )
     return _spreadsheet_cache
 
 
@@ -75,7 +86,11 @@ def _get_tab(tab_name: str):
     per repeat read of the same tab within a single run.
     """
     if tab_name not in _tab_cache:
-        _tab_cache[tab_name] = _get_spreadsheet().worksheet(tab_name)
+        _tab_cache[tab_name] = call_with_sheets_retry(
+            f"worksheet({tab_name})",
+            _get_spreadsheet().worksheet,
+            tab_name,
+        )
     return _tab_cache[tab_name]
 
 
@@ -105,7 +120,10 @@ def _get_bets_rows(tab_name: str) -> list[list[str]]:
     functions per run; without this cache that was four identical get_all_values()
     calls hitting the Sheets read quota."""
     if tab_name not in _bets_rows_cache:
-        _bets_rows_cache[tab_name] = _get_tab(tab_name).get_all_values()
+        _bets_rows_cache[tab_name] = call_with_sheets_retry(
+            f"{tab_name} get_all_values",
+            _get_tab(tab_name).get_all_values,
+        )
     return _bets_rows_cache[tab_name]
 
 
@@ -859,11 +877,9 @@ def load_pending_promotions() -> list[dict]:
     numbers/dates is promo_resolver.py's job, kept separate so this
     function stays a thin, honest read with no business logic.
     """
-    from config import PROMOTIONS_TAB, PROMO_COL, PROMO_STATUS_PENDING
+    from config import PROMO_COL, PROMO_STATUS_PENDING
 
-    tab = _get_tab(PROMOTIONS_TAB)
-
-    rows = tab.get_all_values()
+    rows = _get_promotions_rows()
     if not rows:
         return []
 
