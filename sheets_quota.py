@@ -63,27 +63,5 @@ def call_with_sheets_retry(
                 f"(attempt {attempt}/{max_attempts}). "
                 f"Sleeping {sleep_sec:.0f}s then retrying…"
             )
-            # #region agent log
-            try:
-                import json as _json
-                open(r"C:\Users\Joshua\APIs\debug-b305af.log", "a", encoding="utf-8").write(
-                    _json.dumps({
-                        "sessionId": "b305af",
-                        "runId": "post-fix",
-                        "hypothesisId": "H-quota",
-                        "location": "sheets_quota.py:retry",
-                        "message": "sheets quota retry",
-                        "data": {
-                            "label": label,
-                            "attempt": attempt,
-                            "sleep_sec": sleep_sec,
-                            "error": str(e)[:240],
-                        },
-                        "timestamp": time.time() * 1000,
-                    }) + "\n"
-                )
-            except Exception:
-                pass
-            # #endregion
             time.sleep(sleep_sec)
             attempt += 1

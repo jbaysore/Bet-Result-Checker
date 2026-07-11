@@ -161,22 +161,8 @@ def _fetch_scores(sport_key: str) -> list | None:
             return None
         if response.status_code == 404:
             print(f"[odds_api] Sport key '{sport_key}' unknown to Odds API (HTTP 404).")
-            # #region agent log
-            try:
-                import json as _json
-                open(r"C:\Users\Joshua\APIs\debug-b305af.log", "a", encoding="utf-8").write(_json.dumps({"sessionId": "b305af", "runId": "post-fix", "hypothesisId": "H-daysFrom", "location": "odds_api.py:404", "message": "scores 404 unknown sport", "data": {"sport_key": sport_key, "body": response.text[:300]}, "timestamp": __import__("time").time() * 1000}) + "\n")
-            except Exception:
-                pass
-            # #endregion
             return None
         if response.status_code == 422:
-            # #region agent log
-            try:
-                import json as _json
-                open(r"C:\Users\Joshua\APIs\debug-b305af.log", "a", encoding="utf-8").write(_json.dumps({"sessionId": "b305af", "runId": "post-fix", "hypothesisId": "H-daysFrom", "location": "odds_api.py:422", "message": "scores 422 body", "data": {"sport_key": sport_key, "daysFrom": params.get("daysFrom"), "status": 422, "body": response.text[:400]}, "timestamp": __import__("time").time() * 1000}) + "\n")
-            except Exception:
-                pass
-            # #endregion
             detail = ""
             try:
                 err = response.json()
@@ -209,14 +195,6 @@ def _fetch_scores(sport_key: str) -> list | None:
     remaining = response.headers.get("x-requests-remaining", "unknown")
     used = response.headers.get("x-requests-used", "unknown")
     print(f"[odds_api] Credits used: {used} | Remaining: {remaining}")
-
-    # #region agent log
-    try:
-        import json as _json
-        open(r"C:\Users\Joshua\APIs\debug-b305af.log", "a", encoding="utf-8").write(_json.dumps({"sessionId": "b305af", "runId": "post-fix", "hypothesisId": "H-daysFrom", "location": "odds_api.py:success", "message": "scores fetch ok", "data": {"sport_key": sport_key, "daysFrom": 3, "game_count": len(games), "completed": sum(1 for g in games if g.get("completed"))}, "timestamp": __import__("time").time() * 1000}) + "\n")
-    except Exception:
-        pass
-    # #endregion
 
     _scores_cache[sport_key] = games
     return games
