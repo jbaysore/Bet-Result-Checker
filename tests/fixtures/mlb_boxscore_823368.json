@@ -1,0 +1,176 @@
+{
+ "teams": {
+  "away": {
+   "team": {
+    "name": "Miami Marlins"
+   },
+   "players": {
+    "ID676604": {
+     "person": {
+      "fullName": "Tyler Zuber"
+     },
+     "stats": {
+      "batting": {},
+      "pitching": {
+       "strikeOuts": 0,
+       "outs": 3,
+       "hits": 0,
+       "earnedRuns": 0,
+       "baseOnBalls": 0,
+       "battersFaced": 3
+      }
+     }
+    },
+    "ID681715": {
+     "person": {
+      "fullName": "Heriberto Hernández"
+     },
+     "stats": {
+      "batting": {
+       "hits": 1,
+       "totalBases": 4,
+       "homeRuns": 1,
+       "rbi": 1,
+       "runs": 1,
+       "doubles": 0,
+       "triples": 0,
+       "baseOnBalls": 0,
+       "stolenBases": 0,
+       "strikeOuts": 2,
+       "plateAppearances": 4,
+       "atBats": 4
+      },
+      "pitching": {}
+     }
+    },
+    "ID664126": {
+     "person": {
+      "fullName": "Pete Fairbanks"
+     },
+     "stats": {
+      "batting": {},
+      "pitching": {
+       "strikeOuts": 2,
+       "outs": 3,
+       "hits": 1,
+       "earnedRuns": 1,
+       "baseOnBalls": 0,
+       "battersFaced": 4
+      }
+     }
+    },
+    "ID665923": {
+     "person": {
+      "fullName": "Esteury Ruiz"
+     },
+     "stats": {
+      "batting": {
+       "hits": 1,
+       "totalBases": 2,
+       "homeRuns": 0,
+       "rbi": 0,
+       "runs": 0,
+       "doubles": 1,
+       "triples": 0,
+       "baseOnBalls": 0,
+       "stolenBases": 0,
+       "strikeOuts": 0,
+       "plateAppearances": 2,
+       "atBats": 1
+      },
+      "pitching": {}
+     }
+    }
+   }
+  },
+  "home": {
+   "team": {
+    "name": "Pittsburgh Pirates"
+   },
+   "players": {
+    "ID694973": {
+     "person": {
+      "fullName": "Paul Skenes"
+     },
+     "stats": {
+      "batting": {},
+      "pitching": {
+       "strikeOuts": 10,
+       "outs": 18,
+       "hits": 4,
+       "earnedRuns": 2,
+       "baseOnBalls": 1,
+       "battersFaced": 23
+      }
+     }
+    },
+    "ID687462": {
+     "person": {
+      "fullName": "Spencer Horwitz"
+     },
+     "stats": {
+      "batting": {
+       "hits": 0,
+       "totalBases": 0,
+       "homeRuns": 0,
+       "rbi": 0,
+       "runs": 0,
+       "doubles": 0,
+       "triples": 0,
+       "baseOnBalls": 1,
+       "stolenBases": 0,
+       "strikeOuts": 4,
+       "plateAppearances": 5,
+       "atBats": 4
+      },
+      "pitching": {}
+     }
+    },
+    "ID664040": {
+     "person": {
+      "fullName": "Brandon Lowe"
+     },
+     "stats": {
+      "batting": {
+       "hits": 0,
+       "totalBases": 0,
+       "homeRuns": 0,
+       "rbi": 0,
+       "runs": 0,
+       "doubles": 0,
+       "triples": 0,
+       "baseOnBalls": 0,
+       "stolenBases": 0,
+       "strikeOuts": 3,
+       "plateAppearances": 5,
+       "atBats": 5
+      },
+      "pitching": {}
+     }
+    },
+    "ID682848": {
+     "person": {
+      "fullName": "Endy Rodríguez"
+     },
+     "stats": {
+      "batting": {
+       "hits": 0,
+       "totalBases": 0,
+       "homeRuns": 0,
+       "rbi": 0,
+       "runs": 0,
+       "doubles": 0,
+       "triples": 0,
+       "baseOnBalls": 0,
+       "stolenBases": 0,
+       "strikeOuts": 0,
+       "plateAppearances": 1,
+       "atBats": 1
+      },
+      "pitching": {}
+     }
+    }
+   }
+  }
+ }
+}

@@ -62,7 +62,26 @@ claims verified in code.
 
 ---
 
-## Phase 3 — MLB player props via box scores (the ONLY remaining phase)
+## Phase 3 — MLB player props via box scores   ✅ SHIPPED (Round 3, behind PROPS_SHADOW_MODE)
+
+> **Done 2026-07-10 (Opus). checker 301 pytest green, odds-tool 366 node green,
+> client builds.** `sources/mlb_statsapi.py` (schedule/boxscore; fields VERIFIED vs
+> a real payload committed at `tests/fixtures/mlb_boxscore_823368.json` — Marlins@
+> Pirates 2026-06-14, Skenes 10 K); `name_match.py` shared normalizer (espn_fights
+> now imports it); `prop_resolver.py` (parse, stat map incl. Singles/H+R+RBI, DNP
+> policy, `props-observed` two-pass with corrupt-marker→manual, pick'em combine);
+> poller `_poll_prop_entry` (dispatched before parlay combining — never touches
+> `combine_parlay_results`), single + pick'em loading in sheets_reader,
+> `upsert_notes_line` in sheets_writer, `PROPS_SHADOW_MODE`/`PROPS_REVERIFY_MINUTES`
+> in config. odds-tool composer + DFS promo tool stamp `Pickem {mode} {n}-pick`;
+> PromotionsPage HALF-result coloring nit fixed. Live-verified end-to-end vs the
+> real MLB API. **In shadow mode it writes `props-proposed:` to Notes + rings
+> NEEDS_REVIEW, never auto-settles** until Josh flips the flag after his agreement
+> week. DEVIATION (flagged): pick'em `manual_payout` routes to NEEDS_REVIEW + a
+> per-leg/hit-count Notes line rather than the exact MANUAL_PAYOUT_REQUIRED_BOOKS
+> flow — functionally manual and safe; polish later if wanted.
+
+### Original spec (kept for reference)
 
 ### Source: `sources/mlb_statsapi.py`
 Official MLB Stats API (statsapi.mlb.com, free, no key): schedule-by-date → gamePk +

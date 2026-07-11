@@ -725,6 +725,43 @@ def flag_duplicate_bet_id(row_idx: int, bet_id: str, detail: str) -> bool:
         return False
 
 
+def upsert_notes_line(row_idx: int, bet_id: str, prefix: str, line: str | None) -> bool:
+    """
+    Replace any existing Notes line starting with `prefix` with `line` (append if
+    none exists); pass line=None to just REMOVE the prefixed line. Used by the
+    prop resolver's Final+re-verify state: the `props-observed:` marker and the
+    `props-proposed:` shadow-mode proposal both live as single, self-replacing
+    Notes lines (same idempotent pattern as flag_pl_blocked). Never touches
+    Result/P/L/Payout. BetID-guarded like every other Notes write.
+    """
+    idx = _bets_col_letter_lookup()
+    notes_col = idx.get("notes")
+    bet_id_col = idx.get("bet_id")
+    if None in (notes_col, bet_id_col):
+        print(f"[sheets_writer] ⚠️  Bets tab missing Notes/BetID column -- cannot upsert note row {row_idx}.")
+        return False
+    try:
+        sheet = _get_sheet()
+        row = _read_bet_row(sheet, row_idx)
+        if not _bet_id_matches(row, bet_id_col, bet_id):
+            print(f"[sheets_writer] ⚠️  Row {row_idx} BetID mismatch on notes upsert. Skipping.")
+            return False
+        existing_notes = _cell_at(row, notes_col)
+        other_lines = [
+            ln for ln in existing_notes.split("\n")
+            if ln.strip() and not ln.strip().startswith(prefix)
+        ]
+        new_lines = other_lines + ([line] if line else [])
+        sheet.update_cell(row_idx, notes_col, "\n".join(new_lines))
+        return True
+    except gspread.exceptions.APIError as e:
+        print(f"[sheets_writer] ❌ Sheets API error upserting note row {row_idx} (BetID {bet_id}): {e}")
+        return False
+    except Exception as e:
+        print(f"[sheets_writer] ❌ Unexpected error upserting note row {row_idx} (BetID {bet_id}): {e}")
+        return False
+
+
 def flag_pl_blocked(row_idx: int, bet_id: str, reason: str) -> bool:
     """
     Appends a visible "⚠ P/L not calculated: <reason>" line to the Notes

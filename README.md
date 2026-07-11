@@ -120,8 +120,10 @@ The worker uses a durable `ClosingCapture` tab in the tracking spreadsheet:
    checker handles it after kickoff.
 
 V1 deliberately excludes live bets, parlays, props, and books that require a
-venue-specific/manual source (Kalshi, Polymarket, Novig, BetOpenly). Their
-existing historical, Kalshi-specific, or manual paths remain unchanged.
+venue-specific/manual source (Kalshi, Polymarket, BetOpenly). Novig and
+ProphetX use The Odds API's `us_ex` feed for both proactive and historical
+closing capture. The remaining books' historical, Kalshi-specific, or manual
+paths remain unchanged.
 
 ### Railway deployment
 

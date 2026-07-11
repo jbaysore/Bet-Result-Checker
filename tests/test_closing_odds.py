@@ -119,11 +119,11 @@ def test_is_exchange_book():
     assert not is_exchange_book("fanatics")
 
 
-def test_needs_manual_closing_odds_excludes_prophetx():
+def test_needs_manual_closing_odds_excludes_api_supported_exchanges():
     assert needs_manual_closing_odds("kalshi")
     assert needs_manual_closing_odds("polymarket")
-    assert needs_manual_closing_odds("novig")
     assert needs_manual_closing_odds("betopenly")
+    assert not needs_manual_closing_odds("novig")
     assert not needs_manual_closing_odds("prophetx")
     assert not needs_manual_closing_odds("fanatics")
 
@@ -160,6 +160,41 @@ def test_fetch_closing_odds_queries_prophetx(mock_snapshot, _mock_feed):
     assert mock_snapshot.called
     assert result["error"] is None
     assert result["closing_odds"] == "-140"
+
+
+@patch("closing_odds.sport_has_odds_feed", return_value=True)
+@patch("closing_odds._fetch_historical_snapshot")
+def test_fetch_closing_odds_queries_novig(mock_snapshot, _mock_feed):
+    mock_snapshot.return_value = [{
+        "home_team": "Chicago Cubs",
+        "away_team": "St. Louis Cardinals",
+        "bookmakers": [{
+            "key": "novig",
+            "markets": [{
+                "key": "h2h",
+                "outcomes": [
+                    {"name": "Chicago Cubs", "price": -105},
+                    {"name": "St. Louis Cardinals", "price": -115},
+                ],
+            }],
+        }],
+    }]
+    result = fetch_closing_odds({
+        "bet_id": "202",
+        "sport": "baseball_mlb",
+        "book": "novig",
+        "team1": "Chicago Cubs",
+        "team2": "St. Louis Cardinals",
+        "game_date": "7/10/2026",
+        "game_start": "7:05 PM",
+        "bet_type": "Moneyline",
+        "selection": "Chicago Cubs",
+        "odds_taken": "+100",
+    })
+    assert mock_snapshot.called
+    assert mock_snapshot.call_args.args[2] == "novig"
+    assert result["error"] is None
+    assert result["closing_odds"] == "-105"
 
 
 @patch("closing_odds.sport_has_odds_feed", return_value=True)
@@ -329,3 +364,26 @@ def test_fetch_live_closing_odds_reuses_selection_extraction(mock_snapshot):
         "selection": "Cubs -7.5", "market_key": "alternate_spreads",
     })
     assert result == {"closing_odds": "+145", "decimal_closing": 2.45, "error": None}
+
+
+@patch("closing_odds._fetch_live_snapshot")
+def test_fetch_live_closing_odds_queries_novig(mock_snapshot):
+    mock_snapshot.return_value = [{
+        "home_team": "Chicago Cubs",
+        "away_team": "St. Louis Cardinals",
+        "bookmakers": [{
+            "key": "novig",
+            "markets": [{
+                "key": "h2h",
+                "outcomes": [{"name": "Chicago Cubs", "price": -102}],
+            }],
+        }],
+    }]
+    result = fetch_live_closing_odds({
+        "bet_id": "303", "sport": "baseball_mlb", "book": "novig",
+        "team1": "Chicago Cubs", "team2": "St. Louis Cardinals",
+        "bet_type": "Moneyline", "selection": "Chicago Cubs",
+        "market_key": "h2h",
+    })
+    assert mock_snapshot.call_args.args[1] == "novig"
+    assert result == {"closing_odds": "-102", "decimal_closing": 1.98039216, "error": None}

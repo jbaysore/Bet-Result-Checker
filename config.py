@@ -107,6 +107,20 @@ BET_TYPE_PROP       = "Prop"
 # Prop or manually-tracked leg falls back to manual Result entry.
 AUTOMATED_BET_TYPES = {BET_TYPE_SPREAD, BET_TYPE_MONEYLINE, BET_TYPE_TOTAL, BET_TYPE_DRAW}
 
+# ── Player props (Phase 3, MLB via statsapi) ──────────────────────────
+# SHADOW MODE gate + permanent kill switch: when True the prop resolver
+# COMPUTES its proposed result and writes it into the row's Notes but does NOT
+# settle the Result column; NEEDS_REVIEW notifications still ring so Josh
+# reviews each one. He compares proposals against his manual settlements for
+# ~a week of slates, THEN flips this to False to let props settle live. Leave
+# the flag in place afterward as a kill switch.
+PROPS_SHADOW_MODE = True
+# Props settle only on Final + RE-VERIFY: the first Final observation is staged
+# into Notes, and only a later run at least this many minutes later, seeing the
+# identical box-score result, settles (stat corrections happen; a wrong settle
+# is unacceptable). State lives in the row's Notes (Railway has no durable disk).
+PROPS_REVERIFY_MINUTES = 60
+
 # A leg of a parlay can only be auto-resolved / auto-priced if its own bet
 # type is in this set (same as AUTOMATED_BET_TYPES today, named separately
 # so the parlay path reads clearly and can diverge later if needed).

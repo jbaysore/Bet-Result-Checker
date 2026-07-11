@@ -207,8 +207,9 @@ def load_pending_bets(tab_name: str) -> list[dict]:
 
     Returns a list of dicts keyed by column name.
     """
-    from config import AUTOMATED_BET_TYPES, BET_TYPE_PARLAY, RESULT_NEEDS_REVIEW
+    from config import AUTOMATED_BET_TYPES, BET_TYPE_PARLAY, BET_TYPE_PROP, RESULT_NEEDS_REVIEW
     from parlay import parse_legs, all_legs_automatable
+    from prop_resolver import parse_pickem_marker
 
     rows = _get_bets_rows(tab_name)
 
@@ -243,38 +244,70 @@ def load_pending_bets(tab_name: str) -> list[dict]:
         if result and result != RESULT_NEEDS_REVIEW:
             continue  # already resolved (or PENDING / manual)
 
+        notes = _bet_cell(row, col, "notes")
+        sport = _bet_cell(row, col, "sport")
+        selection = _bet_cell(row, col, "selection")
+
         is_parlay = False
+        is_prop_entry = False      # Phase 3: single MLB prop OR a pick'em parlay
+        pickem = None              # (mode, pick_count) for a pick'em row, else None
         legs = []
+        prop_legs = []             # [{selection, team1, team2, game_date}] for the prop resolver
+
         if bet_type == BET_TYPE_PARLAY:
-            # A parlay auto-resolves only if EVERY leg is an automatable type
-            # with a lookup-able game. Otherwise leave it for manual Result
-            # entry (calculate_pl_and_payout still settles it from the stored
-            # combined odds once a human types the Result).
             legs = parse_legs(_bet_cell(row, col, "legs"))
-            if not all_legs_automatable(legs):
+            pickem = parse_pickem_marker(notes)
+            if pickem is not None:
+                # A DFS pick'em entry (mode stamped in Notes at log time). Its
+                # Prop legs settle from box scores via the prop resolver, NOT the
+                # per-leg odds path. is_parlay stays False so _poll_parlay's
+                # combine math never touches it (trap: reduction ≠ product odds).
+                is_prop_entry = True
+                prop_legs = [{"selection": lg["selection"], "team1": lg["team1"],
+                              "team2": lg["team2"], "game_date": lg["game_date"]}
+                             for lg in legs]
+            elif all_legs_automatable(legs):
+                # Every leg is an automatable type with a lookup-able game.
+                is_parlay = True
+            else:
+                # A parlay with a non-automatable (e.g. Prop) leg and NO pick'em
+                # marker predates the convention → leave for manual Result entry.
                 continue
-            is_parlay = True
+        elif bet_type == BET_TYPE_PROP:
+            # Single player prop. v1 auto-resolves MLB only (statsapi); other
+            # sports have no box-score source yet → left for manual, as today.
+            if sport.strip().lower() != "baseball_mlb":
+                continue
+            is_prop_entry = True
+            prop_legs = [{"selection": selection,
+                          "team1": _bet_cell(row, col, "team1"),
+                          "team2": _bet_cell(row, col, "team2"),
+                          "game_date": _bet_cell(row, col, "game_date")}]
         elif bet_type not in AUTOMATED_BET_TYPES:
-            continue  # prop, or a parlay with a non-automatable leg — skip
+            continue
 
         pending.append({
             "row_idx":     row_idx,
             "bet_id":      _bet_cell(row, col, "bet_id"),
-            "sport":       _bet_cell(row, col, "sport"),
+            "sport":       sport,
             "book":        _bet_cell(row, col, "book"),
             "team1":       _bet_cell(row, col, "team1"),
             "team2":       _bet_cell(row, col, "team2"),
             "game_date":   _bet_cell(row, col, "game_date"),
             "game_start":  _bet_cell(row, col, "game_start"),
-            "selection":   _bet_cell(row, col, "selection"),
+            "selection":   selection,
             "bet_type":    bet_type,
             "odds_taken":  _bet_cell(row, col, "odds_taken"),
             "stake":       _bet_cell(row, col, "stake"),
             "fee":         _bet_cell(row, col, "fee"),
             "bet_category": _bet_cell(row, col, "bet_category"),
             "promo_id":    _bet_cell(row, col, "promo_id"),
+            "notes":       notes,
             "is_parlay":   is_parlay,
+            "is_prop_entry": is_prop_entry,
+            "pickem":      pickem,
             "legs":        legs,
+            "prop_legs":   prop_legs,
             # Kalshi market ticker (blank for non-Kalshi) -- lets poll_bet settle
             # from Kalshi's own market resolution before the score-based path.
             "kalshi_ticker": _bet_cell(row, col, "kalshi_ticker"),

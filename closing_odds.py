@@ -52,12 +52,10 @@ _EXCHANGE_KEYS = {"polymarket", "kalshi", "novig", "betopenly", "prophetx"}
 # Books whose closing line is NOT retrievable from The Odds API historical feed
 # and therefore always route to manual entry (or a book-specific API, as Kalshi
 # does via its own candlesticks). This is a STRICT SUBSET of _EXCHANGE_KEYS:
-# ProphetX is intentionally excluded because it IS carried on The Odds API under
-# the us_ex region (same as odds-tool's live fetches), so its historical
-# snapshot can and should be queried like any other book. Conflating the two
-# sets is what previously made ProphetX bets always fall through to manual entry
-# and never return a closing price.
-_NON_ODDS_API_KEYS = {"polymarket", "kalshi", "novig", "betopenly"}
+# ProphetX and Novig are intentionally excluded because both are carried on The
+# Odds API under the us_ex region (same as odds-tool's live fetches), so their
+# historical snapshots can and should be queried like any other book.
+_NON_ODDS_API_KEYS = {"polymarket", "kalshi", "betopenly"}
 
 _US2_KEYS = {
     "ballybet", "betanysports", "betparx", "espnbet", "fliff",
@@ -75,8 +73,8 @@ def needs_manual_closing_odds(book_key: str) -> bool:
     """
     True for books whose closing line can't be pulled from The Odds API
     historical feed (prediction markets priced via their own venue). ProphetX
-    is deliberately NOT here — it's on The Odds API us_ex region and is fetched
-    like a normal book.
+    and Novig are deliberately NOT here — both are on The Odds API us_ex region
+    and are fetched like normal books.
     """
     return (book_key or "").strip().lower() in _NON_ODDS_API_KEYS
 

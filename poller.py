@@ -26,6 +26,7 @@ from resolver import (
 from sheets_writer import (
     write_result, write_pl_payout, write_pl_only,
     flag_pl_blocked, clear_pl_blocked_flag, flag_payout_caution,
+    upsert_notes_line,
 )
 from sheets_reader import (
     get_promo_boost_percentage, get_book_fee_before_odds, get_book_fee_config,
@@ -105,6 +106,13 @@ def poll_bet(bet: dict) -> bool:
               f"Skipping this run -- next triggered run will check again.")
         return "not_yet_time"
 
+    # Player props (single or a DFS pick'em parlay): box-score settlement with a
+    # Final+re-verify two-pass, behind PROPS_SHADOW_MODE. Owns its own lifecycle
+    # (it can legitimately stay pending 60+ min after Final), so it dispatches
+    # BEFORE the give-up/score path — never a game-score lookup.
+    if bet.get("is_prop_entry"):
+        return _poll_prop_entry(bet, now_utc)
+
     # Parlays settle from their legs, not a single game lookup. The gating
     # above already used the parlay row's Game Date/Start (set to the LATEST
     # leg), so by here every leg's game should have started.
@@ -164,6 +172,119 @@ def poll_bet(bet: dict) -> bool:
 
     print(f"[poller] BetID {bet_id}: not final yet. Next triggered run will check again.")
     return "still_pending"
+
+
+def _poll_prop_entry(bet: dict, now_utc) -> str:
+    """
+    Settle a player-prop entry (single MLB prop, or a DFS pick'em parlay) from
+    official box scores, via the Final+re-verify two-pass. Behind
+    PROPS_SHADOW_MODE: while True, the proposed result is written into Notes and
+    NEEDS_REVIEW is rung, but the Result column is NOT auto-settled (Josh's
+    ~week acceptance gate). Every failure path routes to manual, never a guess.
+    """
+    from prop_resolver import (
+        resolve_prop_entry, parse_props_marker, format_props_marker,
+        combine_pickem, RESULT_MANUAL,
+    )
+    from sources.mlb_statsapi import get_schedule_games, get_boxscore
+    from config import PROPS_SHADOW_MODE, PROPS_REVERIFY_MINUTES
+
+    bet_id = bet["bet_id"]
+    row_idx = bet["row_idx"]
+    notes = bet.get("notes", "")
+    prior = parse_props_marker(notes)
+
+    # A props-observed line that's present but unparseable (JSON corrupted) must
+    # NOT be treated as "no marker" and re-settled from scratch — route to manual
+    # (trap #3: never settle on a corrupted marker).
+    if prior is None and "props-observed:" in notes:
+        write_result(row_idx, RESULT_NEEDS_REVIEW, bet_id)
+        upsert_notes_line(row_idx, bet_id, "props:", "props: manual — corrupt props-observed marker")
+        return "needs_review"
+
+    decision = resolve_prop_entry(
+        bet["prop_legs"], now_utc, prior,
+        schedule_provider=get_schedule_games, boxscore_provider=get_boxscore,
+        reverify_minutes=PROPS_REVERIFY_MINUTES,
+    )
+    action = decision["action"]
+
+    if action in ("retry", "wait_final", "wait"):
+        print(f"[poller] BetID {bet_id}: props {action} — check again next run.")
+        return "still_pending"
+
+    if action == "manual":
+        write_result(row_idx, RESULT_NEEDS_REVIEW, bet_id)
+        upsert_notes_line(row_idx, bet_id, "props:", f"props: manual — {decision.get('reason', '')}")
+        return "needs_review"
+
+    if action == "observe":
+        marker = format_props_marker(decision["current"], now_utc.isoformat())
+        upsert_notes_line(row_idx, bet_id, "props-observed:", marker)
+        print(f"[poller] BetID {bet_id}: props observed at Final, re-verifying in "
+              f"{PROPS_REVERIFY_MINUTES}m before settling.")
+        return "still_pending"
+
+    if action == "changed":
+        write_result(row_idx, RESULT_NEEDS_REVIEW, bet_id)
+        upsert_notes_line(row_idx, bet_id, "props-observed:", None)   # drop stale marker
+        upsert_notes_line(row_idx, bet_id, "props-changed:",
+                          f"props-changed: box score moved between checks — "
+                          f"prior {decision['prior']} vs now {decision['current']}")
+        return "needs_review"
+
+    # action == "settle": box score confirmed stable across the re-verify window.
+    current = decision["current"]
+    pickem = bet.get("pickem")
+    if pickem is not None:
+        combined = combine_pickem(pickem[0], current)
+        route = combined["route"]
+        note = f"pick'em {pickem[0]} {combined['hits']}/{combined['n']} — legs {current}"
+        if route == "settle_win":
+            kind, proposed = "settle", RESULT_WIN
+        elif route == "settle_loss":
+            kind, proposed = "settle", RESULT_LOSS
+        elif route == "manual_payout":
+            kind, proposed = "manual_payout", None
+        else:
+            kind, proposed = "manual", None
+    else:
+        result = current[bet["selection"]]
+        note = f"single prop → {result}"
+        if result == RESULT_MANUAL:
+            kind, proposed = "manual", None
+        else:
+            kind, proposed = "settle", result
+
+    if PROPS_SHADOW_MODE:
+        # Propose, don't settle; ring NEEDS_REVIEW so Josh compares vs his manual
+        # result during the acceptance week.
+        label = proposed if proposed else kind
+        upsert_notes_line(row_idx, bet_id, "props-proposed:",
+                          f"props-proposed: {label} @ {now_utc.isoformat()} — {note}")
+        write_result(row_idx, RESULT_NEEDS_REVIEW, bet_id)
+        print(f"[poller] BetID {bet_id}: SHADOW proposal '{label}' — {note} (not settled).")
+        return "needs_review"
+
+    # ── LIVE settlement (only once Josh flips PROPS_SHADOW_MODE off) ──────────
+    upsert_notes_line(row_idx, bet_id, "props-observed:", None)       # confirmed → clear marker
+    if kind == "manual":
+        write_result(row_idx, RESULT_NEEDS_REVIEW, bet_id)
+        upsert_notes_line(row_idx, bet_id, "props:", f"props: {note}")
+        return "needs_review"
+    if kind == "manual_payout":
+        # Reduced/flex pick'em: the result is known but the payout comes from the
+        # site's own tables (app-truth) → human enters it. Per-leg detail + hit
+        # count go into Notes so the manual entry is a copy job, not a recompute.
+        write_result(row_idx, RESULT_NEEDS_REVIEW, bet_id)
+        upsert_notes_line(row_idx, bet_id, "props-payout:", f"props-payout: enter payout — {note}")
+        return "needs_review"
+    # kind == "settle"
+    pl, payout = _safe_calculate_pl_payout(bet, proposed)
+    success = write_result(row_idx, proposed, bet_id, book=bet.get("book"), pl=pl, payout=payout)
+    if success and pl is not None:
+        clear_pl_blocked_flag(row_idx, bet_id)
+    return "resolved" if success else "error"
 
 
 def _poll_parlay(bet: dict, now_utc, give_up_at) -> str:

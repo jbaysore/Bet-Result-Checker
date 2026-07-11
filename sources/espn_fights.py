@@ -27,14 +27,13 @@ just routes to review. Confirm the wording against one real draw/NC payload and
 tighten `_classify_no_winner` if needed.
 """
 
-import re
-import unicodedata
 from datetime import timedelta
 
 import requests
 
 from config import GAME_STATUS_CANCELLED
 from date_utils import parse_sheet_date
+from name_match import normalize_name as _normalize_name
 
 ESPN_FIGHT_BASE = "https://site.api.espn.com/apis/site/v2/sports"
 
@@ -47,10 +46,6 @@ _LEAGUE_BY_SPORT = {
 # One scoreboard payload per (league, dates_key) per process.
 _scoreboard_cache: dict[tuple[str, str], list | None] = {}
 
-# Generational/suffix tokens dropped before matching (Jr, Sr, II…).
-_SUFFIX_TOKENS = {"jr", "sr", "ii", "iii", "iv", "v"}
-
-
 def league_for_sport(sport_key: str) -> str | None:
     return _LEAGUE_BY_SPORT.get((sport_key or "").strip().lower())
 
@@ -60,22 +55,9 @@ def is_fight(sport_key: str) -> bool:
     return league_for_sport(sport_key) is not None
 
 
-def normalize_fighter_name(name: str) -> str:
-    """
-    Exact-match normalization (RATIFIED standard, shared with the Phase-3 prop
-    matcher): strip accents (Acuña→acuna), lowercase, fold punctuation to
-    spaces, drop generational suffixes, collapse whitespace. Matching is EXACT
-    on the result — no fuzzy/substring scoring, because a wrong fighter is a
-    wrong settlement.
-    """
-    if not name:
-        return ""
-    decomposed = unicodedata.normalize("NFKD", name)
-    stripped = "".join(c for c in decomposed if not unicodedata.combining(c))
-    lowered = stripped.lower()
-    spaced = re.sub(r"[^a-z0-9]+", " ", lowered)
-    tokens = [t for t in spaced.split() if t and t not in _SUFFIX_TOKENS]
-    return " ".join(tokens)
+# Back-compat alias — the fighter matcher now uses the shared normalizer
+# (name_match.normalize_name); kept so existing callers/tests keep working.
+normalize_fighter_name = _normalize_name
 
 
 def _dates_param(game_date: str | None) -> str:
