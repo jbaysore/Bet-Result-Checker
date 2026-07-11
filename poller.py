@@ -17,7 +17,7 @@ from config import (
     BET_TYPE_PARLAY,
     BET_TYPE_MONEYLINE,
 )
-from sources import odds_api, espn_tennis
+from sources import odds_api, espn_tennis, espn_fights
 from resolver import (
     resolve, resolve_parlay, calculate_pl_and_payout, derive_pl_from_payout,
     derive_cashout_pl, _american_odds_profit,
@@ -251,6 +251,12 @@ def _fetch_game_for(sport: str, team1: str, team2: str,
         if bet_type and bet_type.strip() != BET_TYPE_MONEYLINE:
             return None
         return espn_tennis.get_match_result(sport, team1, team2, game_date)
+    if espn_fights.is_fight(sport):
+        # MMA/boxing: winner only. A fight Spread/Total/prop can't be graded
+        # from a bout winner → None → NEEDS_REVIEW (same posture as tennis).
+        if bet_type and bet_type.strip() != BET_TYPE_MONEYLINE:
+            return None
+        return espn_fights.get_fight_result(sport, team1, team2, game_date)
     return odds_api.get_game_result(sport, team1, team2)
 
 

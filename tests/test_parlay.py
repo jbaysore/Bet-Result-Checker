@@ -194,3 +194,20 @@ def test_resolve_parlay_one_leg_loses():
     result, eff = resolve_parlay(legs, games)
     assert result == RESULT_LOSS
     assert eff is None
+
+
+def test_resolve_parlay_with_team_total_leg():
+    # A parlay containing a team-total leg resolves per-leg via resolve() (Phase 1).
+    legs = [
+        _leg(),  # Yankees ML win
+        _leg(sport="baseball_mlb", team1="Atlanta Braves", team2="New York Mets",
+             bet_type=BET_TYPE_TOTAL, selection="Braves Team Total Over 4.5",
+             odds_taken="-110"),
+    ]
+    games = [
+        {"home_team": "Red Sox", "away_team": "Yankees", "home_score": 2, "away_score": 5},
+        {"home_team": "New York Mets", "away_team": "Atlanta Braves", "home_score": 3, "away_score": 5},
+    ]
+    result, eff = resolve_parlay(legs, games)
+    assert result == RESULT_WIN               # Braves scored 5 → team Over 4.5 hits
+    assert abs(eff - (_d("-150") * _d("-110"))) < 1e-9
