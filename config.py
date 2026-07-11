@@ -202,6 +202,12 @@ REAL_MONEY_CATEGORIES = {BET_CATEGORY_STANDARD, BET_CATEGORY_QUALIFYING,
 RESULT_WIN   = "WIN"
 RESULT_LOSS  = "LOSS"
 RESULT_PUSH  = "PUSH"
+# Quarter-line (Asian) half-results — a quarter line is two half-stakes at
+# L±0.25, so one half can win/push while the other pushes/loses. HALF WIN counts
+# as a win with its own (reduced) P/L; HALF LOSS as a loss (see calculate_pl_and_
+# payout). The odds-tool sheet views enumerate these too (Phase 2 parity change).
+RESULT_HALF_WIN  = "HALF WIN"
+RESULT_HALF_LOSS = "HALF LOSS"
 RESULT_VOID  = "VOID"        # written when a game is cancelled/postponed and never played
 RESULT_CASHOUT = "CASHOUT"   # manual early exit — payout entered by user
 RESULT_NEEDS_REVIEW = "NEEDS_REVIEW"  # written when Odds API never returned a final

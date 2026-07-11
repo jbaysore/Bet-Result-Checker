@@ -196,6 +196,16 @@ def test_resolve_parlay_one_leg_loses():
     assert eff is None
 
 
+def test_parlay_with_half_result_leg_routes_to_manual():
+    # A quarter-line leg inside a parlay → HALF WIN/LOSS → combine raises → manual
+    # (book conventions for parlay half-results vary; accuracy first, trap #1).
+    from parlay import combine_parlay_results
+    with pytest.raises(ValueError, match="HALF WIN/HALF LOSS"):
+        combine_parlay_results([("WIN", 1.91), ("HALF WIN", 1.91)])
+    with pytest.raises(ValueError, match="HALF WIN/HALF LOSS"):
+        combine_parlay_results([("HALF LOSS", 1.91), ("WIN", 2.5)])
+
+
 def test_resolve_parlay_with_team_total_leg():
     # A parlay containing a team-total leg resolves per-leg via resolve() (Phase 1).
     legs = [

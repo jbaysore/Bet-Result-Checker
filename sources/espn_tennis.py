@@ -108,6 +108,11 @@ def get_match_result(sport_key: str, player1: str, player2: str,
 
     game_date is accepted for signature symmetry with odds_api.get_game_result
     but unused -- ESPN returns the whole current tournament in one response.
+
+    TODO (RESOLVER_EXPANSION_PLAN F1): unlike espn_fights, tennis intentionally
+    gets NO date window because its scoreboard `?dates=` param does not filter
+    (whole tournament comes back regardless). If ESPN ever changes that, route
+    game_date through date_utils.parse_sheet_date here the way _dates_param does.
     """
     tour = tour_for_sport(sport_key)
     if tour is None:

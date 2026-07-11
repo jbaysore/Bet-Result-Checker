@@ -12,6 +12,8 @@ from config import (
     RESULT_PUSH,
     RESULT_VOID,
     RESULT_WIN,
+    RESULT_HALF_WIN,
+    RESULT_HALF_LOSS,
 )
 from resolver import resolve
 
@@ -178,40 +180,48 @@ def test_unrecognised_bet_type_raises():
         resolve(_bet(bet_type="Prop"), _game())
 
 
-# ── Phase 0: quarter-line guard (Asian half-stake lines route to manual) ─────
-# Quarter lines settle as two half-stakes (HALF WIN / HALF LOSS in Phase 2). The
-# resolver must NOT settle them binary — it raises, and the poller's existing
-# ValueError → manual path is the safety net.
+# ── Phase 2: quarter-line HALF WIN / HALF LOSS settlement ────────────────────
+# A quarter line is two half-stakes at L±0.25 (Phase 0's guard is gone; these are
+# the SAME lines, now asserting the combined result). Game: Argentina (home) vs
+# Switzerland (away).
 
-@pytest.mark.parametrize("selection", [
-    "Argentina -0.75",
-    "Switzerland +0.75",
-    "Chiefs +0.25",
-    "Lakers -1.25",
-    "Braves -2.75",
+@pytest.mark.parametrize("selection,home,away,expected", [
+    ("Argentina -0.75", 2, 1, RESULT_HALF_WIN),   # fav wins by exactly 1: -0.5 WIN, -1.0 PUSH
+    ("Argentina -0.75", 3, 1, RESULT_WIN),         # wins by 2: both halves win
+    ("Argentina -0.75", 1, 1, RESULT_LOSS),        # draw: both halves lose
+    ("Switzerland +0.75", 2, 1, RESULT_HALF_LOSS), # dog loses by exactly 1: +0.5 LOSS, +1.0 PUSH
+    ("Switzerland +0.75", 1, 1, RESULT_WIN),       # draw: dog +0.75 wins both halves
+    ("Switzerland +0.75", 2, 0, RESULT_LOSS),      # loses by 2: both halves lose
+    ("Argentina +0.25", 1, 1, RESULT_HALF_WIN),    # +0.25 on a draw: 0.0 PUSH, +0.5 WIN
 ])
-def test_quarter_spread_routes_to_manual(selection):
-    with pytest.raises(ValueError, match="quarter-point line"):
-        resolve(
-            _bet(bet_type=BET_TYPE_SPREAD, selection=selection,
-                 team1="Argentina", team2="Switzerland"),
-            _game(home_team="Argentina", away_team="Switzerland",
-                  home_score=2, away_score=1),
-        )
+def test_quarter_spread_half_results(selection, home, away, expected):
+    assert resolve(
+        _bet(bet_type=BET_TYPE_SPREAD, selection=selection,
+             team1="Argentina", team2="Switzerland"),
+        _game(home_team="Argentina", away_team="Switzerland",
+              home_score=home, away_score=away),
+    ) == expected
 
 
-@pytest.mark.parametrize("selection", [
-    "Over 2.25",
-    "Under 2.75",
-    "Over 8.25",
-    "Under 210.75",
+@pytest.mark.parametrize("selection,home,away,expected", [
+    ("Over 2.75", 2, 1, RESULT_HALF_WIN),   # total 3: over 2.5 WIN, over 3.0 PUSH
+    ("Over 2.75", 3, 1, RESULT_WIN),         # total 4
+    ("Over 2.75", 1, 1, RESULT_LOSS),        # total 2
+    ("Under 2.25", 1, 1, RESULT_HALF_WIN),   # total 2: under 2.0 PUSH, under 2.5 WIN
+    ("Under 2.75", 2, 1, RESULT_HALF_LOSS),  # total 3: under 2.5 LOSS, under 3.0 PUSH
 ])
-def test_quarter_total_routes_to_manual(selection):
-    with pytest.raises(ValueError, match="quarter-point line"):
-        resolve(
-            _bet(bet_type=BET_TYPE_TOTAL, selection=selection),
-            _game(home_score=2, away_score=1),
-        )
+def test_quarter_total_half_results(selection, home, away, expected):
+    assert resolve(
+        _bet(bet_type=BET_TYPE_TOTAL, selection=selection),
+        _game(home_score=home, away_score=away),
+    ) == expected
+
+
+def test_quarter_team_total_half_result():
+    # Braves (away) scored 5; Team Total Over 4.75 → over 4.5 WIN, over 5.0 PUSH → HALF WIN.
+    assert resolve(
+        _mlb_bet(selection="Braves Team Total Over 4.75"), _mlb_game(),
+    ) == RESULT_HALF_WIN
 
 
 @pytest.mark.parametrize("selection,scores,expected", [
@@ -292,9 +302,7 @@ def test_team_total_integer_line_pushes_on_exact():
     assert resolve(_mlb_bet(selection="Braves Team Total Over 5"), _mlb_game()) == RESULT_PUSH
 
 
-def test_team_total_quarter_line_routes_to_manual():
-    with pytest.raises(ValueError, match="quarter-point line"):
-        resolve(_mlb_bet(selection="Braves Team Total Over 4.75"), _mlb_game())
+# (quarter team-total settlement is covered by test_quarter_team_total_half_result)
 
 
 def test_team_total_unmatched_team_routes_to_manual():

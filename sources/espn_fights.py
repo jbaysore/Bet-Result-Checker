@@ -29,10 +29,12 @@ tighten `_classify_no_winner` if needed.
 
 import re
 import unicodedata
+from datetime import timedelta
 
 import requests
 
 from config import GAME_STATUS_CANCELLED
+from date_utils import parse_sheet_date
 
 ESPN_FIGHT_BASE = "https://site.api.espn.com/apis/site/v2/sports"
 
@@ -78,19 +80,13 @@ def normalize_fighter_name(name: str) -> str:
 
 def _dates_param(game_date: str | None) -> str:
     """
-    ISO 'YYYY-MM-DD' → an ESPN `dates=YYYYMMDD-YYYYMMDD` ±1-day window (cards
-    straddle midnight UTC, so a single day can miss the bout). '' when no date
-    is known → fetch the default (current) board.
+    Sheet date ("M/D/YYYY" OR "YYYY-MM-DD" — via the shared parser, F1) → an ESPN
+    `dates=YYYYMMDD-YYYYMMDD` ±1-day window (cards straddle midnight UTC, so a
+    single day can miss the bout). '' when no/garbage date → fetch the default
+    (current) board.
     """
-    if not game_date:
-        return ""
-    m = re.match(r"^(\d{4})-(\d{2})-(\d{2})", game_date.strip())
-    if not m:
-        return ""
-    from datetime import date, timedelta
-    try:
-        d = date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
-    except ValueError:
+    d = parse_sheet_date(game_date)
+    if d is None:
         return ""
     lo = (d - timedelta(days=1)).strftime("%Y%m%d")
     hi = (d + timedelta(days=1)).strftime("%Y%m%d")

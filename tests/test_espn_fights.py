@@ -145,7 +145,11 @@ def test_winner_unmapped_to_bettor_routes_to_manual(monkeypatch):
 
 
 def test_dates_param_builds_window():
+    # F1: BOTH sheet date formats yield the SAME window (M/D/YYYY was the bug —
+    # it used to fall through to '' and miss the card a day later).
     assert ef._dates_param("2026-06-14") == "20260613-20260615"
+    assert ef._dates_param("6/14/2026") == "20260613-20260615"
+    assert ef._dates_param("7/10/2026") == ef._dates_param("2026-07-10")
     assert ef._dates_param("") == ""
     assert ef._dates_param(None) == ""
     assert ef._dates_param("garbage") == ""

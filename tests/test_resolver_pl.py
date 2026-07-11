@@ -150,3 +150,43 @@ def test_profit_boost_win_without_boost_pct_raises():
 def test_unrecognised_result_raises():
     with pytest.raises(ValueError, match="unrecognised result"):
         calculate_pl_and_payout("MAYBE", 100, -110, "Standard")
+
+
+# ── Phase 2: HALF WIN / HALF LOSS P/L (half the stake scored, half pushed) ───
+# THE cross-repo parity fixture: -0.75, 1-goal win, $100 @ -110. Half ($50) wins
+# 50*(100/110)=45.4545→45.45 (DK truncation), half pushes (returns $50). So
+# P/L = 45.45, payout = 95.45 + 50 = 145.45. betReviewPl.js must produce the same.
+def test_half_win_standard_minus110():
+    pl, payout = calculate_pl_and_payout("HALF WIN", 100, -110, "Standard")
+    assert (pl, payout) == (45.45, 145.45)
+
+
+def test_half_loss_standard_minus110():
+    # Half ($50) loses, half pushes (returns $50). P/L = -50, payout = 50.
+    pl, payout = calculate_pl_and_payout("HALF LOSS", 100, -110, "Standard")
+    assert (pl, payout) == (-50.0, 50.0)
+
+
+def test_half_win_plus150():
+    # Half ($50) wins 50*1.5=75 profit; payout = (50+75) + 50 push = 175. P/L 75.
+    pl, payout = calculate_pl_and_payout("HALF WIN", 100, 150, "Standard")
+    assert (pl, payout) == (75.0, 175.0)
+
+
+def test_half_loss_with_fee_charged_once():
+    # Fee applies per the LOSS rules, ONCE (not double-charged across halves).
+    pl, payout = calculate_pl_and_payout("HALF LOSS", 100, -110, "Standard", fee=2.5)
+    assert (pl, payout) == (-52.5, 50.0)
+
+
+def test_half_win_fee_charged_once():
+    # Fee per WIN rules, once. P/L = 45.45 - 2.5 = 42.95; payout unchanged.
+    pl, payout = calculate_pl_and_payout("HALF WIN", 100, -110, "Standard", fee=2.5)
+    assert (pl, payout) == (42.95, 145.45)
+
+
+def test_half_win_bonus_bet_pays_profit_plus_returned_half():
+    # Bonus Bet: winning half returns profit only (token consumed); pushing half
+    # returns its stake. profit(50@-110)=45.45; payout = 45.45 + 50 = 95.45.
+    pl, payout = calculate_pl_and_payout("HALF WIN", 100, -110, "Bonus Bet")
+    assert (pl, payout) == (45.45, 95.45)

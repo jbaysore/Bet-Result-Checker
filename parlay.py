@@ -13,6 +13,7 @@ import json
 
 from config import (
     RESULT_WIN, RESULT_LOSS, RESULT_PUSH, RESULT_VOID,
+    RESULT_HALF_WIN, RESULT_HALF_LOSS,
     AUTOMATED_LEG_BET_TYPES, BET_TYPE_MONEYLINE,
 )
 
@@ -176,6 +177,16 @@ def combine_parlay_results(leg_outcomes: list[tuple[str, float]]) -> tuple[str, 
         return RESULT_VOID, 1.0
 
     results = [r for r, _ in leg_outcomes]
+
+    # A HALF WIN / HALF LOSS leg means a quarter line inside the parlay. Books'
+    # conventions for combining a half-result into a parlay vary (some settle the
+    # leg at reduced stake, some at reduced odds) and it's rare — accuracy first,
+    # route the whole parlay to manual (trap #1) rather than pick a convention.
+    if RESULT_HALF_WIN in results or RESULT_HALF_LOSS in results:
+        raise ValueError(
+            "[parlay] parlay contains a HALF WIN/HALF LOSS (quarter-line) leg -- "
+            "book conventions vary; manual settlement"
+        )
 
     if RESULT_LOSS in results:
         return RESULT_LOSS, None

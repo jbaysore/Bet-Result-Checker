@@ -4,6 +4,7 @@ from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
 from config import (
     BET_TYPE_SPREAD, BET_TYPE_MONEYLINE, BET_TYPE_TOTAL, BET_TYPE_DRAW, BET_TYPE_PARLAY,
     RESULT_WIN, RESULT_LOSS, RESULT_PUSH, RESULT_VOID,
+    RESULT_HALF_WIN, RESULT_HALF_LOSS,
     GAME_STATUS_CANCELLED,
     PROMO_FUNDED_CATEGORIES, REAL_MONEY_CATEGORIES,
     BET_CATEGORY_PROFIT_BOOST, BET_CATEGORY_BONUS_BET,
@@ -340,6 +341,30 @@ def calculate_pl_and_payout(result: str, stake: float, odds_taken: float,
             return 0.0, None
         return 0.0, stake
 
+    if result in (RESULT_HALF_WIN, RESULT_HALF_LOSS):
+        # A quarter line is TWO half-stakes: one half is scored (won on a HALF
+        # WIN / lost on a HALF LOSS), the other half PUSHES (its stake returned).
+        # Compose from the existing branches on half the stake so every fee /
+        # category / boost rule is reused exactly rather than re-derived. The
+        # scored half carries the per-bet fee (per the WIN/LOSS fee rules the
+        # plan specifies); the pushed half carries fee=0 so a flat per-bet fee
+        # isn't double-charged.
+        half_stake = stake / 2
+        scored = RESULT_WIN if result == RESULT_HALF_WIN else RESULT_LOSS
+        pl_scored, payout_scored = calculate_pl_and_payout(
+            scored, half_stake, odds_taken, bet_category, boost_pct, fee, fee_before_odds,
+            fee_pct_on_win_only=fee_pct_on_win_only, bet_type=bet_type,
+            fee_pct_on_win_stake=fee_pct_on_win_stake, decimal_odds=decimal_odds,
+            round_to_nearest=round_to_nearest,
+        )
+        pl_push, payout_push = calculate_pl_and_payout(
+            RESULT_PUSH, half_stake, odds_taken, bet_category, None, 0.0, fee_before_odds,
+            decimal_odds=decimal_odds, round_to_nearest=round_to_nearest,
+        )
+        pl = round(pl_scored + pl_push, 2)
+        payout = round((payout_scored or 0.0) + (payout_push or 0.0), 2)
+        return pl, payout
+
     raise ValueError(f"[resolver] Cannot calculate P/L for unrecognised result: '{result}'")
 
 
@@ -487,48 +512,71 @@ def _resolve_moneyline(selection, team1, team2, home_team, away_team,
 
 # ── Spread ────────────────────────────────────────────────────────────────────
 
-def _assert_not_quarter_line(line, selection: str) -> None:
-    """Quarter-point (Asian) lines — -0.75, +0.25, 2.25, 2.75 — settle as TWO
-    half-stakes (e.g. -0.75 with a 1-goal win is a HALF WIN), not a binary
-    WIN/LOSS. Until Phase 2 adds HALF WIN/HALF LOSS math, raise so the poller's
-    ValueError → manual-review path handles them (accuracy over a wrong auto-
-    settle). Decimal, not float modulo: 0.75 % 0.5 carries binary-float noise,
-    so the line is converted via str() (exact for real sports lines) first.
+def _is_quarter_line(line) -> bool:
+    """True for an Asian quarter line (-0.75, +0.25, 2.25, 2.75…) — one that is
+    NOT a multiple of 0.5, so it settles as two half-stakes. Decimal, not float
+    modulo: 0.75 % 0.5 carries binary-float noise; str() is exact for real lines.
     """
-    remainder = (Decimal(str(line)) % Decimal("0.5")).copy_abs()
-    if remainder != Decimal("0"):
-        raise ValueError(
-            f"[resolver] quarter-point line {line} in '{selection}' -- settles as "
-            f"two half-stakes; manual until Phase 2"
-        )
+    return (Decimal(str(line)) % Decimal("0.5")).copy_abs() != Decimal("0")
+
+
+def _combine_halves(low_half: str, high_half: str) -> str:
+    """
+    Combine the two adjacent half-stake results of a quarter line (resolved at
+    L−0.25 and L+0.25) into a single Result:
+      (WIN, WIN)→WIN · (WIN, PUSH)→HALF WIN · (PUSH, LOSS)→HALF LOSS ·
+      (LOSS, LOSS)→LOSS.
+    Exactly one half sits on an integer line (push-capable) and the other on a
+    half-integer (never pushes), so {PUSH, PUSH} and {WIN, LOSS} cannot occur —
+    a (WIN, LOSS) would be an arithmetic impossibility. We raise ValueError (not
+    a bare assert) on any impossible pair so the poller's ValueError→manual net
+    catches it rather than crashing the run (trap #1, fail toward manual).
+    """
+    pair = {low_half, high_half}
+    if pair == {RESULT_WIN}:
+        return RESULT_WIN
+    if pair == {RESULT_LOSS}:
+        return RESULT_LOSS
+    if pair == {RESULT_WIN, RESULT_PUSH}:
+        return RESULT_HALF_WIN
+    if pair == {RESULT_LOSS, RESULT_PUSH}:
+        return RESULT_HALF_LOSS
+    raise ValueError(
+        f"[resolver] impossible adjacent-half combination "
+        f"({low_half}, {high_half}) -- routing to manual"
+    )
+
+
+def _binary_spread(margin: int, line: float) -> str:
+    """One spread half at a single (half-integer or integer) line."""
+    result = margin + line
+    if result > 0:
+        return RESULT_WIN
+    if result < 0:
+        return RESULT_LOSS
+    return RESULT_PUSH
 
 
 def _resolve_spread(selection, team1, team2, home_team, away_team,
                     home_score, away_score) -> str:
     """
-    Selection format: "Chiefs -3.5" or "Raiders +3.5" or "Chiefs -3"
-    Parses the team name and line from the selection string.
+    Selection format: "Chiefs -3.5" or "Raiders +3.5" or "Chiefs -3" or an Asian
+    quarter line like "Argentina -0.75" (settled as two half-stakes).
     """
     team_name, line = _parse_spread_selection(selection)
-    _assert_not_quarter_line(line, selection)
     bet_team = _resolve_team(team_name, team1, team2, home_team, away_team)
 
-    # Determine if the bet team is home or away, then calculate margin
+    # Margin from the BET team's perspective (positive line = underdog cushion,
+    # negative = favourite handicap).
     if _team_matches(bet_team, home_team):
         margin = home_score - away_score
     else:
         margin = away_score - home_score
 
-    # Apply the spread: positive line = underdog, negative = favourite
-    # margin + line > 0 → covered, == 0 → push, < 0 → lost
-    result = margin + line
-
-    if result > 0:
-        return RESULT_WIN
-    elif result < 0:
-        return RESULT_LOSS
-    else:
-        return RESULT_PUSH
+    if _is_quarter_line(line):
+        return _combine_halves(_binary_spread(margin, line - 0.25),
+                               _binary_spread(margin, line + 0.25))
+    return _binary_spread(margin, line)
 
 
 def _parse_spread_selection(selection: str) -> tuple[str, float]:
@@ -587,19 +635,14 @@ def _resolve_team_total(team_part, direction, line, team1, team2,
     resolved by name first — reusing _resolve_team/_team_matches (short-name
     aware) — then compared to that team's score only.
     """
-    _assert_not_quarter_line(line, f"{team_part} Team Total {direction} {line}")
     # No name match → ValueError → poller manual path (never a guess).
     bet_team = _resolve_team(team_part, team1, team2, home_team, away_team)
     team_score = home_score if _team_matches(bet_team, home_team) else away_score
 
-    if team_score == line:
-        return RESULT_PUSH          # integer line landed exactly on the total
-    if direction == "over":
-        return RESULT_WIN if team_score > line else RESULT_LOSS
-    if direction == "under":
-        return RESULT_WIN if team_score < line else RESULT_LOSS
-    # direction is constrained to Over/Under by the regex; defensive only.
-    raise ValueError(f"[resolver] Unknown team-total direction '{direction}'.")
+    if _is_quarter_line(line):
+        return _combine_halves(_binary_total(direction, team_score, line - 0.25),
+                               _binary_total(direction, team_score, line + 0.25))
+    return _binary_total(direction, team_score, line)
 
 
 # ── Total ─────────────────────────────────────────────────────────────────────
@@ -620,20 +663,26 @@ def _resolve_total(selection: str, home_score: int, away_score: int) -> str:
     except ValueError:
         raise ValueError(f"[resolver] Can't parse total line from '{selection}'.")
 
-    _assert_not_quarter_line(line, selection)
+    if direction not in ("over", "under"):
+        raise ValueError(f"[resolver] Unknown total direction '{direction}' in '{selection}'. "
+                         f"Expected 'Over' or 'Under'.")
 
     actual = home_score + away_score
 
+    if _is_quarter_line(line):
+        return _combine_halves(_binary_total(direction, actual, line - 0.25),
+                               _binary_total(direction, actual, line + 0.25))
+    return _binary_total(direction, actual, line)
+
+
+def _binary_total(direction: str, actual: int, line: float) -> str:
+    """One total half at a single (half-integer or integer) line. `direction` is
+    pre-validated to 'over'/'under' by the callers."""
     if actual == line:
         return RESULT_PUSH
-
     if direction == "over":
         return RESULT_WIN if actual > line else RESULT_LOSS
-    elif direction == "under":
-        return RESULT_WIN if actual < line else RESULT_LOSS
-    else:
-        raise ValueError(f"[resolver] Unknown total direction '{direction}' in '{selection}'. "
-                         f"Expected 'Over' or 'Under'.")
+    return RESULT_WIN if actual < line else RESULT_LOSS
 
 
 # ── Draw ──────────────────────────────────────────────────────────────────────

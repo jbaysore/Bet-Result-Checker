@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 import re
 import pytz
+from date_utils import parse_sheet_date
 from config import (
     POLL_START_BUFFER_SECONDS,
     POLL_MAX_DURATION_SECONDS,
@@ -292,12 +293,10 @@ def _parse_game_datetime(game_date: str, game_start: str) -> datetime | None:
         return None
 
     try:
-        if "-" in date_raw:
-            year, month, day = map(int, date_raw.split("-"))
-        elif "/" in date_raw:
-            month, day, year = map(int, date_raw.split("/"))
-        else:
+        parsed_date = parse_sheet_date(date_raw)   # shared M/D/YYYY | YYYY-MM-DD parser (F1)
+        if parsed_date is None:
             raise ValueError("unrecognized date format")
+        year, month, day = parsed_date.year, parsed_date.month, parsed_date.day
 
         time_match = re.match(
             r"^(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?$",
