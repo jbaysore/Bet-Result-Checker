@@ -1,162 +1,80 @@
-# Resolver Expansion — Round 3 handoff (Phase 3: MLB player props)
+# Resolver Expansion — COMPLETE (all phases shipped & audited)
 
-**Audience:** implementing agent (Opus). **Owner:** Josh. **Rewritten:** 2026-07-10
-(Fable), after auditing Round 2. **Repos touched:** this repo (primary) + `odds-tool`
-(Notes stamping at pick'em log time).
+**Owner:** Josh. **Final audit:** 2026-07-10 (Fable) — checker 301 pytest green,
+odds-tool 366 node green, every Round-3 claim verified in code. **No further
+implementation rounds are planned.** What remains is OPERATIONAL (Josh's checklist
+below) plus a small polish backlog.
 
-**Ruling principle (unchanged, Josh verbatim intent): accuracy and reliability over
-everything.** Every failure path raises toward manual review; no branch ever defaults
-to WIN or LOSS. A notification is annoying; a wrong settlement is unacceptable.
-
-**RATIFIED by Josh 2026-07-10 (do not re-litigate):**
-1. ✅ done — Quarter-line half-results as `HALF WIN` / `HALF LOSS`.
-2. Player-prop DNP: auto-VOID only when the player is entirely absent from the final
-   box score; anything ambiguous (0 PA / 0 batters faced, suspended game) → manual.
-3. Props settle only on Final + re-verify (stat unchanged across two observations
-   ≥ 60 min apart); state lives IN the sheet row (Railway has no durable disk).
-4. Pick'em entries: mode stamped into Notes at log time; power all-hit settles at row
-   odds; any void/reduction or flex → legs auto-resolved, payout routed to
-   manual-payout.
+**Ruling principle that governed the build:** accuracy and reliability over
+everything — every failure path routes to manual review; no branch defaults to a
+result. This held in all three audited rounds.
 
 ---
 
-## STATUS — Rounds 1 & 2 SHIPPED and AUDIT-CONFIRMED (do not redo, do not refactor)
+## What auto-resolves now (end state)
 
-Audited by Fable 2026-07-10: checker 265 pytest green, odds-tool 366 node green, all
-claims verified in code.
+| Market / case | Resolution |
+|---|---|
+| Moneyline, Spread, Total, Draw (game sports) | auto (TOA /scores) |
+| Alternate spreads / totals | auto (same parsers) |
+| **Team totals** ("X Team Total Over 4.5") | auto, vs the team's own score |
+| **Quarter-line Asian spreads/totals** | auto, `HALF WIN`/`HALF LOSS` (two half-stakes) |
+| Tennis moneyline | auto (ESPN) |
+| **MMA / boxing moneyline** | auto (ESPN; draw→PUSH, NC→VOID, ambiguity→manual) |
+| **MLB player props (singles + pick'em entries)** | auto via statsapi.mlb.com — **currently SHADOW MODE** (proposes in Notes, rings the bell, does not settle) |
+| Pick'em power, all legs hit | settles at row odds (once shadow off) |
+| Pick'em flex / any reduced entry | legs auto-resolved, payout = manual entry (site tables are app-truth) |
+| Parlays of automatable legs | auto; a HALF or prop leg without a Pickem marker → manual |
+| Kalshi / ReBet payouts | manual payout entry (by design, unchanged) |
+| Non-MLB props, unparseable selections, suspended games, doubleheader ambiguity, corrupt markers | manual (by design) |
 
-- **Team totals** auto-resolve against the team's own score (tried first in the Total
-  branch, clean fallthrough; short-name matching reused).
-- **MMA/boxing moneylines** auto-resolve via `sources/espn_fights.py` (exact-normalized
-  matching, both-fighter bout identification, every ambiguity → manual). The F1
-  date-format bug is FIXED via shared `date_utils.parse_sheet_date` (M/D/YYYY + ISO),
-  used by both `espn_fights._dates_param` and the poller.
-- **HALF WIN / HALF LOSS** shipped in BOTH repos. Resolver: `_is_quarter_line` +
-  `_combine_halves` (impossible pairs raise → manual, better than the plan's assert)
-  across spreads, game totals, AND team totals; the Phase-0 guard is gone as planned.
-  P/L composes the scored half + pushed half from the existing branches (fee charged
-  once, on the scored half; boost/category/rounding rules reused). Parlays containing a
-  HALF leg raise → manual. Cross-repo parity fixture (−0.75, 1-goal win, $100 @ −110 →
-  [45.45, 145.45]) asserted green in BOTH suites. odds-tool enumeration audit
-  confirmed: `betReviewPl` mirror, `VALID_APPLY_RESULTS`, NeedsReviewPanel options
-  gated to quarter-point selections, `betsSummary` (HALF WIN=win / HALF LOSS=loss),
-  StatsPage/EntityDetailModal `normalizeResult` folding, BetsPage badges.
+## JOSH's operational checklist (in order)
 
-### ⚠ JOSH's outstanding actions (not code)
-1. **Sheet Result-column data validation** must accept `HALF WIN` / `HALF LOSS` before
-   the poller writes one, or the write fails. (Flagged in Round 2; still pending.)
-2. Standing PROPOSED items to verify against the FIRST real settlements: HALF LOSS
-   fee treatment (fee charged as on a loss), %-of-stake-on-win fee applied to the
-   scored half only, and half-profit rounding (component-rounded, not
-   full-precision-once — can differ by a cent from some books).
-3. F3 carry: first real ESPN draw/No-Contest should confirm `_classify_no_winner`'s
-   label scan (it fails to manual until then — safe).
+1. **Sheet Result-column data validation**: add `HALF WIN` and `HALF LOSS` to the
+   allowed values BEFORE deploying Round 2+ — the poller's first half-result write
+   fails otherwise. (Flagged twice; still the one blocking item.)
+2. **Props shadow week**: deploy, then compare each `props-proposed:` Notes line
+   against your own manual settlement for ~a week of slates. When satisfied, flip
+   `PROPS_SHADOW_MODE = False` in config.py. The flag remains as a kill switch.
+3. **Settling reduced/flex pick'em rows manually** (they stay manual even after
+   shadow): use the **payout-entry path**, not a plain WIN apply — a reduced entry's
+   payout comes from the site's table, and an odds-based P/L computation would be
+   wrong. The `props-payout:` Notes line gives you legs + hit count as a copy job.
+4. **First-real-settlement verifications (PROPOSED items)**: HALF LOSS fee treatment,
+   %-of-stake-on-win fee on the scored half only, half-profit rounding
+   (component-rounded), ESPN's draw/No-Contest status wording
+   (`_classify_no_winner` fails to manual until confirmed).
 
-### Cosmetic nits — fold into this round, do not ship separately
-- `odds-tool/client/src/components/PromotionsPage.jsx` (~line 260): the promo-linked
-  bet list colors results via raw `'WIN'`/`'LOSS'` comparison — a HALF WIN/HALF LOSS
-  renders neutral gray. Use the shared normalize-and-fold treatment (StatsPage
-  pattern). Cosmetic only.
-- `sources/espn_tennis.py`: dateless (TODO left per plan — its scoreboard ignores
-  `?dates=`). Leave unless trivial.
+## Audit notes on Round 3 (for the record)
 
----
+- The ratified policies are encoded exactly: DNP void only on full boxscore absence
+  (bench-listed players with 0 PA route to manual — conservative and correct);
+  clean-Final requires BOTH `abstractGameState` and `detailedState` = "Final"
+  (excludes "Completed Early"/suspended); doubleheaders are ambiguous → manual;
+  exact-normalized name matching via the ONE shared normalizer (`name_match.py`,
+  now also used by espn_fights); all dates via the ONE shared parser.
+- The subtlest trap was handled: a `props-observed:` line that is PRESENT but
+  unparseable routes to manual — it is never treated as "no marker" and re-observed.
+- Shadow mode exercises the full two-pass machine (markers are stamped and
+  re-verified even while shadowed), so the acceptance week tests the real thing.
+- `upsert_notes_line` is BetID-guarded and prefix-self-replacing; it never touches
+  Result/P/L.
+- Pick'em rows are fenced from `combine_parlay_results` at load time
+  (`is_parlay=False`), not just at poll time — the reduction≠product-odds trap is
+  structurally closed.
+- Flagged deviation accepted: reduced/flex pick'em routes to NEEDS_REVIEW + a
+  `props-payout:` note rather than the literal MANUAL_PAYOUT_REQUIRED_BOOKS
+  machinery. Functionally manual and safe; see checklist item 3 for the one
+  behavioral consequence.
 
-## Phase 3 — MLB player props via box scores   ✅ SHIPPED (Round 3, behind PROPS_SHADOW_MODE)
+## Polish backlog (OPTIONAL — only if these ever annoy)
 
-> **Done 2026-07-10 (Opus). checker 301 pytest green, odds-tool 366 node green,
-> client builds.** `sources/mlb_statsapi.py` (schedule/boxscore; fields VERIFIED vs
-> a real payload committed at `tests/fixtures/mlb_boxscore_823368.json` — Marlins@
-> Pirates 2026-06-14, Skenes 10 K); `name_match.py` shared normalizer (espn_fights
-> now imports it); `prop_resolver.py` (parse, stat map incl. Singles/H+R+RBI, DNP
-> policy, `props-observed` two-pass with corrupt-marker→manual, pick'em combine);
-> poller `_poll_prop_entry` (dispatched before parlay combining — never touches
-> `combine_parlay_results`), single + pick'em loading in sheets_reader,
-> `upsert_notes_line` in sheets_writer, `PROPS_SHADOW_MODE`/`PROPS_REVERIFY_MINUTES`
-> in config. odds-tool composer + DFS promo tool stamp `Pickem {mode} {n}-pick`;
-> PromotionsPage HALF-result coloring nit fixed. Live-verified end-to-end vs the
-> real MLB API. **In shadow mode it writes `props-proposed:` to Notes + rings
-> NEEDS_REVIEW, never auto-settles** until Josh flips the flag after his agreement
-> week. DEVIATION (flagged): pick'em `manual_payout` routes to NEEDS_REVIEW + a
-> per-leg/hit-count Notes line rather than the exact MANUAL_PAYOUT_REQUIRED_BOOKS
-> flow — functionally manual and safe; polish later if wanted.
-
-### Original spec (kept for reference)
-
-### Source: `sources/mlb_statsapi.py`
-Official MLB Stats API (statsapi.mlb.com, free, no key): schedule-by-date → gamePk +
-official status; boxscore → per-player batting/pitching. Settlement-grade — do NOT use
-TOA or ESPN for MLB stats. Use `date_utils.parse_sheet_date` for schedule-by-date
-(sheet dates are M/D/YYYY — the F1 trap, now solved once; never write a new date
-parser).
-
-### Scope guard (accuracy first)
-v1 parses ONLY machine-generated selections from the pick'em/promo tools:
-`"{Player} {Over|Under} {line} {StatLabel}"`. Anything else → manual, as today.
-Stat-label map (from the odds-tool tools' MARKET_LABEL — keep in lockstep): Hits,
-Total Bases, Home Runs, RBIs, Runs, Singles (hits−2B−3B−HR), Walks, H+R+RBI, Stolen
-Bases → batting; Strikeouts, Outs, Hits Allowed, Earned Runs → pitching. VERIFY every
-field name against a real boxscore payload before trusting it (commit one real payload
-into tests/).
-
-### The accuracy machinery (RATIFIED policies land here)
-- **Name matching:** extract `espn_fights.normalize_fighter_name` into a shared
-  normalizer (it IS the ratified standard: accents, case, punctuation, Jr/Sr/II
-  suffixes) and use it for players — do not write a third normalizer. EXACT match
-  only; no match → manual.
-- **DNP:** player entirely absent from the final boxscore → leg VOID. Present but zero
-  qualifying appearance (batter 0 PA; pitcher 0 batters faced) → MANUAL. Present with
-  a real appearance and a 0 stat → genuine 0, settles.
-- **Quarter guard does not apply here** — prop lines are X.5 (or integers, which push);
-  do not import the halves machinery into props.
-- **Final + re-verify (stateless):** the first run that sees the game officially Final
-  writes a staging marker into the row's Notes
-  (`props-observed: {leg:result,...} @ <iso>`) and does NOT settle. A later run
-  ≥ 60 min after the marker re-fetches and compares: identical → settle + strip
-  marker; different → manual + notification carrying both snapshots. Suspended/called
-  games → manual. The marker format needs a strict parse/round-trip test — a corrupted
-  marker must route to manual, never settle.
-- **Pick'em entries (odds-tool change included in this phase):** the pick'em composer
-  and DFS promo tool append `Pickem {mode} {n}-pick` to Notes via the existing
-  /api/bets notes field. Checker, for a Parlay whose Notes match:
-  - power/standard + ALL legs WIN → settle at the row's combined odds;
-  - power, any loss, no voids → LOSS;
-  - ANY void/reduced outcome, or mode = flex → write per-leg results + hit count into
-    Notes, route to manual-payout (the `MANUAL_PAYOUT_REQUIRED_BOOKS` machinery) —
-    reduced/flex payouts come from the site's tables, which are app-truth;
-  - Parlay rows with Prop legs and NO Pickem marker → manual (predate the convention);
-  - NEVER let `combine_parlay_results`'s void-drop odds math touch a Pickem-marked
-    row (reduction changes the multiplier TABLE, not the odds product) — note it
-    already raises on HALF legs; Pickem routing must short-circuit BEFORE parlay
-    combining, not inside it;
-  - never parse per-leg odds from Pickem rows (blank/combined by convention).
-- **SHADOW MODE gate (the phase's acceptance gate — do not skip):** ship behind
-  `PROPS_SHADOW_MODE = True` — compute and write the proposed result into Notes, do
-  NOT settle, notifications still ring. Josh compares proposals vs his manual
-  settlements for ~a week of slates; he flips the flag. The flag stays afterward as a
-  kill switch.
-- Tests: real boxscore fixture payloads for every stat label; accent/suffix matching;
-  DNP-void vs ambiguous-manual; observed-then-confirm two-pass incl. corrupted-marker
-  → manual; pick'em power settle / flex manual-payout routing; Singles derivation
-  (H−2B−3B−HR).
-
-WNBA/NBA/NFL box scores are a LATER phase — same skeleton, new source. Do not build
-speculatively.
-
-## Traps checklist
-1. Fail toward manual, always — the poller's ValueError path is the safety net.
-2. Sheet dates are M/D/YYYY — everything goes through `date_utils.parse_sheet_date`.
-3. Railway = no durable disk — re-verify state lives in the sheet row's Notes, and a
-   malformed marker routes to manual.
-4. Pick'em reduced entries are NOT product-odds parlays; Pickem routing decides BEFORE
-   `combine_parlay_results` ever runs.
-5. One normalizer, shared (fights + props); one date parser, shared.
-6. Shadow mode is the acceptance gate and the permanent kill switch.
-
-## Report back to Josh
-- The shadow-mode agreement report (proposals vs Josh's manual results across ~a week)
-  — the flip decision is Josh's.
-- Which stat labels appeared in real payloads unverified, and the committed fixture's
-  provenance (which real game).
-- Confirmation the PromotionsPage nit shipped.
-- Anything this plan forbids that seemed necessary — flagged, not built.
+- Non-MLB pick'em entries (e.g. a UFC entry) currently route to manual with a
+  "game not found" reason after an MLB schedule lookup — safe but confusingly
+  worded. A sport gate with a clean "unsupported prop sport" reason would tidy it.
+- Reduced/flex pick'em could adopt the literal manual-payout machinery
+  (`MANUAL_PAYOUT_REQUIRED_BOOKS` flow) so P/L derives from the entered Payout
+  automatically.
+- `espn_tennis` remains dateless (its scoreboard ignores `?dates=`) — TODO in file.
+- WNBA/NBA/NFL prop sources (same skeleton as `mlb_statsapi.py`) when those seasons
+  matter — a new design conversation, not this plan.

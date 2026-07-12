@@ -1,6 +1,7 @@
 """Unit tests for sources.odds_api — no live API key required."""
 
 from unittest.mock import MagicMock, patch
+from datetime import datetime, timezone
 
 import sources.odds_api as odds_api
 
@@ -38,6 +39,54 @@ def test_scores_fetched_once_per_sport_per_run(mock_get):
     assert r1["home_score"] == 27
     assert r2 is not None
     assert mock_get.call_count == 1
+
+
+@patch("sources.odds_api.requests.get")
+def test_scores_selects_scheduled_game_in_back_to_back_series(mock_get):
+    odds_api._scores_cache.clear()
+    odds_api._no_scores_feed.clear()
+    odds_api._active_sports_cache = {"baseball_mlb"}
+
+    games = [
+        {
+            "id": "previous", "completed": True,
+            "commence_time": "2026-07-11T00:10:00Z",
+            "home_team": "Minnesota Twins", "away_team": "Los Angeles Angels",
+            "scores": [
+                {"name": "Minnesota Twins", "score": "3"},
+                {"name": "Los Angeles Angels", "score": "4"},
+            ],
+        },
+        {
+            "id": "target", "completed": True,
+            "commence_time": "2026-07-11T18:11:00Z",
+            "home_team": "Minnesota Twins", "away_team": "Los Angeles Angels",
+            "scores": [
+                {"name": "Minnesota Twins", "score": "5"},
+                {"name": "Los Angeles Angels", "score": "3"},
+            ],
+        },
+    ]
+    mock_get.return_value = _mock_scores_response(games)
+    expected = datetime(2026, 7, 11, 18, 11, tzinfo=timezone.utc)
+
+    result = odds_api.get_game_result(
+        "baseball_mlb", "Los Angeles Angels", "Minnesota Twins", expected
+    )
+
+    assert result is not None
+    assert result["home_score"] == 5
+    assert result["away_score"] == 3
+
+
+def test_repeated_matchup_without_start_time_is_ambiguous():
+    games = [
+        {"id": "one", "home_team": "Minnesota Twins", "away_team": "Los Angeles Angels"},
+        {"id": "two", "home_team": "Minnesota Twins", "away_team": "Los Angeles Angels"},
+    ]
+    assert odds_api._select_matching_game(
+        games, "Los Angeles Angels", "Minnesota Twins"
+    ) is None
 
 
 @patch("sources.odds_api.requests.get")

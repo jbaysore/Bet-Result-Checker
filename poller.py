@@ -315,7 +315,8 @@ def _poll_parlay(bet: dict, now_utc, give_up_at) -> str:
     leg_games = []
     for i, leg in enumerate(legs, start=1):
         game = _fetch_game_for(leg["sport"], leg["team1"], leg["team2"],
-                               leg.get("game_date"), leg.get("bet_type"))
+                               leg.get("game_date"), leg.get("game_start"),
+                               leg.get("bet_type"))
         if game is None:
             print(f"[poller]   leg {i}/{len(legs)} ({leg['team1']} vs {leg['team2']}): "
                   f"no final score yet.")
@@ -354,7 +355,8 @@ def _poll_parlay(bet: dict, now_utc, give_up_at) -> str:
 
 
 def _fetch_game_for(sport: str, team1: str, team2: str,
-                    game_date: str = None, bet_type: str = None) -> dict | None:
+                    game_date: str = None, game_start: str = None,
+                    bet_type: str = None) -> dict | None:
     """
     Routes a result lookup to the right source by sport:
 
@@ -379,7 +381,8 @@ def _fetch_game_for(sport: str, team1: str, team2: str,
         if bet_type and bet_type.strip() != BET_TYPE_MONEYLINE:
             return None
         return espn_fights.get_fight_result(sport, team1, team2, game_date)
-    return odds_api.get_game_result(sport, team1, team2)
+    expected_start = _parse_game_datetime(game_date, game_start)
+    return odds_api.get_game_result(sport, team1, team2, expected_start)
 
 
 def _fetch_result(bet: dict, sport: str) -> dict | None:
@@ -395,7 +398,8 @@ def _fetch_result(bet: dict, sport: str) -> dict | None:
     sport key. See RESULT_NEEDS_REVIEW in config.py.
     """
     return _fetch_game_for(sport, bet["team1"], bet["team2"],
-                           bet.get("game_date"), bet.get("bet_type"))
+                           bet.get("game_date"), bet.get("game_start"),
+                           bet.get("bet_type"))
 
 
 def _parse_game_datetime(game_date: str, game_start: str) -> datetime | None:

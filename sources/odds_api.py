@@ -1,4 +1,5 @@
 import requests
+from datetime import datetime, timezone
 from config import ODDS_API_KEY, ODDS_API_BASE
 
 # One /scores response per sport per process — poll_bet() calls get_game_result()
@@ -7,9 +8,54 @@ from config import ODDS_API_KEY, ODDS_API_BASE
 _scores_cache: dict[str, list] = {}
 _active_sports_cache: set[str] | None = None
 _no_scores_feed: set[str] = set()
+GAME_TIME_MATCH_TOLERANCE_SECONDS = 12 * 60 * 60
 
 
-def get_game_result(sport_key: str, team1: str, team2: str) -> dict | None:
+def _parse_commence_time(raw: str | None) -> datetime | None:
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except (ValueError, TypeError):
+        return None
+
+
+def _select_matching_game(games: list, team1: str, team2: str,
+                          expected_start: datetime | None = None) -> dict | None:
+    t1 = team1.lower().strip()
+    t2 = team2.lower().strip()
+    candidates = []
+    for game in games:
+        home_lower = game.get("home_team", "").lower()
+        away_lower = game.get("away_team", "").lower()
+        home_match = _matches_any(t1, home_lower) or _matches_any(t2, home_lower)
+        away_match = _matches_any(t1, away_lower) or _matches_any(t2, away_lower)
+        if home_match and away_match:
+            candidates.append(game)
+
+    if not candidates:
+        return None
+
+    if expected_start is not None:
+        expected_utc = expected_start.astimezone(timezone.utc)
+        timed = []
+        for game in candidates:
+            commence = _parse_commence_time(game.get("commence_time"))
+            if commence is None:
+                continue
+            delta = abs((commence - expected_utc).total_seconds())
+            if delta <= GAME_TIME_MATCH_TOLERANCE_SECONDS:
+                timed.append((delta, game))
+        timed.sort(key=lambda item: item[0])
+        return timed[0][1] if timed else None
+
+    # A repeated matchup without a scheduled start is ambiguous. Returning
+    # None safely defers settlement instead of using another game in a series.
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def get_game_result(sport_key: str, team1: str, team2: str,
+                    expected_start: datetime | None = None) -> dict | None:
     """
     Fetches the final score for a game from The Odds API.
     Only called when ESPN returns no result — conserves credits.
@@ -48,41 +94,27 @@ def get_game_result(sport_key: str, team1: str, team2: str) -> dict | None:
     if games is None:
         return None
 
-    t1 = team1.lower().strip()
-    t2 = team2.lower().strip()
-
-    for game in games:
+    game = _select_matching_game(games, team1, team2, expected_start)
+    if game is not None:
         completed = game.get("completed", False)
         home_team = game.get("home_team", "")
         away_team = game.get("away_team", "")
-
         home_lower = home_team.lower()
         away_lower = away_team.lower()
-
-        # Match both teams against sheet values
-        home_match = _matches_any(t1, home_lower) or _matches_any(t2, home_lower)
-        away_match = _matches_any(t1, away_lower) or _matches_any(t2, away_lower)
-
-        if not (home_match and away_match):
-            continue  # not our game
 
         if not completed:
             print(f"[odds_api] Game found ({home_team} vs {away_team}) but not final yet.")
             return None
 
-        # Extract scores
         scores = game.get("scores") or []
         score_map = {s.get("name", "").lower(): _safe_int(s.get("score", 0)) for s in scores}
-
-        home_score = score_map.get(home_lower, 0)
-        away_score = score_map.get(away_lower, 0)
 
         return {
             "final":              True,
             "home_team":          home_team,
             "away_team":          away_team,
-            "home_score":         home_score,
-            "away_score":         away_score,
+            "home_score":         score_map.get(home_lower, 0),
+            "away_score":         score_map.get(away_lower, 0),
             "status_description": "Final",
         }
 
