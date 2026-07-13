@@ -119,6 +119,13 @@ The worker uses a durable `ClosingCapture` tab in the tracking spreadsheet:
    succeeds, the queue row becomes `FALLBACK` and the existing historical
    checker handles it after kickoff.
 
+For live capture, spread and total lines are checked in both their main and
+alternate market families because a line can move from one family to the other
+before kickoff. Additional markets (`alternate_spreads`, `alternate_totals`,
+and `team_totals`) are fetched through The Odds API's event-specific endpoint.
+When an exact line is no longer offered, the queue records the available points
+in its error detail instead of only reporting `SELECTION NOT FOUND`.
+
 V1 deliberately excludes live bets, parlays, props, and books that require a
 venue-specific/manual source (Kalshi, Polymarket, BetOpenly). Novig and
 ProphetX use The Odds API's `us_ex` feed for both proactive and historical

@@ -1,6 +1,8 @@
 """Unit tests for closing_odds.py — no API or Sheets credentials required."""
 
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+
+import closing_odds as closing_odds_module
 
 from closing_odds import (
     parse_selection,
@@ -14,6 +16,9 @@ from closing_odds import (
     fetch_closing_odds,
     fetch_live_closing_odds,
     _fetch_closing_price,
+    _fetch_live_snapshot,
+    _apply_live_market_family,
+    _price_from_snapshot,
     is_exchange_book,
     needs_manual_closing_odds,
 )
@@ -387,3 +392,98 @@ def test_fetch_live_closing_odds_queries_novig(mock_snapshot):
     })
     assert mock_snapshot.call_args.args[1] == "novig"
     assert result == {"closing_odds": "-102", "decimal_closing": 1.98039216, "error": None}
+
+
+def test_live_market_key_cascades_to_related_market_family():
+    total = parse_selection("Total", "Under 173")
+    assert _apply_live_market_family(total, "totals")["markets_to_try"] == [
+        "totals", "alternate_totals",
+    ]
+    assert _apply_live_market_family(total, "alternate_totals")["markets_to_try"] == [
+        "alternate_totals", "totals",
+    ]
+    spread = parse_selection("Spread", "Liberty +5.5")
+    assert _apply_live_market_family(spread, "spreads")["markets_to_try"] == [
+        "spreads", "alternate_spreads",
+    ]
+
+
+@patch("closing_odds._fetch_live_snapshot")
+def test_live_closing_falls_through_mainline_to_exact_alternate(mock_snapshot):
+    mock_snapshot.side_effect = [
+        [{
+            "home_team": "Minnesota Lynx", "away_team": "New York Liberty",
+            "bookmakers": [{"key": "draftkings", "markets": [{
+                "key": "totals", "outcomes": [
+                    {"name": "Under", "point": 175.5, "price": -110},
+                ],
+            }]}],
+        }],
+        [{
+            "home_team": "Minnesota Lynx", "away_team": "New York Liberty",
+            "bookmakers": [{"key": "draftkings", "markets": [{
+                "key": "alternate_totals", "outcomes": [
+                    {"name": "Under", "point": 173, "price": 105},
+                ],
+            }]}],
+        }],
+    ]
+    result = fetch_live_closing_odds({
+        "bet_id": "294", "sport": "basketball_wnba", "book": "draftkings",
+        "team1": "New York Liberty", "team2": "Minnesota Lynx",
+        "bet_type": "Total", "selection": "Under 173", "market_key": "totals",
+    })
+    assert [call.args[2] for call in mock_snapshot.call_args_list] == [
+        "totals", "alternate_totals",
+    ]
+    assert result == {"closing_odds": "+105", "decimal_closing": 2.05, "error": None}
+
+
+@patch("closing_odds.requests.get")
+def test_additional_live_market_uses_event_specific_endpoint(mock_get):
+    closing_odds_module._live_events_cache.clear()
+    closing_odds_module._live_snapshot_cache.clear()
+    events_response = Mock(status_code=200)
+    events_response.json.return_value = [{
+        "id": "event-123", "home_team": "Los Angeles Dodgers",
+        "away_team": "Arizona Diamondbacks",
+    }]
+    events_response.raise_for_status.return_value = None
+    odds_response = Mock(status_code=200, headers={})
+    odds_response.json.return_value = {
+        "id": "event-123", "home_team": "Los Angeles Dodgers",
+        "away_team": "Arizona Diamondbacks", "bookmakers": [],
+    }
+    odds_response.raise_for_status.return_value = None
+    mock_get.side_effect = [events_response, odds_response]
+
+    result = _fetch_live_snapshot(
+        "baseball_mlb", "fanduel", "team_totals",
+        "Arizona Diamondbacks", "Los Angeles Dodgers",
+    )
+
+    assert len(result) == 1
+    assert mock_get.call_args_list[0].args[0].endswith("/sports/baseball_mlb/events")
+    assert mock_get.call_args_list[1].args[0].endswith(
+        "/sports/baseball_mlb/events/event-123/odds"
+    )
+
+
+def test_live_missing_exact_point_reports_available_points():
+    sel = _apply_live_market_family(parse_selection("Total", "Under 173"), "totals")
+    result = _price_from_snapshot(
+        [{
+            "home_team": "Minnesota Lynx", "away_team": "New York Liberty",
+            "bookmakers": [{"key": "draftkings", "markets": [{
+                "key": "totals", "outcomes": [
+                    {"name": "Under", "point": 175.5, "price": -110},
+                    {"name": "Over", "point": 175.5, "price": -110},
+                ],
+            }]}],
+        }],
+        "basketball_wnba", "draftkings", "New York Liberty", "Minnesota Lynx",
+        "totals", sel, "BetID 294 live", diagnose_missing=True,
+    )
+    assert result["error"] == (
+        "EXACT SELECTION NOT FOUND: totals point 173.0; available points: 175.5"
+    )

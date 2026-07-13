@@ -637,6 +637,10 @@ def bump_closing_odds_fail_streak(row_idx: int, bet_id: str, error_code: str) ->
     """
     Increment the identical-failure streak in Notes; mark exhausted at threshold.
     Called when write_closing_odds no-ops on the same error code.
+
+    Returns True only when THIS bump reaches the exhaustion threshold (so the
+    caller can auto-mark the row N/A and stop the retries). Returns False
+    otherwise, including on error or no-op.
     """
     from closing_odds_exhaustion import next_fail_streak_notes, parse_fail_streak
 
@@ -656,14 +660,14 @@ def bump_closing_odds_fail_streak(row_idx: int, bet_id: str, error_code: str) ->
         existing = _cell_at(row, notes_col)
         new_notes, exhausted = next_fail_streak_notes(existing, error_code)
         if new_notes == existing:
-            return True
+            return False
 
         sheet.update_cell(row_idx, notes_col, new_notes)
         count, _ = parse_fail_streak(new_notes)
         if exhausted:
             print(f"[sheets_writer] Row {row_idx} (BetID: {bet_id}) closing-odds retries "
                   f"exhausted after {count} identical '{error_code}' failures.")
-        return True
+        return exhausted
     except Exception as e:
         print(f"[sheets_writer] ⚠️  Could not update closing-odds fail streak on row "
               f"{row_idx}: {e}")

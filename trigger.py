@@ -261,18 +261,30 @@ def main():
                     elif result.get("error"):
                         # Permanent failure (game/book/selection not found in
                         # snapshot) — write the error code to the ClosingOdds
-                        # column so the odds-tool notification bell surfaces it
-                        # for human review. Re-scans retry error codes until
-                        # exhausted (see closing_odds_exhaustion.py).
+                        # column so re-scans keep retrying it (see
+                        # closing_odds_exhaustion.py). Once the retries are
+                        # exhausted, auto-mark the row N/A: it drops out of the
+                        # odds-tool notification bell and becomes final, still
+                        # recoverable later via the Recover N/A Closing Odds tool.
                         wrote = write_closing_odds(
                             bet["row_idx"], bet["bet_id"],
                             result["error"], None, None,
                         )
                         if not wrote:
-                            from sheets_writer import bump_closing_odds_fail_streak
-                            bump_closing_odds_fail_streak(
+                            from sheets_writer import (
+                                bump_closing_odds_fail_streak,
+                                clear_closing_odds_fail_streak,
+                            )
+                            exhausted = bump_closing_odds_fail_streak(
                                 bet["row_idx"], bet["bet_id"], result["error"],
                             )
+                            if exhausted:
+                                write_closing_odds(
+                                    bet["row_idx"], bet["bet_id"], "N/A", None, None,
+                                )
+                                clear_closing_odds_fail_streak(
+                                    bet["row_idx"], bet["bet_id"],
+                                )
                         closing_results["skipped"] += 1
                     else:
                         # Transient failure (API timeout, quota) — leave blank,

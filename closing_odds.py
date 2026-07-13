@@ -30,7 +30,8 @@ _snapshot_cache: dict[tuple[str, str, str, str], list | None] = {}
 # Proactive worker dedupe: bets sharing sport/book/market in one queue cycle
 # reuse a live response. The TTL stays below the worker's default 30s poll so a
 # later ladder step always receives a fresh quote.
-_live_snapshot_cache: dict[tuple[str, str, str], tuple[float, list]] = {}
+_live_snapshot_cache: dict[tuple, tuple[float, list]] = {}
+_live_events_cache: dict[str, tuple[float, list]] = {}
 _LIVE_SNAPSHOT_TTL_SECONDS = 20
 
 # Odds API market keys that share spread-style extraction (team + point).
@@ -38,6 +39,9 @@ _SPREAD_MARKETS = frozenset({"spreads", "alternate_spreads"})
 # Odds API market keys that share game-total extraction (Over/Under + point).
 _TOTAL_MARKETS = frozenset({"totals", "alternate_totals"})
 _TEAM_TOTAL_MARKET = "team_totals"
+_ADDITIONAL_MARKETS = frozenset({
+    "alternate_spreads", "alternate_totals", "team_totals",
+})
 
 
 # ── Region routing ────────────────────────────────────────────────────────────
@@ -115,6 +119,31 @@ def _apply_market_key_override(sel: dict, market_key: str) -> dict:
         return sel
     out = dict(sel)
     out["markets_to_try"] = [mk]
+    out["extract_mode"] = _extract_mode_for_market(mk)
+    return out
+
+
+def _apply_live_market_family(sel: dict, market_key: str) -> dict:
+    """Prefer the logged market, then try its main/alternate sibling live.
+
+    A line that was the mainline when the bet was logged can become an
+    alternate before kickoff. Historical resolution keeps its existing strict
+    Market Key semantics; the proactive worker can safely inspect both live
+    markets while the event is still available.
+    """
+    mk = (market_key or "").strip()
+    if not mk:
+        return sel
+    siblings = {
+        "spreads": ["spreads", "alternate_spreads"],
+        "alternate_spreads": ["alternate_spreads", "spreads"],
+        "totals": ["totals", "alternate_totals"],
+        "alternate_totals": ["alternate_totals", "totals"],
+        "team_totals": ["team_totals"],
+        "h2h": ["h2h"],
+    }
+    out = dict(sel)
+    out["markets_to_try"] = siblings.get(mk, [mk])
     out["extract_mode"] = _extract_mode_for_market(mk)
     return out
 
@@ -357,14 +386,44 @@ def _fetch_historical_snapshot(sport: str, date_iso: str, book_key: str,
     return None
 
 
-def _fetch_live_snapshot(sport: str, book_key: str, market: str) -> list | None:
-    """Fetch the current pregame board for one sport/book/market."""
-    cache_key = (sport, book_key.lower(), market)
+def _fetch_live_events(sport: str) -> list:
+    """Fetch the current event roster used to resolve event-specific markets."""
+    cached = _live_events_cache.get(sport)
+    if cached and time.monotonic() - cached[0] < _LIVE_SNAPSHOT_TTL_SECONDS:
+        return cached[1]
+    url = f"{ODDS_API_BASE}/sports/{sport}/events"
+    try:
+        resp = requests.get(url, params={"apiKey": ODDS_API_KEY, "dateFormat": "iso"}, timeout=15)
+        if resp.status_code == 401:
+            raise RuntimeError("invalid Odds API key")
+        if resp.status_code == 429:
+            raise RuntimeError("Odds API quota exceeded")
+        resp.raise_for_status()
+        events = resp.json()
+        _live_events_cache[sport] = (time.monotonic(), events)
+        return events
+    except requests.RequestException as exc:
+        raise RuntimeError(f"live Odds API event request failed: {exc}") from exc
+
+
+def _fetch_live_snapshot(sport: str, book_key: str, market: str,
+                         team1: str = "", team2: str = "") -> list | None:
+    """Fetch a current pregame market, using the event endpoint when required."""
+    event_id = None
+    if market in _ADDITIONAL_MARKETS:
+        event = find_event(_fetch_live_events(sport), team1, team2)
+        event_id = event.get("id") if event else None
+        if not event_id:
+            raise RuntimeError(f"game unavailable for additional market: {team1} vs {team2}")
+    cache_key = (sport, event_id or "sport", book_key.lower(), market)
     cached = _live_snapshot_cache.get(cache_key)
     if cached and time.monotonic() - cached[0] < _LIVE_SNAPSHOT_TTL_SECONDS:
         return cached[1]
 
-    url = f"{ODDS_API_BASE}/sports/{sport}/odds"
+    if event_id:
+        url = f"{ODDS_API_BASE}/sports/{sport}/events/{event_id}/odds"
+    else:
+        url = f"{ODDS_API_BASE}/sports/{sport}/odds"
     params = {
         "apiKey": ODDS_API_KEY,
         "regions": region_for_book_key(book_key),
@@ -384,7 +443,8 @@ def _fetch_live_snapshot(sport: str, book_key: str, market: str) -> list | None:
         resp.raise_for_status()
         remaining = resp.headers.get("x-requests-remaining", "unknown")
         print(f"[closing-capture] live {sport}/{market}/{book_key}; credits remaining: {remaining}")
-        events = resp.json()
+        payload = resp.json()
+        events = [payload] if event_id and isinstance(payload, dict) else payload
         _live_snapshot_cache[cache_key] = (time.monotonic(), events)
         return events
     except requests.RequestException as exc:
@@ -414,18 +474,19 @@ def fetch_live_closing_odds(bet: dict) -> dict:
     if sel is None:
         return {"closing_odds": None, "decimal_closing": None,
                 "error": f"unsupported bet type/selection: {bet_type} / {selection}"}
-    sel = _apply_market_key_override(sel, bet.get("market_key", ""))
+    sel = _apply_live_market_family(sel, bet.get("market_key", ""))
 
-    last_error = None
+    errors = []
     for market in sel["markets_to_try"]:
         try:
-            events = _fetch_live_snapshot(sport, book, market)
+            events = _fetch_live_snapshot(sport, book, market, team1, team2)
         except RuntimeError as exc:
-            last_error = str(exc)
+            errors.append(str(exc))
             continue
         result = _price_from_snapshot(
             events, sport, book, team1, team2, market, sel,
             f"BetID {bet.get('bet_id', '?')} live",
+            diagnose_missing=True,
         )
         if result and result.get("price") is not None:
             price = result["price"]
@@ -435,18 +496,25 @@ def fetch_live_closing_odds(bet: dict) -> dict:
                 "error": None,
             }
         if result and result.get("error"):
-            last_error = result["error"]
+            errors.append(result["error"])
+
+    # Exact-point diagnostics are more actionable than a sibling market being
+    # absent, so retain them when the family cascade exhausts every market.
+    best_error = next(
+        (error for error in errors if error.startswith("EXACT SELECTION NOT FOUND")),
+        errors[-1] if errors else CLOSING_ODDS_SELECTION_NOT_FOUND,
+    )
 
     return {
         "closing_odds": None,
         "decimal_closing": None,
-        "error": last_error or CLOSING_ODDS_SELECTION_NOT_FOUND,
+        "error": best_error,
     }
 
 
 def _price_from_snapshot(events: list | None, sport: str, book: str,
                          team1: str, team2: str, market: str, sel: dict,
-                         label: str) -> dict | None:
+                         label: str, diagnose_missing: bool = False) -> dict | None:
     """
     Try to extract closing price from an already-fetched snapshot.
     Returns {"price": int} on success, or a permanent-failure dict, or None
@@ -480,6 +548,8 @@ def _price_from_snapshot(events: list | None, sport: str, book: str,
     )
     if mkt is None:
         # Book/game found but this market absent — try next market in cascade.
+        if diagnose_missing:
+            return {"price": None, "error": f"MARKET NOT FOUND: {market}"}
         return None
 
     price = extract_odds(
@@ -492,6 +562,29 @@ def _price_from_snapshot(events: list | None, sport: str, book: str,
 
     if price is None:
         # Market present but exact line missing — try next market.
+        if diagnose_missing:
+            points = set()
+            for outcome in mkt.get("outcomes", []):
+                if (sel.get("selection_side") is not None
+                        and outcome.get("name", "").lower() != sel.get("selection_side")):
+                    continue
+                try:
+                    points.add(float(outcome["point"]))
+                except (KeyError, TypeError, ValueError):
+                    continue
+            points = sorted(points)
+            available = ", ".join(f"{p:g}" for p in points[:12]) or "none"
+            if sel.get("selection_point") is None:
+                detail = f"outcome {sel.get('selection_team') or sel.get('selection_side')}"
+            else:
+                detail = (
+                    f"point {sel.get('selection_point')}; "
+                    f"available points: {available}"
+                )
+            return {
+                "price": None,
+                "error": f"EXACT SELECTION NOT FOUND: {market} {detail}",
+            }
         return None
 
     return {"price": price, "error": None}
