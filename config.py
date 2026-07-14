@@ -178,8 +178,14 @@ MANUAL_PAYOUT_REQUIRED_BOOKS = {"kalshi", "rebet"}
 # $63.36 -> P/L $62.09; nearest gives $63.37 -> P/L $62.10). Fanatics also
 # rounds nearest: confirmed 2026-07-06, stake $1,017 @ -270, profit
 # 376.6666... paid as $376.67 (payout $1,393.67); truncation gives $376.66.
+# Hard Rock rounds nearest too: confirmed 2026-07-14, stake $26 @ -350,
+# profit 7.4285... paid as $7.43 (payout $33.43); truncation gives $33.42.
+# All TOA regional keys are included so the rule follows the registered book.
 # Keyed by lowercased book key, same convention as MANUAL_PAYOUT_REQUIRED_BOOKS.
-PAYOUT_ROUND_NEAREST_BOOKS = {"fanduel", "prophetx", "fanatics"}
+PAYOUT_ROUND_NEAREST_BOOKS = {
+    "fanduel", "prophetx", "fanatics",
+    "hardrockbet", "hardrockbet_az", "hardrockbet_fl", "hardrockbet_oh",
+}
 
 # ── Bet Categories ──────────────────────────────────────────────────
 # Matches the 6 canonical values enforced by LogBetWizard.jsx's BET_CATEGORIES

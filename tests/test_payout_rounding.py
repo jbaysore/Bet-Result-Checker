@@ -25,6 +25,21 @@ def test_fanatics_is_configured_nearest():
     assert "fanatics" in PAYOUT_ROUND_NEAREST_BOOKS
 
 
+def test_hard_rock_is_configured_nearest_for_every_regional_key():
+    assert {
+        "hardrockbet", "hardrockbet_az", "hardrockbet_fl", "hardrockbet_oh"
+    } <= PAYOUT_ROUND_NEAREST_BOOKS
+
+
+def test_real_hard_rock_settlement_rounds_up():
+    # Confirmed real settlement: stake $26 @ -350 -> $33.43 (profit $7.4285...).
+    pl, payout = calculate_pl_and_payout(
+        RESULT_WIN, 26.0, -350, BET_CATEGORY_STANDARD,
+        fee=0.0, round_to_nearest="hardrockbet" in PAYOUT_ROUND_NEAREST_BOOKS)
+    assert payout == 33.43
+    assert pl == 7.43
+
+
 def test_rebet_requires_manual_payout_not_nearest():
     # Rebet WIN payouts disagree with truncate/nearest/ceil — see config docstring.
     assert "rebet" in MANUAL_PAYOUT_REQUIRED_BOOKS
