@@ -35,12 +35,13 @@ _live_events_cache: dict[str, tuple[float, list]] = {}
 _LIVE_SNAPSHOT_TTL_SECONDS = 20
 
 # Odds API market keys that share spread-style extraction (team + point).
-_SPREAD_MARKETS = frozenset({"spreads", "alternate_spreads"})
+_SPREAD_MARKETS = frozenset({"spreads", "alternate_spreads", "spreads_h1"})
 # Odds API market keys that share game-total extraction (Over/Under + point).
-_TOTAL_MARKETS = frozenset({"totals", "alternate_totals"})
+_TOTAL_MARKETS = frozenset({"totals", "alternate_totals", "totals_1st_5_innings"})
 _TEAM_TOTAL_MARKET = "team_totals"
 _ADDITIONAL_MARKETS = frozenset({
     "alternate_spreads", "alternate_totals", "team_totals",
+    "spreads_h1", "totals_1st_5_innings",
 })
 
 
@@ -140,6 +141,8 @@ def _apply_live_market_family(sel: dict, market_key: str) -> dict:
         "totals": ["totals", "alternate_totals"],
         "alternate_totals": ["alternate_totals", "totals"],
         "team_totals": ["team_totals"],
+        "spreads_h1": ["spreads_h1"],
+        "totals_1st_5_innings": ["totals_1st_5_innings"],
         "h2h": ["h2h"],
     }
     out = dict(sel)

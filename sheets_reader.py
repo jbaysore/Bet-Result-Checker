@@ -315,6 +315,7 @@ def load_pending_bets(tab_name: str) -> list[dict]:
             "game_start":  _bet_cell(row, col, "game_start"),
             "selection":   selection,
             "bet_type":    bet_type,
+            "market_key":  _bet_cell(row, col, "market_key"),
             "odds_taken":  _bet_cell(row, col, "odds_taken"),
             "stake":       _bet_cell(row, col, "stake"),
             "fee":         _bet_cell(row, col, "fee"),

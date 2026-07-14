@@ -17,6 +17,7 @@ from config import (
     PAYOUT_ROUND_NEAREST_BOOKS,
     BET_TYPE_PARLAY,
     BET_TYPE_MONEYLINE,
+    GAME_STATUS_CANCELLED,
 )
 from sources import odds_api, espn_tennis, espn_fights
 from resolver import (
@@ -34,6 +35,11 @@ from sheets_reader import (
 )
 
 CENTRAL = pytz.timezone("America/Chicago")
+
+PERIOD_MARKETS_REQUIRING_MANUAL_SCORE = frozenset({
+    "spreads_h1",
+    "totals_1st_5_innings",
+})
 
 
 def poll_bet(bet: dict) -> bool:
@@ -142,6 +148,13 @@ def poll_bet(bet: dict) -> bool:
     game = _fetch_result(bet, sport)
 
     if game is not None:
+        market_key = (bet.get("market_key") or "").strip()
+        if (market_key in PERIOD_MARKETS_REQUIRING_MANUAL_SCORE
+                and game.get("status") != GAME_STATUS_CANCELLED):
+            print(f"[poller] BetID {bet_id}: {market_key} needs the period score; "
+                  "full-game final cannot settle it. Writing NEEDS_REVIEW.")
+            write_result(row_idx, RESULT_NEEDS_REVIEW, bet_id)
+            return "needs_review"
         try:
             result = resolve(bet, game)
         except ValueError as e:
