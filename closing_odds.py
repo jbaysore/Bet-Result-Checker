@@ -12,7 +12,7 @@ when this script actually runs.
 import re
 import time
 import requests
-from datetime import timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 from config import (
     ODDS_API_KEY, ODDS_API_BASE,
@@ -231,18 +231,61 @@ def parse_selection(bet_type: str, selection: str) -> dict | None:
 
 
 # ── Game matching ─────────────────────────────────────────────────────────────
-# Ports backfillClosingOdds.js:findEvent() — case-insensitive substring
-# matching, proven to work reliably for The Odds API team names.
+# Case-insensitive substring matching on team names, then commence-time
+# disambiguation. Mirrors sources/odds_api.py:_select_matching_game() so a
+# repeated matchup (a doubleheader, or the same two teams on back-to-back days
+# both present in one snapshot) can't resolve to the wrong — possibly
+# not-yet-started — game and record a non-closing price as the closing line.
 
-def find_event(events: list, team1: str, team2: str) -> dict | None:
+# Same tolerance the /scores matcher uses. A doubleheader's two games are only
+# a few hours apart, so the closest commence still wins well inside this window.
+GAME_TIME_MATCH_TOLERANCE_SECONDS = 12 * 60 * 60
+
+
+def _parse_iso_utc(raw: str | None) -> datetime | None:
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except (ValueError, TypeError):
+        return None
+
+
+def find_event(events: list, team1: str, team2: str,
+               expected_start: datetime | None = None) -> dict | None:
     t1 = team1.lower().strip()
     t2 = team2.lower().strip()
+    candidates = []
     for ev in (events or []):
         home = ev.get("home_team", "").lower()
         away = ev.get("away_team", "").lower()
         if (t1 in home or t1 in away) and (t2 in home or t2 in away):
-            return ev
-    return None
+            candidates.append(ev)
+
+    if not candidates:
+        return None
+
+    # A lone name match has no ambiguity — return it even if the event carries no
+    # commence_time. The wrong-game risk only arises with a repeated matchup.
+    if len(candidates) == 1:
+        return candidates[0]
+
+    # 2+ candidates (doubleheader, or same teams across days in one snapshot):
+    # the closest commence to the expected start wins. Without an expected start
+    # there's nothing to disambiguate with, so defer rather than guess.
+    if expected_start is None:
+        return None
+    expected_utc = expected_start.astimezone(timezone.utc)
+    timed = []
+    for ev in candidates:
+        commence = _parse_iso_utc(ev.get("commence_time"))
+        if commence is None:
+            continue
+        delta = abs((commence - expected_utc).total_seconds())
+        if delta <= GAME_TIME_MATCH_TOLERANCE_SECONDS:
+            timed.append((delta, ev))
+    timed.sort(key=lambda item: item[0])
+    return timed[0][1] if timed else None
 
 
 # ── Odds extraction ───────────────────────────────────────────────────────────
@@ -410,11 +453,12 @@ def _fetch_live_events(sport: str) -> list:
 
 
 def _fetch_live_snapshot(sport: str, book_key: str, market: str,
-                         team1: str = "", team2: str = "") -> list | None:
+                         team1: str = "", team2: str = "",
+                         expected_start: datetime | None = None) -> list | None:
     """Fetch a current pregame market, using the event endpoint when required."""
     event_id = None
     if market in _ADDITIONAL_MARKETS:
-        event = find_event(_fetch_live_events(sport), team1, team2)
+        event = find_event(_fetch_live_events(sport), team1, team2, expected_start)
         event_id = event.get("id") if event else None
         if not event_id:
             raise RuntimeError(f"game unavailable for additional market: {team1} vs {team2}")
@@ -479,17 +523,24 @@ def fetch_live_closing_odds(bet: dict) -> dict:
                 "error": f"unsupported bet type/selection: {bet_type} / {selection}"}
     sel = _apply_live_market_family(sel, bet.get("market_key", ""))
 
+    # Disambiguate a repeated matchup by expected start. The worker passes the
+    # queued Commence UTC directly; fall back to the Bets-row date/time columns.
+    expected_start = _parse_iso_utc(bet.get("commence_utc"))
+    if expected_start is None:
+        expected_start = _parse_game_datetime(
+            bet.get("game_date", ""), bet.get("game_start", ""))
+
     errors = []
     for market in sel["markets_to_try"]:
         try:
-            events = _fetch_live_snapshot(sport, book, market, team1, team2)
+            events = _fetch_live_snapshot(sport, book, market, team1, team2, expected_start)
         except RuntimeError as exc:
             errors.append(str(exc))
             continue
         result = _price_from_snapshot(
             events, sport, book, team1, team2, market, sel,
             f"BetID {bet.get('bet_id', '?')} live",
-            diagnose_missing=True,
+            diagnose_missing=True, expected_start=expected_start,
         )
         if result and result.get("price") is not None:
             price = result["price"]
@@ -517,7 +568,8 @@ def fetch_live_closing_odds(bet: dict) -> dict:
 
 def _price_from_snapshot(events: list | None, sport: str, book: str,
                          team1: str, team2: str, market: str, sel: dict,
-                         label: str, diagnose_missing: bool = False) -> dict | None:
+                         label: str, diagnose_missing: bool = False,
+                         expected_start: datetime | None = None) -> dict | None:
     """
     Try to extract closing price from an already-fetched snapshot.
     Returns {"price": int} on success, or a permanent-failure dict, or None
@@ -529,7 +581,7 @@ def _price_from_snapshot(events: list | None, sport: str, book: str,
     if events is None:
         return None  # transient — caller handles
 
-    event = find_event(events, team1, team2)
+    event = find_event(events, team1, team2, expected_start)
     if event is None:
         print(f"[closing_odds] {label}: game not found in {market} snapshot "
               f"({team1} vs {team2}, {sport}).")
@@ -672,6 +724,7 @@ def _fetch_closing_price(bet: dict, label: str) -> dict:
 
         result = _price_from_snapshot(
             events, sport, book, team1, team2, market, sel, label,
+            expected_start=game_dt,
         )
         if result is None:
             continue  # try next market in cascade

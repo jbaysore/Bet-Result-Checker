@@ -164,6 +164,7 @@ def capture_record(tab, row_idx: int, record: dict, slot: str):
         "book": record["Book"], "team1": record["Team 1"],
         "team2": record["Team 2"], "selection": record["Selection"],
         "bet_type": record["Bet Type"], "market_key": record["Market Key"],
+        "commence_utc": record.get("Commence UTC", ""),
     })
     captured_at = iso(utc_now())
     price = result.get("closing_odds") or ""

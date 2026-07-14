@@ -78,6 +78,40 @@ def test_find_event_substring_match():
     assert ev is not None
 
 
+def test_find_event_doubleheader_picks_closest_commence():
+    # Same matchup twice in one snapshot (an MLB doubleheader). Without an
+    # expected start the old matcher returned the FIRST — here the later,
+    # not-yet-started nightcap — and recorded its non-closing price.
+    from datetime import datetime, timezone
+    events = [
+        {"home_team": "Chicago Cubs", "away_team": "New York Mets",
+         "commence_time": "2026-07-11T00:05:00Z", "id": "nightcap"},
+        {"home_team": "Chicago Cubs", "away_team": "New York Mets",
+         "commence_time": "2026-07-10T17:20:00Z", "id": "opener"},
+    ]
+    opener_start = datetime(2026, 7, 10, 17, 20, tzinfo=timezone.utc)
+    assert find_event(events, "Cubs", "Mets", opener_start)["id"] == "opener"
+    nightcap_start = datetime(2026, 7, 11, 0, 5, tzinfo=timezone.utc)
+    assert find_event(events, "Cubs", "Mets", nightcap_start)["id"] == "nightcap"
+
+
+def test_find_event_ambiguous_without_expected_start_defers():
+    # Two same-name games and no start to disambiguate → defer, don't guess.
+    events = [
+        {"home_team": "Chicago Cubs", "away_team": "New York Mets", "id": "a"},
+        {"home_team": "Chicago Cubs", "away_team": "New York Mets", "id": "b"},
+    ]
+    assert find_event(events, "Cubs", "Mets") is None
+
+
+def test_find_event_lone_match_returns_without_commence():
+    # A single name match is unambiguous even with no commence_time on the event.
+    from datetime import datetime, timezone
+    events = [{"home_team": "Kansas City Chiefs", "away_team": "Las Vegas Raiders"}]
+    start = datetime(2026, 7, 10, 17, 20, tzinfo=timezone.utc)
+    assert find_event(events, "Chiefs", "Raiders", start) is not None
+
+
 def test_extract_odds_h2h():
     outcomes = [
         {"name": "Kansas City Chiefs", "price": -150},
