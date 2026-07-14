@@ -180,12 +180,19 @@ MANUAL_PAYOUT_REQUIRED_BOOKS = {"kalshi", "rebet"}
 # 376.6666... paid as $376.67 (payout $1,393.67); truncation gives $376.66.
 # Hard Rock rounds nearest too: confirmed 2026-07-14, stake $26 @ -350,
 # profit 7.4285... paid as $7.43 (payout $33.43); truncation gives $33.42.
+# Caesars does too: Bet 297, stake $50 @ -105, paid $97.62 rather than
+# the truncated $97.61; Bets 55 and 180 independently match nearest-cent math.
 # All TOA regional keys are included so the rule follows the registered book.
 # Keyed by lowercased book key, same convention as MANUAL_PAYOUT_REQUIRED_BOOKS.
 PAYOUT_ROUND_NEAREST_BOOKS = {
-    "fanduel", "prophetx", "fanatics",
+    "fanduel", "prophetx", "fanatics", "williamhill_us",
     "hardrockbet", "hardrockbet_az", "hardrockbet_fl", "hardrockbet_oh",
 }
+
+# Books that settle Profit Boosts from a bettor-favorably rounded,
+# whole-number American price. Confirmed from real DraftKings bets
+# 203/224/247 and matching FanDuel settlements. Keep in sync with odds-tool.
+PROFIT_BOOST_ROUND_UP_BOOKS = {"draftkings", "fanduel"}
 
 # ── Bet Categories ──────────────────────────────────────────────────
 # Matches the 6 canonical values enforced by LogBetWizard.jsx's BET_CATEGORIES

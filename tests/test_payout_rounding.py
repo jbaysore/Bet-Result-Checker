@@ -4,12 +4,18 @@ import math
 
 import pytest
 
-from resolver import calculate_pl_and_payout, _american_odds_profit, _decimal_odds_profit
+from resolver import (
+    calculate_pl_and_payout,
+    _american_odds_profit,
+    _boosted_american_odds_round_up,
+    _decimal_odds_profit,
+)
 from config import (
     BET_CATEGORY_STANDARD,
     RESULT_WIN,
     PAYOUT_ROUND_NEAREST_BOOKS,
     MANUAL_PAYOUT_REQUIRED_BOOKS,
+    PROFIT_BOOST_ROUND_UP_BOOKS,
 )
 
 
@@ -31,6 +37,10 @@ def test_hard_rock_is_configured_nearest_for_every_regional_key():
     } <= PAYOUT_ROUND_NEAREST_BOOKS
 
 
+def test_caesars_is_configured_nearest():
+    assert "williamhill_us" in PAYOUT_ROUND_NEAREST_BOOKS
+
+
 def test_real_hard_rock_settlement_rounds_up():
     # Confirmed real settlement: stake $26 @ -350 -> $33.43 (profit $7.4285...).
     pl, payout = calculate_pl_and_payout(
@@ -38,6 +48,50 @@ def test_real_hard_rock_settlement_rounds_up():
         fee=0.0, round_to_nearest="hardrockbet" in PAYOUT_ROUND_NEAREST_BOOKS)
     assert payout == 33.43
     assert pl == 7.43
+
+
+def test_real_caesars_bet_297_rounds_to_nearest_cent():
+    # Confirmed payout: $50 @ -105 pays $97.62, not truncated $97.61.
+    pl, payout = calculate_pl_and_payout(
+        RESULT_WIN, 50.0, -105, BET_CATEGORY_STANDARD,
+        fee=0.25,
+        round_to_nearest="williamhill_us" in PAYOUT_ROUND_NEAREST_BOOKS)
+    assert payout == 97.62
+    assert pl == 47.37
+
+
+def test_profit_boost_whole_american_rounding_books_are_configured():
+    assert {"draftkings", "fanduel"} <= PROFIT_BOOST_ROUND_UP_BOOKS
+
+
+def test_real_draftkings_bet_247_profit_boost_pays_56_20():
+    # +139 with a 30% boost is raw +180.7, displayed/settled by DK as +181.
+    assert _boosted_american_odds_round_up(139, 30) == 181
+    pl, payout = calculate_pl_and_payout(
+        RESULT_WIN, 20.0, 139, "Profit Boost",
+        boost_pct=30, fee=0.25, round_boosted_odds_up=True)
+    assert (pl, payout) == (35.95, 56.20)
+
+
+@pytest.mark.parametrize("odds,expected_pl,expected_payout", [
+    (223, 57.75, 78.00),  # Bet 203: raw +289.9 -> displayed +290
+    (-102, 25.35, 45.60),  # Bet 224: raw +127.45... -> displayed +128
+])
+def test_other_real_draftkings_profit_boosts(
+        odds, expected_pl, expected_payout):
+    pl, payout = calculate_pl_and_payout(
+        RESULT_WIN, 20.0, odds, "Profit Boost",
+        boost_pct=30, fee=0.25, round_boosted_odds_up=True)
+    assert (pl, payout) == (expected_pl, expected_payout)
+
+
+def test_real_fanduel_profit_boost_uses_whole_price_then_nearest_cent():
+    assert _boosted_american_odds_round_up(-118, 30) == 111
+    pl, payout = calculate_pl_and_payout(
+        RESULT_WIN, 25.0, -118, "Profit Boost",
+        boost_pct=30, round_to_nearest=True,
+        round_boosted_odds_up=True)
+    assert (pl, payout) == (27.75, 52.75)
 
 
 def test_rebet_requires_manual_payout_not_nearest():

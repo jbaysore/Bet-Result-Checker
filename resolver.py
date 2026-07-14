@@ -1,5 +1,5 @@
 import re
-from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
+from decimal import Decimal, ROUND_CEILING, ROUND_DOWN, ROUND_HALF_UP
 
 from config import (
     BET_TYPE_SPREAD, BET_TYPE_MONEYLINE, BET_TYPE_TOTAL, BET_TYPE_DRAW, BET_TYPE_PARLAY,
@@ -8,6 +8,7 @@ from config import (
     GAME_STATUS_CANCELLED,
     PROMO_FUNDED_CATEGORIES, REAL_MONEY_CATEGORIES,
     BET_CATEGORY_PROFIT_BOOST, BET_CATEGORY_BONUS_BET,
+    BET_CATEGORY_DEPOSIT_BONUS,
 )
 
 
@@ -118,7 +119,8 @@ def calculate_pl_and_payout(result: str, stake: float, odds_taken: float,
                             fee_pct_on_win_only: float = None, bet_type: str = "",
                             fee_pct_on_win_stake: float = None,
                             decimal_odds: float = None,
-                            round_to_nearest: bool = False) -> tuple[float, float | None]:
+                            round_to_nearest: bool = False,
+                            round_boosted_odds_up: bool = False) -> tuple[float, float | None]:
     """
     Computes P/L and Payout for a resolved bet, given American odds and the
     bet's category (which determines whether the stake was real cash or
@@ -186,6 +188,11 @@ def calculate_pl_and_payout(result: str, stake: float, odds_taken: float,
                       (DraftKings and most books); True rounds to the nearest
                       cent (FanDuel). Set per-book by the caller from
                       config.PAYOUT_ROUND_NEAREST_BOOKS. Only affects a WIN.
+        round_boosted_odds_up: For books in
+                      config.PROFIT_BOOST_ROUND_UP_BOOKS, convert the boosted
+                      profit multiplier to American odds and round that price
+                      up to the next whole number before calculating payout.
+                      This matches confirmed DraftKings and FanDuel boosts.
 
     Returns:
         (pl, payout) -- payout is None when nothing is paid out (a loss,
@@ -206,7 +213,9 @@ def calculate_pl_and_payout(result: str, stake: float, odds_taken: float,
             any outcome and never converts to withdrawable cash, even on
             a win. For Profit Boost, profit is multiplied by
             (1 + boost_pct/100) before being added to the stake for Payout.
-            Fee is then subtracted from P/L (not Payout).
+            Deposit Bonus P/L is the full converted payout because its stake
+            was promotional credit rather than bankroll cash. Fee is then
+            subtracted from P/L (not Payout).
       LOSS: promo-funded categories (Bonus Bet, Deposit Bonus) cost
             nothing, P/L = 0, since the stake was never real cash.
             Everything else loses the full stake, P/L = -stake. Fee is
@@ -256,13 +265,6 @@ def calculate_pl_and_payout(result: str, stake: float, odds_taken: float,
 
     if result == RESULT_WIN:
         effective_stake = (stake - fee) if fee_before_odds else stake
-        # A parlay passes its exact combined decimal price (decimal_odds) so
-        # profit is computed from it directly, instead of from a lossy
-        # American round-trip of the same product. Single bets pass American
-        # odds as before (decimal_odds is None).
-        profit = (_decimal_odds_profit(effective_stake, decimal_odds, round_to_nearest)
-                  if decimal_odds is not None
-                  else _american_odds_profit(effective_stake, odds_taken, round_to_nearest))
         if bet_category == BET_CATEGORY_PROFIT_BOOST:
             if boost_pct is None:
                 raise ValueError(
@@ -271,7 +273,21 @@ def calculate_pl_and_payout(result: str, stake: float, odds_taken: float,
                     "before resolving this bet. Refusing to guess at an unboosted "
                     "payout, since that would silently underpay this win."
                 )
-            profit = round(profit * (1 + boost_pct / 100), 2)
+
+        # A parlay passes its exact combined decimal price. For books with a
+        # confirmed boosted-odds policy, convert the boosted multiplier to the
+        # displayed whole-number American price first, then settle that price.
+        if bet_category == BET_CATEGORY_PROFIT_BOOST and round_boosted_odds_up:
+            boosted_odds = _boosted_american_odds_round_up(
+                odds_taken, boost_pct, decimal_odds=decimal_odds)
+            profit = _american_odds_profit(
+                effective_stake, boosted_odds, round_to_nearest)
+        else:
+            profit = (_decimal_odds_profit(effective_stake, decimal_odds, round_to_nearest)
+                      if decimal_odds is not None
+                      else _american_odds_profit(effective_stake, odds_taken, round_to_nearest))
+            if bet_category == BET_CATEGORY_PROFIT_BOOST:
+                profit = round(profit * (1 + boost_pct / 100), 2)
 
         if fee_pct_on_win_only is not None and bet_type.strip() != BET_TYPE_PARLAY:
             fee = round(profit * (fee_pct_on_win_only / 100), 2)
@@ -284,7 +300,13 @@ def calculate_pl_and_payout(result: str, stake: float, odds_taken: float,
             # subtraction here, that would double-deduct it.
             if bet_category == BET_CATEGORY_BONUS_BET:
                 return round(profit, 2), round(profit, 2)
-            return round(profit, 2), round(effective_stake + profit, 2)
+            payout = round(effective_stake + profit, 2)
+            # Deposit Bonus stake was promotional credit, not bankroll cash.
+            # A winning playthrough converts the entire payout into real
+            # account value, so P/L is full payout rather than profit-only.
+            if bet_category == BET_CATEGORY_DEPOSIT_BONUS:
+                return payout, payout
+            return round(profit, 2), payout
 
         # Bonus Bet is the one category where a WIN does not return the
         # stake -- the bonus-bet token is consumed regardless of outcome,
@@ -293,7 +315,10 @@ def calculate_pl_and_payout(result: str, stake: float, odds_taken: float,
         # credit once granted) pays stake + profit on a win.
         if bet_category == BET_CATEGORY_BONUS_BET:
             return round(profit - fee, 2), round(profit, 2)
-        return round(profit - fee, 2), round(stake + profit, 2)
+        payout = round(stake + profit, 2)
+        if bet_category == BET_CATEGORY_DEPOSIT_BONUS:
+            return round(payout - fee, 2), payout
+        return round(profit - fee, 2), payout
 
     if result == RESULT_LOSS:
         if is_promo_funded:
@@ -356,10 +381,12 @@ def calculate_pl_and_payout(result: str, stake: float, odds_taken: float,
             fee_pct_on_win_only=fee_pct_on_win_only, bet_type=bet_type,
             fee_pct_on_win_stake=fee_pct_on_win_stake, decimal_odds=decimal_odds,
             round_to_nearest=round_to_nearest,
+            round_boosted_odds_up=round_boosted_odds_up,
         )
         pl_push, payout_push = calculate_pl_and_payout(
             RESULT_PUSH, half_stake, odds_taken, bet_category, None, 0.0, fee_before_odds,
             decimal_odds=decimal_odds, round_to_nearest=round_to_nearest,
+            round_boosted_odds_up=round_boosted_odds_up,
         )
         pl = round(pl_scored + pl_push, 2)
         payout = round((payout_scored or 0.0) + (payout_push or 0.0), 2)
@@ -410,6 +437,22 @@ def derive_cashout_pl(
     if fee_before_odds:
         return round(payout - stake, 2)
     return round(payout - stake - fee, 2)
+
+
+def _boosted_american_odds_round_up(odds: float, boost_pct: float,
+                                    decimal_odds: float = None) -> int:
+    """Return the bettor-favorably rounded whole-number boosted price."""
+    if decimal_odds is not None:
+        base_multiplier = Decimal(str(decimal_odds)) - Decimal("1")
+    else:
+        odds_dec = Decimal(str(odds))
+        base_multiplier = (odds_dec / Decimal("100") if odds_dec > 0
+                           else Decimal("100") / abs(odds_dec))
+    boosted = base_multiplier * (
+        Decimal("1") + Decimal(str(boost_pct)) / Decimal("100"))
+    raw_american = (boosted * Decimal("100") if boosted >= 1
+                    else -Decimal("100") / boosted)
+    return int(raw_american.to_integral_value(rounding=ROUND_CEILING))
 
 
 def _american_odds_profit(stake: float, odds: float, round_to_nearest: bool = False) -> float:

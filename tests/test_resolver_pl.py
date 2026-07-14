@@ -61,6 +61,21 @@ from resolver import calculate_pl_and_payout
             id="deposit_bonus_loss",
         ),
         pytest.param(
+            "WIN", "Deposit Bonus", 25, 125, 0, False, None,
+            None, None, "", 56.25, 56.25,
+            id="deposit_bonus_win_full_converted_payout",
+        ),
+        pytest.param(
+            "WIN", "Deposit Bonus", 25, 125, 1, False, None,
+            None, None, "", 55.25, 56.25,
+            id="deposit_bonus_win_traditional_fee",
+        ),
+        pytest.param(
+            "WIN", "Deposit Bonus", 50, -200, 1.08, True, None,
+            None, None, "", 73.38, 73.38,
+            id="deposit_bonus_win_fee_before_odds",
+        ),
+        pytest.param(
             "WIN", "Profit Boost", 100, -110, 0, False, 100,
             None, None, "", 181.8, 281.8,
             id="profit_boost_100pct_doubles_profit",
