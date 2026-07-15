@@ -561,6 +561,23 @@ def load_bets_needing_closing_odds(tab_name: str) -> list[dict]:
         if result == RESULT_NEEDS_REVIEW:
             continue  # needs human review before closing odds are useful
 
+        # Interim Phase 1 guard: once a new writer has marked a row UNKNOWN or
+        # UNVERIFIED, the scheduled-time historical pass must not overwrite it.
+        start_status = _bet_cell(row, col, "start_status").strip().upper()
+        closing_quality = _bet_cell(row, col, "closing_quality").strip().upper()
+        provenance_schema_present = (
+            col.get("start_status") is not None and col.get("closing_quality") is not None
+        )
+        # Once the migration columns exist, a blank status is a failed/new
+        # provenance write, not legacy data. Legacy rows are explicitly stamped
+        # LEGACY_UNAUDITED, so blank must fail closed.
+        if provenance_schema_present and not start_status:
+            continue
+        if start_status in {"UNKNOWN", "UNVERIFIED"} or closing_quality in {
+            "PROVISIONAL", "SAFE_BUT_EARLY", "STALE"
+        }:
+            continue
+
         closing_odds = _bet_cell(row, col, "closing_odds")
         # Re-scan rows whose ClosingOdds holds a failure code (BOOK NOT FOUND,
         # SELECTION NOT FOUND, etc.) -- they may resolve now if the underlying
@@ -593,6 +610,12 @@ def load_bets_needing_closing_odds(tab_name: str) -> list[dict]:
             "kalshi_ticker": _bet_cell(row, col, "kalshi_ticker"),
             # Odds API market key (blank for legacy rows).
             "market_key": _bet_cell(row, col, "market_key"),
+            "event_id": _bet_cell(row, col, "event_id"),
+            "actual_start": _bet_cell(row, col, "actual_start"),
+            "actual_start_source": _bet_cell(row, col, "actual_start_source"),
+            "actual_start_confidence": _bet_cell(row, col, "actual_start_confidence"),
+            "start_status": start_status,
+            "closing_quality": closing_quality,
         })
 
     return bets
@@ -679,6 +702,10 @@ def load_bets_for_closing_retry(
             "legs": legs,
             "kalshi_ticker": _bet_cell(row, col, "kalshi_ticker"),
             "market_key": _bet_cell(row, col, "market_key"),
+            "event_id": _bet_cell(row, col, "event_id"),
+            "actual_start": _bet_cell(row, col, "actual_start"),
+            "actual_start_source": _bet_cell(row, col, "actual_start_source"),
+            "actual_start_confidence": _bet_cell(row, col, "actual_start_confidence"),
         })
 
     return bets

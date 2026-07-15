@@ -1,5 +1,6 @@
 """Unit tests for closing_odds.py — no API or Sheets credentials required."""
 
+from datetime import datetime, timezone
 from unittest.mock import Mock, patch
 
 import closing_odds as closing_odds_module
@@ -15,6 +16,7 @@ from closing_odds import (
     region_for_book_key,
     fetch_closing_odds,
     fetch_live_closing_odds,
+    fetch_parlay_closing_odds,
     _fetch_closing_price,
     _fetch_live_snapshot,
     _apply_live_market_family,
@@ -22,6 +24,7 @@ from closing_odds import (
     is_exchange_book,
     needs_manual_closing_odds,
 )
+from actual_start import ActualStartResult
 from config import (
     CLOSING_ODDS_MANUAL_REQUIRED,
     CLOSING_ODDS_SPORT_NOT_ON_API,
@@ -402,7 +405,10 @@ def test_fetch_live_closing_odds_reuses_selection_extraction(mock_snapshot):
         "team1": "Cubs", "team2": "Cardinals", "bet_type": "Spread",
         "selection": "Cubs -7.5", "market_key": "alternate_spreads",
     })
-    assert result == {"closing_odds": "+145", "decimal_closing": 2.45, "error": None}
+    assert result["closing_odds"] == "+145"
+    assert result["decimal_closing"] == 2.45
+    assert result["error"] is None
+    assert result["fetched_at"].endswith("Z")
 
 
 @patch("closing_odds._fetch_live_snapshot")
@@ -425,7 +431,9 @@ def test_fetch_live_closing_odds_queries_novig(mock_snapshot):
         "market_key": "h2h",
     })
     assert mock_snapshot.call_args.args[1] == "novig"
-    assert result == {"closing_odds": "-102", "decimal_closing": 1.98039216, "error": None}
+    assert result["closing_odds"] == "-102"
+    assert result["decimal_closing"] == 1.98039216
+    assert result["error"] is None
 
 
 def test_live_market_key_cascades_to_related_market_family():
@@ -470,7 +478,9 @@ def test_live_closing_falls_through_mainline_to_exact_alternate(mock_snapshot):
     assert [call.args[2] for call in mock_snapshot.call_args_list] == [
         "totals", "alternate_totals",
     ]
-    assert result == {"closing_odds": "+105", "decimal_closing": 2.05, "error": None}
+    assert result["closing_odds"] == "+105"
+    assert result["decimal_closing"] == 2.05
+    assert result["error"] is None
 
 
 @patch("closing_odds.requests.get")
@@ -521,3 +531,31 @@ def test_live_missing_exact_point_reports_available_points():
     assert result["error"] == (
         "EXACT SELECTION NOT FOUND: totals point 173.0; available points: 175.5"
     )
+
+
+def test_parlay_summary_uses_worst_leg_quality_and_per_leg_start_status(monkeypatch):
+    monkeypatch.setattr(
+        closing_odds_module,
+        "resolve_actual_start",
+        lambda leg: ActualStartResult(
+            datetime(2026, 7, 11, 0, 5, tzinfo=timezone.utc),
+            "fixture", "CONFIDENT", event_id=leg.get("event_id", ""),
+        ),
+    )
+    qualities = iter(["VERIFIED_CLOSE", "STALE"])
+    monkeypatch.setattr(
+        closing_odds_module,
+        "_fetch_closing_price",
+        lambda leg, label: {
+            "price": -110, "error": None, "closing_quality": next(qualities),
+            "snapshot_at": "2026-07-11T00:03:30Z",
+            "book_last_update": "2026-07-11T00:03:00Z",
+        },
+    )
+    result = fetch_parlay_closing_odds({
+        "bet_id": "p1", "odds_taken": "+264", "_resolve_actual_start": True,
+        "legs": [{"event_id": "e1"}, {"event_id": "e2"}],
+    })
+    assert result["closing_quality"] == "STALE"
+    assert result["start_status"] == "VERIFIED"
+    assert [leg["start_status"] for leg in result["per_leg_audit"]] == ["VERIFIED", "VERIFIED"]

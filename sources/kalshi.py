@@ -91,7 +91,7 @@ def _candle_yes_price(candle):
     return _num("yes_ask", "close_dollars") or _num("price", "close_dollars")
 
 
-def get_closing_american(ticker, game_start_dt, label=""):
+def get_closing_american(ticker, game_start_dt, label="", actual_start_dt=None, resolved=False):
     """
     Closing American odds for a Kalshi bet's market at ~game start, or None.
 
@@ -110,7 +110,14 @@ def get_closing_american(ticker, game_start_dt, label=""):
     if not series:
         return None
 
-    end_ts = int(game_start_dt.astimezone(timezone.utc).timestamp())
+    scheduled = game_start_dt.astimezone(timezone.utc)
+    if resolved and actual_start_dt is not None:
+        cutoff = actual_start_dt.astimezone(timezone.utc)
+    elif actual_start_dt is not None:
+        cutoff = min(scheduled, actual_start_dt.astimezone(timezone.utc))
+    else:
+        cutoff = scheduled
+    end_ts = int(cutoff.timestamp())
     start_ts = end_ts - _CLOSING_WINDOW_SECONDS
     url = f"{KALSHI_BASE}/series/{series}/markets/{ticker}/candlesticks"
     params = {"start_ts": start_ts, "end_ts": end_ts, "period_interval": 1}

@@ -23,6 +23,18 @@ from config import (
 )
 from poller import _parse_game_datetime
 from sources.odds_api import sport_has_odds_feed
+from closing_provenance import (
+    BOOK_STALE_SECONDS,
+    QUALITY_EARLY,
+    QUALITY_PROVISIONAL,
+    QUALITY_STALE,
+    QUALITY_VERIFIED,
+    SAFETY_MARGIN_SECONDS,
+    ClosingSample,
+    parse_utc,
+    quote_is_fresh,
+)
+from actual_start import ActualStartResult, resolve_actual_start
 
 # One historical snapshot per (sport, timestamp, book, market) per process —
 # multiple bets on the same game/book reuse the same API response.
@@ -417,7 +429,11 @@ def _fetch_historical_snapshot(sport: str, date_iso: str, book_key: str,
             print(f"[closing_odds] Credits used: {used} | Remaining: {remaining}")
 
             data = resp.json()
-            events = data.get("data", [])
+            events = []
+            for raw_event in data.get("data", []):
+                event = dict(raw_event)
+                event["_snapshot_at"] = data.get("timestamp") or date_iso
+                events.append(event)
             _snapshot_cache[cache_key] = events
             return events
 
@@ -548,6 +564,10 @@ def fetch_live_closing_odds(bet: dict) -> dict:
                 "closing_odds": fmt_odds(price),
                 "decimal_closing": to_decimal_odds(price),
                 "error": None,
+                "event_id": result.get("event_id"),
+                "book_last_update": result.get("book_last_update"),
+                "market_last_update": result.get("market_last_update"),
+                "fetched_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             }
         if result and result.get("error"):
             errors.append(result["error"])
@@ -642,7 +662,14 @@ def _price_from_snapshot(events: list | None, sport: str, book: str,
             }
         return None
 
-    return {"price": price, "error": None}
+    return {
+        "price": price,
+        "error": None,
+        "event_id": event.get("id"),
+        "book_last_update": mkt.get("last_update") or bk.get("last_update"),
+        "market_last_update": mkt.get("last_update"),
+        "snapshot_at": event.get("_snapshot_at"),
+    }
 
 
 # ── Per-bet/leg closing price lookup ──────────────────────────────────────────
@@ -682,9 +709,19 @@ def _fetch_closing_price(bet: dict, label: str) -> dict:
             if ticker:
                 from sources.kalshi import get_closing_american
                 game_dt = _parse_game_datetime(bet.get("game_date", ""), bet.get("game_start", ""))
-                american = get_closing_american(ticker, game_dt, label)
+                actual = _parse_iso_utc(bet.get("actual_start"))
+                confident = str(bet.get("actual_start_confidence") or "").upper() == "CONFIDENT"
+                american = get_closing_american(
+                    ticker, game_dt, label, actual_start_dt=actual, resolved=confident,
+                )
                 if american is not None:
-                    return {"price": american, "error": None}
+                    return {
+                        "price": american, "error": None,
+                        "closing_quality": QUALITY_VERIFIED if confident else (
+                            QUALITY_EARLY if actual is not None else QUALITY_PROVISIONAL
+                        ),
+                        "snapshot_at": (actual or game_dt).isoformat().replace("+00:00", "Z"),
+                    }
         print(f"[closing_odds] {label}: book '{book}' closing line not available "
               f"automatically — manual entry required.")
         return _permanent(CLOSING_ODDS_MANUAL_REQUIRED)
@@ -706,7 +743,15 @@ def _fetch_closing_price(bet: dict, label: str) -> dict:
         print(f"[closing_odds] {label}: could not parse game datetime — skipping.")
         return _transient
 
-    snapshot_dt = game_dt.astimezone(timezone.utc) - timedelta(minutes=1)
+    actual_start = _parse_iso_utc(bet.get("actual_start"))
+    confident = str(bet.get("actual_start_confidence") or "").strip().upper() == "CONFIDENT"
+    if actual_start is not None and confident:
+        snapshot_dt = actual_start - timedelta(seconds=SAFETY_MARGIN_SECONDS)
+        closing_quality = QUALITY_VERIFIED
+    else:
+        cutoff = min(actual_start, game_dt.astimezone(timezone.utc)) if actual_start else game_dt.astimezone(timezone.utc)
+        snapshot_dt = cutoff - timedelta(minutes=1)
+        closing_quality = QUALITY_EARLY if actual_start is not None else QUALITY_PROVISIONAL
     date_iso = snapshot_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
     markets_to_try = sel["markets_to_try"]
@@ -729,7 +774,19 @@ def _fetch_closing_price(bet: dict, label: str) -> dict:
         if result is None:
             continue  # try next market in cascade
         if result.get("price") is not None:
-            return result
+            observed_at = parse_utc(result.get("snapshot_at") or date_iso)
+            quote = ClosingSample(
+                price=str(result["price"]),
+                fetched_at=observed_at or snapshot_dt,
+                book_last_update=parse_utc(result.get("book_last_update")),
+            )
+            # A correctly targeted historical snapshot is still not a verified
+            # close when the selected bookmaker quote is absent or stale.
+            if closing_quality == QUALITY_VERIFIED and not quote_is_fresh(
+                quote, max_stale_seconds=BOOK_STALE_SECONDS,
+            ):
+                closing_quality = QUALITY_STALE
+            return {**result, "closing_quality": closing_quality, "snapshot_target": date_iso}
         # Permanent game/book failure — don't cascade to other markets.
         if result.get("error") in (
             CLOSING_ODDS_GAME_NOT_FOUND,
@@ -772,11 +829,23 @@ def fetch_closing_odds(bet: dict) -> dict:
                           string for permanent ones (write to sheet for review)
     """
     bet_id = bet.get("bet_id", "?")
-    res = _fetch_closing_price(bet, f"BetID {bet_id}")
+    resolution = (
+        resolve_actual_start(bet)
+        if bet.get("_resolve_actual_start") or bet.get("actual_start")
+        else ActualStartResult(None)
+    )
+    resolved_bet = dict(bet)
+    if resolution.actual_start is not None:
+        resolved_bet.update({
+            "actual_start": resolution.actual_start.isoformat().replace("+00:00", "Z"),
+            "actual_start_source": resolution.source,
+            "actual_start_confidence": resolution.confidence,
+        })
+    res = _fetch_closing_price(resolved_bet, f"BetID {bet_id}")
 
     if res["price"] is None:
         return {"closing_odds": None, "decimal_closing": None, "clv": None,
-                "error": res["error"]}
+                "error": res["error"], "actual_start_resolution": resolution}
 
     price = res["price"]
     closing_odds_str = fmt_odds(price)
@@ -797,6 +866,10 @@ def fetch_closing_odds(bet: dict) -> dict:
         "decimal_closing": decimal_closing,
         "clv": clv,
         "error": None,
+        "closing_quality": res.get("closing_quality", QUALITY_PROVISIONAL),
+        "closing_observed_at": res.get("snapshot_at") or res.get("snapshot_target"),
+        "book_last_update": res.get("book_last_update"),
+        "actual_start_resolution": resolution,
     }
 
 
@@ -816,12 +889,40 @@ def fetch_parlay_closing_odds(bet: dict) -> dict:
         return {"closing_odds": None, "decimal_closing": None, "clv": None, "error": None}
 
     leg_decimals = []
+    per_leg_audit = []
+    qualities = []
+    start_statuses = []
     for i, leg in enumerate(legs, start=1):
-        res = _fetch_closing_price(leg, f"BetID {bet_id} leg {i}/{len(legs)}")
+        resolved_leg = dict(leg)
+        resolution = resolve_actual_start(resolved_leg) if bet.get("_resolve_actual_start") else ActualStartResult(None)
+        if resolution.actual_start is not None:
+            resolved_leg.update({
+                "actual_start": resolution.actual_start.isoformat().replace("+00:00", "Z"),
+                "actual_start_source": resolution.source,
+                "actual_start_confidence": resolution.confidence,
+            })
+        res = _fetch_closing_price(resolved_leg, f"BetID {bet_id} leg {i}/{len(legs)}")
         if res["price"] is None:
             return {"closing_odds": None, "decimal_closing": None, "clv": None,
                     "error": res["error"]}
         leg_decimals.append(to_decimal_odds(res["price"]))
+        quality = res.get("closing_quality", QUALITY_PROVISIONAL)
+        qualities.append(quality)
+        start_status = (
+            "VERIFIED" if resolution.actual_start and resolution.confidence == "CONFIDENT"
+            else "UNVERIFIED" if resolution.actual_start else "UNKNOWN"
+        )
+        start_statuses.append(start_status)
+        per_leg_audit.append({
+            "event_id": resolved_leg.get("event_id", ""),
+            "actual_start": resolved_leg.get("actual_start", ""),
+            "actual_start_source": resolved_leg.get("actual_start_source", ""),
+            "actual_start_confidence": resolved_leg.get("actual_start_confidence", "UNRESOLVED"),
+            "start_status": start_status,
+            "closing_quality": quality,
+            "snapshot_at": res.get("snapshot_at") or res.get("snapshot_target"),
+            "book_last_update": res.get("book_last_update"),
+        })
 
     decimal_closing = combined_decimal(leg_decimals)
     if decimal_closing is None:
@@ -843,4 +944,18 @@ def fetch_parlay_closing_odds(bet: dict) -> dict:
         "decimal_closing": decimal_closing,
         "clv": clv,
         "error": None,
+        "closing_quality": (
+            QUALITY_VERIFIED if qualities and all(value == QUALITY_VERIFIED for value in qualities)
+            else QUALITY_PROVISIONAL if QUALITY_PROVISIONAL in qualities
+            else QUALITY_STALE if QUALITY_STALE in qualities
+            else QUALITY_EARLY
+        ),
+        "start_status": (
+            "VERIFIED" if start_statuses and all(value == "VERIFIED" for value in start_statuses)
+            else "UNKNOWN" if "UNKNOWN" in start_statuses
+            else "UNVERIFIED"
+        ),
+        "closing_observed_at": max((item.get("snapshot_at") or "" for item in per_leg_audit), default=""),
+        "actual_start_resolution": ActualStartResult(None, source="per-leg", confidence="PER_LEG"),
+        "per_leg_audit": per_leg_audit,
     }

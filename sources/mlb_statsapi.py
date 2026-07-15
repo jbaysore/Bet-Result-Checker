@@ -13,12 +13,18 @@ battersFaced}. Date lookups go through date_utils.parse_sheet_date (M/D/YYYY —
 same trap as F1).
 """
 
+from datetime import datetime, timezone
+
 import requests
 
 from date_utils import parse_sheet_date
 from name_match import normalize_name
 
 BASE = "https://statsapi.mlb.com/api/v1"
+# feed/live lives on the v1.1 API (not v1). It carries the authoritative
+# gameData.gameInfo.firstPitch wallclock — the true-start signal the CLV
+# accuracy work resolves actual starts from (see CLV_ACCURACY_PLAN Phase 0/2).
+FEED_LIVE_BASE = "https://statsapi.mlb.com/api/v1.1"
 
 
 # ── Fetch (thin, None on transient error) ───────────────────────────────────
@@ -30,7 +36,7 @@ def get_schedule_games(game_date: str) -> list | None:
     try:
         resp = requests.get(
             f"{BASE}/schedule",
-            params={"sportId": 1, "date": d.strftime("%Y-%m-%d")},
+            params={"sportId": 1, "date": d.strftime("%Y-%m-%d"), "hydrate": "gameInfo"},
             timeout=15,
         )
         resp.raise_for_status()
@@ -51,6 +57,21 @@ def get_boxscore(game_pk) -> dict | None:
         return resp.json()
     except (requests.RequestException, ValueError) as e:
         print(f"[mlb_statsapi] boxscore fetch failed (gamePk {game_pk}): {e}")
+        return None
+
+
+def get_game_feed_live(game_pk) -> dict | None:
+    """
+    The full live feed for a game (v1.1). Carries gameData.gameInfo.firstPitch —
+    the authoritative first-pitch wallclock — plus gameData.datetime.dateTime
+    (the scheduled start) and gameData.status. None on transient error.
+    """
+    try:
+        resp = requests.get(f"{FEED_LIVE_BASE}/game/{game_pk}/feed/live", timeout=15)
+        resp.raise_for_status()
+        return resp.json()
+    except (requests.RequestException, ValueError) as e:
+        print(f"[mlb_statsapi] feed/live fetch failed (gamePk {game_pk}): {e}")
         return None
 
 
@@ -89,6 +110,42 @@ def find_game(games: list, team1: str, team2: str) -> dict | None:
 
 def game_pk(game: dict) -> int | None:
     return (game or {}).get("gamePk")
+
+
+def game_first_pitch(game: dict) -> datetime | None:
+    """Actual firstPitch hydrated directly on a schedule game."""
+    return _parse_iso_utc(((game or {}).get("gameInfo") or {}).get("firstPitch"))
+
+
+def _parse_iso_utc(raw) -> datetime | None:
+    """Parse an ISO8601 timestamp (statsapi returns e.g. '2026-06-14T23:15:00Z')
+    to an aware UTC datetime. None for blank/unparseable/placeholder values."""
+    if not raw or not isinstance(raw, str):
+        return None
+    try:
+        return datetime.fromisoformat(raw.strip().replace("Z", "+00:00")).astimezone(timezone.utc)
+    except (ValueError, TypeError):
+        return None
+
+
+def first_pitch(feed: dict) -> datetime | None:
+    """
+    Actual first-pitch wallclock from feed/live → gameData.gameInfo.firstPitch,
+    as an aware UTC datetime. None until the game has started (the field is
+    absent/blank pregame) or when the feed is missing it — the caller then has
+    no confident actual-start and must fall back per the plan (SAFE_BUT_EARLY).
+    """
+    game_info = (((feed or {}).get("gameData") or {}).get("gameInfo") or {})
+    return _parse_iso_utc(game_info.get("firstPitch"))
+
+
+def scheduled_start(feed: dict) -> datetime | None:
+    """
+    Scheduled start from feed/live → gameData.datetime.dateTime, as aware UTC.
+    Lets the shadow monitor measure scheduled-vs-actual drift per game. None when
+    absent or a placeholder (statsapi uses a blank/epoch for TBD starts)."""
+    dt = (((feed or {}).get("gameData") or {}).get("datetime") or {})
+    return _parse_iso_utc(dt.get("dateTime"))
 
 
 def is_clean_final(game: dict) -> bool:

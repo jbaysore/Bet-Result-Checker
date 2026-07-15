@@ -48,7 +48,32 @@ def _format_preview_row(bet: dict, classification: dict) -> str:
 
 
 def _restore_na(bet: dict) -> bool:
-    return write_closing_odds(bet["row_idx"], bet["bet_id"], "N/A", None, None)
+    return write_closing_odds(
+        bet["row_idx"], bet["bet_id"], "N/A", None, None,
+        provenance=_retry_provenance(),
+    )
+
+
+def _retry_provenance(result: dict | None = None) -> dict:
+    result = result or {}
+    resolution = result.get("actual_start_resolution")
+    actual = getattr(resolution, "actual_start", None)
+    confidence = getattr(resolution, "confidence", "UNRESOLVED")
+    quality = result.get("closing_quality") or "PROVISIONAL"
+    return {
+        "start_status": result.get("start_status") or (
+            "VERIFIED" if actual and confidence == "CONFIDENT" else (
+                "UNVERIFIED" if actual else "UNKNOWN"
+            )
+        ),
+        "closing_quality": quality,
+        "closing_source": "recovery-historical",
+        "closing_observed_at": result.get("closing_observed_at") or "",
+        "start_detected_at": "",
+        "actual_start": actual.isoformat().replace("+00:00", "Z") if actual else "",
+        "actual_start_source": getattr(resolution, "source", ""),
+        "actual_start_confidence": confidence,
+    }
 
 
 def _process_bet(
@@ -70,7 +95,7 @@ def _process_bet(
     clear_market_key_cell(row_idx, bet_id)
 
     # Always cascade main → alternate markets; ignore any prior Market Key stamp.
-    fetch_bet = {**bet, "market_key": ""}
+    fetch_bet = {**bet, "market_key": "", "_resolve_actual_start": True}
 
     try:
         result = (
@@ -80,7 +105,10 @@ def _process_bet(
         )
     except Exception as e:
         if leave_error:
-            write_closing_odds(row_idx, bet_id, "SELECTION NOT FOUND", None, None)
+            write_closing_odds(
+                row_idx, bet_id, "SELECTION NOT FOUND", None, None,
+                provenance=_retry_provenance(),
+            )
         else:
             _restore_na(bet)
         outcome["detail"] = str(e)
@@ -93,6 +121,7 @@ def _process_bet(
             result["closing_odds"],
             result.get("decimal_closing"),
             result.get("clv"),
+            provenance=_retry_provenance(result),
         )
         if ok:
             if backfill_market_key:
@@ -109,7 +138,10 @@ def _process_bet(
     error_code = result.get("error")
     if error_code:
         if leave_error:
-            write_closing_odds(row_idx, bet_id, error_code, None, None)
+            write_closing_odds(
+                row_idx, bet_id, error_code, None, None,
+                provenance=_retry_provenance(result),
+            )
             outcome["detail"] = error_code
         else:
             _restore_na(bet)
@@ -118,7 +150,10 @@ def _process_bet(
 
     # Transient (API timeout, 422 on a market, etc.) — restore N/A, not blank.
     if leave_error:
-        write_closing_odds(row_idx, bet_id, "SELECTION NOT FOUND", None, None)
+        write_closing_odds(
+            row_idx, bet_id, "SELECTION NOT FOUND", None, None,
+            provenance=_retry_provenance(),
+        )
         outcome["detail"] = "transient failure — wrote SELECTION NOT FOUND"
     else:
         _restore_na(bet)

@@ -439,7 +439,8 @@ def write_closing_odds(row_idx: int, bet_id: str,
                        closing_odds: str,
                        decimal_closing: float | None,
                        clv: float | None,
-                       overwrite_errors: bool = True) -> bool:
+                       overwrite_errors: bool = True,
+                       provenance: dict | None = None) -> bool:
     """
     Writes ClosingOdds, DecimalClosingOdds, and CLV to a bet row atomically.
 
@@ -463,9 +464,25 @@ def write_closing_odds(row_idx: int, bet_id: str,
     clv_col      = idx.get("clv")
     bet_id_col   = idx.get("bet_id")
 
+    provenance_keys = (
+        "start_status", "closing_quality", "closing_source",
+        "closing_observed_at", "start_detected_at", "actual_start",
+        "actual_start_source", "actual_start_confidence",
+        "pinnacle_close", "pinnacle_clv",
+    )
+
     if None in (closing_col, bet_id_col):
         print(f"[sheets_writer] ⚠️  Bets tab is missing ClosingOdds or BetID column -- "
               f"cannot write closing odds to row {row_idx}.")
+        return False
+    if provenance is None:
+        print(f"[sheets_writer] refusing unguarded closing write for row {row_idx}; "
+              "provenance payload is required")
+        return False
+    missing = [key for key in provenance_keys[:8] if idx.get(key) is None]
+    if missing:
+        print(f"[sheets_writer] refusing unguarded closing write for row {row_idx}; "
+              f"missing provenance columns: {', '.join(missing)}")
         return False
 
     try:
@@ -501,6 +518,10 @@ def write_closing_odds(row_idx: int, bet_id: str,
             cells.append(gspread.Cell(row_idx, decimal_col, decimal_closing))
         if clv is not None and clv_col is not None:
             cells.append(gspread.Cell(row_idx, clv_col, clv))
+        for key in provenance_keys:
+            col = idx.get(key)
+            if col is not None and key in provenance:
+                cells.append(gspread.Cell(row_idx, col, provenance.get(key) or ""))
 
         sheet.update_cells(cells)
         print(f"[sheets_writer] ✅ Row {row_idx} (BetID: {bet_id}) → "
@@ -516,6 +537,40 @@ def write_closing_odds(row_idx: int, bet_id: str,
     except Exception as e:
         print(f"[sheets_writer] ❌ Unexpected error writing closing odds to row {row_idx} "
               f"(BetID: {bet_id}): {e}")
+        return False
+
+
+def write_closing_capture_audit(bet_id: str, payload: dict) -> bool:
+    """Persist per-leg/Pinnacle reproducibility JSON on the durable audit tab."""
+    import json
+    from datetime import datetime, timezone
+    from sheets_reader import _get_spreadsheet
+    try:
+        tab = _get_spreadsheet().worksheet("ClosingCapture")
+        rows = tab.get_all_values()
+        if not rows:
+            return False
+        headers = rows[0]
+        if "BetID" not in headers or "Per-Leg/Pinnacle Audit JSON" not in headers:
+            return False
+        bet_col = headers.index("BetID")
+        audit_col = headers.index("Per-Leg/Pinnacle Audit JSON") + 1
+        matching = [idx for idx, row in enumerate(rows[1:], start=2)
+                    if bet_col < len(row) and str(row[bet_col]).strip() == str(bet_id).strip()]
+        value = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+        if matching:
+            tab.update_cell(matching[-1], audit_col, value)
+        else:
+            now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            values = {
+                "BetID": str(bet_id), "Status": "COMPLETED",
+                "Finalized At": now, "Created At": now, "Updated At": now,
+                "Per-Leg/Pinnacle Audit JSON": value,
+            }
+            tab.append_row([values.get(header, "") for header in headers], value_input_option="RAW")
+        return True
+    except Exception as exc:
+        print(f"[sheets_writer] could not persist ClosingCapture audit for BetID {bet_id}: {exc}")
         return False
 
 

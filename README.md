@@ -112,12 +112,16 @@ The worker uses a durable `ClosingCapture` tab in the tracking spreadsheet:
 1. `odds-tool` registers eligible single-selection pregame bets when they are
    logged. The worker also reconciles the Bets tab every 15 minutes so manual
    rows and temporary registration failures are recovered.
-2. The worker captures one live sample in each T-10, T-5, and T-1 window.
-3. At T-1 it writes the latest successful sample to `ClosingOdds`,
-   `DecimalClosingOdds`, and `CLV`.
-4. It never overwrites any nonblank `ClosingOdds` value. If no proactive sample
-   succeeds, the queue row becomes `FALLBACK` and the existing historical
-   checker handles it after kickoff.
+2. A fresh `/scores` response supplies the live/pregame state. The worker keeps
+   four rolling samples by default (price, fetch time, bookmaker update time,
+   and observed start state) at a 90-second cadence.
+3. When live is detected, it selects the newest verified-pregame sample at
+   least 90 seconds earlier. Quote age and the bookmaker's own timestamp decide
+   whether the value is `VERIFIED_CLOSE` or `STALE`; a delayed event that is
+   still explicitly pregame keeps sampling beyond its scheduled time.
+4. Closing odds, CLV, start provenance, and any fresh Pinnacle benchmark are
+   written together. Missing provenance columns or migration marker fail
+   closed, and nonblank `ClosingOdds` is never overwritten.
 
 For live capture, spread and total lines are checked in both their main and
 alternate market families because a line can move from one family to the other
@@ -126,13 +130,18 @@ and `team_totals`) are fetched through The Odds API's event-specific endpoint.
 When an exact line is no longer offered, the queue records the available points
 in its error detail instead of only reporting `SELECTION NOT FOUND`.
 
-V1 deliberately excludes live bets, parlays, props, and books that require a
-venue-specific/manual source (Kalshi, Polymarket, BetOpenly). Novig and
+The proactive queue deliberately excludes live bets, parlays, props, and books
+that require a venue-specific/manual source (Kalshi and Polymarket). Novig and
 ProphetX use The Odds API's `us_ex` feed for both proactive and historical
-closing capture. The remaining books' historical, Kalshi-specific, or manual
-paths remain unchanged.
+closing capture. Historical/recovery parlays resolve and audit each leg
+separately; Kalshi uses its actual-start-aware candle path.
 
 ### Railway deployment
+
+Before enabling the service, run `python scripts/migrate_clv_provenance.py`
+once with the production sheet credentials. It appends the Bets provenance
+columns, stamps existing rows `LEGACY_UNAUDITED`, and records the explicit
+`clv-actual-start-v1` marker. The worker refuses to start without that marker.
 
 Create a Railway service from this repository. `railway.json` supplies the
 start command and restart policy. Set these service variables:
@@ -144,8 +153,14 @@ start command and restart policy. Set these service variables:
 | `ODDS_API_KEY` | Yes | The Odds API key |
 | `GOOGLE_APPLICATION_CREDENTIALS_JSON` | Yes | Full service-account JSON, entered as one Railway secret |
 | `CLOSING_CAPTURE_TAB` | No | `ClosingCapture` (default) |
-| `CLOSING_CAPTURE_POLL_SECONDS` | No | `30` (minimum 10) |
+| `CLOSING_CAPTURE_POLL_SECONDS` | No | `90` (minimum 10) |
 | `CLOSING_CAPTURE_RECONCILE_SECONDS` | No | `900` (minimum 300) |
+| `CLOSING_SAFETY_MARGIN_SECONDS` | No | `90` |
+| `CLOSING_MAX_SAMPLE_AGE_SECONDS` | No | `300` |
+| `CLOSING_BOOK_STALE_SECONDS` | No | `600` |
+| `CLOSING_SAMPLE_CADENCE_SECONDS` | No | `90` |
+| `CLOSING_SAMPLE_SLOTS` | No | `4` |
+| `CLOSING_DAILY_SOFT_BUDGET` | No | `2500` (slows at 70%, then scores-only) |
 
 The service account needs edit access to the spreadsheet. On first startup the
 worker creates the queue tab if `odds-tool` has not already created it. A healthy

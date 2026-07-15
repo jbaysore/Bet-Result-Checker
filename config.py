@@ -90,6 +90,20 @@ BET_COL = {
     # Written by the odds-tool at log time so closing odds can query the
     # correct market in one call. Blank for legacy rows — cascade handles them.
     "market_key":      "Market Key",
+    # Actual-start-aware closing-line provenance. These are resolved by header
+    # name so they may be appended to the live sheet without reordering it.
+    "event_id":             "Event ID",
+    "start_status":         "Start Status",
+    "closing_quality":      "Closing Quality",
+    "closing_source":       "Closing Source",
+    "closing_observed_at":  "Closing Observed At",
+    "start_detected_at":    "Start Detected At",
+    "actual_start":         "Actual Start",
+    "actual_start_source":  "Actual Start Source",
+    "actual_start_confidence": "Actual Start Confidence",
+    "start_audit":          "Start Audit",
+    "pinnacle_close":       "Pinnacle Close",
+    "pinnacle_clv":         "Pinnacle CLV",
 }
 
 # ── Bet types ─────────────────────────────────────────────────────

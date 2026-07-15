@@ -95,7 +95,9 @@ def test_closing_odds_routes_kalshi_with_ticker(monkeypatch):
         "kalshi_ticker": "KXMLBGAME-26JUL042210SDLAD-SD",
     }
     res = closing_odds._fetch_closing_price(bet, "BetID 1")
-    assert res == {"price": -150, "error": None}
+    assert res["price"] == -150
+    assert res["error"] is None
+    assert res["closing_quality"] == "PROVISIONAL"
 
 
 def _patch_market(monkeypatch, market):

@@ -232,6 +232,12 @@ def main():
                     if (bet.get("result") or "").strip().upper() == RESULT_VOID:
                         success = write_closing_odds(
                             bet["row_idx"], bet["bet_id"], "VOID", None, None,
+                            provenance={
+                                "start_status": "UNKNOWN", "closing_quality": "PROVISIONAL",
+                                "closing_source": "historical", "closing_observed_at": "",
+                                "start_detected_at": "", "actual_start": "",
+                                "actual_start_source": "", "actual_start_confidence": "UNRESOLVED",
+                            },
                         )
                         if success:
                             closing_results["captured"] += 1
@@ -241,17 +247,47 @@ def main():
                         print()
                         continue
 
+                    bet["_resolve_actual_start"] = True
                     result = (fetch_parlay_closing_odds(bet)
                               if bet.get("is_parlay")
                               else fetch_closing_odds(bet))
                     if result["closing_odds"] is not None:
+                        resolution = result.get("actual_start_resolution")
+                        resolved_actual = resolution.actual_start if resolution else None
+                        resolved_confidence = resolution.confidence if resolution else "UNRESOLVED"
                         success = write_closing_odds(
                             bet["row_idx"], bet["bet_id"],
                             result["closing_odds"],
                             result["decimal_closing"],
                             result["clv"],
+                            provenance={
+                                "start_status": result.get("start_status") or (
+                                    "VERIFIED" if resolved_actual and resolved_confidence == "CONFIDENT" else (
+                                        "UNVERIFIED" if resolved_actual else "UNKNOWN"
+                                    )
+                                ),
+                                "closing_quality": result.get("closing_quality") or "PROVISIONAL",
+                                "closing_source": "historical",
+                                "closing_observed_at": result.get("closing_observed_at") or "",
+                                "start_detected_at": "",
+                                "actual_start": (
+                                    resolved_actual.isoformat().replace("+00:00", "Z")
+                                    if resolved_actual else ""
+                                ),
+                                "actual_start_source": (
+                                    resolution.source if resolution else ""
+                                ),
+                                "actual_start_confidence": (
+                                    resolved_confidence
+                                ),
+                            },
                         )
                         if success:
+                            if result.get("per_leg_audit"):
+                                from sheets_writer import write_closing_capture_audit
+                                write_closing_capture_audit(
+                                    bet["bet_id"], {"legs": result["per_leg_audit"]},
+                                )
                             from sheets_writer import clear_closing_odds_fail_streak
                             clear_closing_odds_fail_streak(bet["row_idx"], bet["bet_id"])
                             closing_results["captured"] += 1
@@ -269,6 +305,12 @@ def main():
                         wrote = write_closing_odds(
                             bet["row_idx"], bet["bet_id"],
                             result["error"], None, None,
+                            provenance={
+                                "start_status": "UNKNOWN", "closing_quality": "PROVISIONAL",
+                                "closing_source": "historical", "closing_observed_at": "",
+                                "start_detected_at": "", "actual_start": "",
+                                "actual_start_source": "", "actual_start_confidence": "UNRESOLVED",
+                            },
                         )
                         if not wrote:
                             from sheets_writer import (
@@ -281,6 +323,12 @@ def main():
                             if exhausted:
                                 write_closing_odds(
                                     bet["row_idx"], bet["bet_id"], "N/A", None, None,
+                                    provenance={
+                                        "start_status": "UNKNOWN", "closing_quality": "PROVISIONAL",
+                                        "closing_source": "historical", "closing_observed_at": "",
+                                        "start_detected_at": "", "actual_start": "",
+                                        "actual_start_source": "", "actual_start_confidence": "UNRESOLVED",
+                                    },
                                 )
                                 clear_closing_odds_fail_streak(
                                     bet["row_idx"], bet["bet_id"],

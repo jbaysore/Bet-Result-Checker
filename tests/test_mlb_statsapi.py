@@ -1,6 +1,10 @@
 """Pure schedule/status matching for mlb_statsapi (offline)."""
 
-from sources.mlb_statsapi import find_game, is_clean_final, game_pk
+from datetime import datetime, timezone
+
+from sources.mlb_statsapi import (
+    find_game, is_clean_final, game_pk, first_pitch, scheduled_start,
+)
 
 
 def _game(away, home, pk=1, abstract="Final", detailed="Final"):
@@ -38,3 +42,28 @@ def test_is_clean_final_only_true_for_official_final():
     # Weather-shortened / suspended games are NOT a clean final → manual.
     assert is_clean_final(_game("A", "B", abstract="Final", detailed="Completed Early")) is False
     assert is_clean_final(_game("A", "B", abstract="Preview", detailed="Suspended")) is False
+
+
+def _feed(first=None, scheduled=None):
+    game_info = {}
+    if first is not None:
+        game_info["firstPitch"] = first
+    return {"gameData": {"gameInfo": game_info, "datetime": {"dateTime": scheduled}}}
+
+
+def test_first_pitch_parsed_to_utc():
+    fp = first_pitch(_feed(first="2026-06-14T23:15:00Z"))
+    assert fp == datetime(2026, 6, 14, 23, 15, tzinfo=timezone.utc)
+
+
+def test_first_pitch_none_until_game_starts():
+    # firstPitch is absent/blank pregame — the caller must not treat this as a start.
+    assert first_pitch(_feed(first=None)) is None
+    assert first_pitch(_feed(first="")) is None
+    assert first_pitch({}) is None
+
+
+def test_scheduled_start_parsed():
+    assert scheduled_start(_feed(scheduled="2026-06-14T23:05:00Z")) == datetime(
+        2026, 6, 14, 23, 5, tzinfo=timezone.utc)
+    assert scheduled_start(_feed(scheduled=None)) is None

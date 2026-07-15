@@ -44,6 +44,14 @@ def test_loader_rescans_error_codes_only(monkeypatch):
     assert ids == {"1", "2", "3"}
 
 
+def test_loader_excludes_blank_provenance_after_schema_cutover(monkeypatch):
+    headers = [*_HEADERS, "Start Status", "Closing Quality"]
+    blank = [*_row("20", ""), "", ""]
+    legacy = [*_row("21", ""), "LEGACY_UNAUDITED", ""]
+    monkeypatch.setattr(sheets_reader, "_get_bets_rows", lambda tab: [headers, blank, legacy])
+    assert [bet["bet_id"] for bet in sheets_reader.load_bets_needing_closing_odds("Bets")] == ["21"]
+
+
 # ── Writer: overwrite rules ────────────────────────────────────────────────────
 
 class _FakeSheet:
@@ -56,7 +64,12 @@ class _FakeSheet:
 
 def _patch_writer(monkeypatch, current_closing):
     """Make write_closing_odds see a single row whose BetID is '42'."""
-    col = {"closing_odds": 11, "decimal_closing": 12, "clv": 13, "bet_id": 1}
+    col = {
+        "closing_odds": 11, "decimal_closing": 12, "clv": 13, "bet_id": 1,
+        "start_status": 14, "closing_quality": 15, "closing_source": 16,
+        "closing_observed_at": 17, "start_detected_at": 18, "actual_start": 19,
+        "actual_start_source": 20, "actual_start_confidence": 21,
+    }
     monkeypatch.setattr(sheets_writer, "_bets_col_letter_lookup", lambda: col)
     sheet = _FakeSheet()
     monkeypatch.setattr(sheets_writer, "_get_sheet", lambda: sheet)
@@ -66,9 +79,17 @@ def _patch_writer(monkeypatch, current_closing):
     return sheet
 
 
+_PROVENANCE = {
+    "start_status": "UNKNOWN", "closing_quality": "PROVISIONAL",
+    "closing_source": "historical", "closing_observed_at": "",
+    "start_detected_at": "", "actual_start": "", "actual_start_source": "",
+    "actual_start_confidence": "UNRESOLVED",
+}
+
+
 def test_writer_overwrites_error_code_with_real_value(monkeypatch):
     sheet = _patch_writer(monkeypatch, CLOSING_ODDS_BOOK_NOT_FOUND)
-    ok = sheets_writer.write_closing_odds(2, "42", "-110", 1.909, 0.02)
+    ok = sheets_writer.write_closing_odds(2, "42", "-110", 1.909, 0.02, provenance=_PROVENANCE)
     assert ok is True
     assert len(sheet.updates) == 1  # actually wrote
 
@@ -76,7 +97,7 @@ def test_writer_overwrites_error_code_with_real_value(monkeypatch):
 def test_proactive_writer_refuses_to_overwrite_error_code(monkeypatch):
     sheet = _patch_writer(monkeypatch, CLOSING_ODDS_BOOK_NOT_FOUND)
     ok = sheets_writer.write_closing_odds(
-        2, "42", "-110", 1.909, 0.02, overwrite_errors=False,
+        2, "42", "-110", 1.909, 0.02, overwrite_errors=False, provenance=_PROVENANCE,
     )
     assert ok is False
     assert sheet.updates == []
@@ -84,27 +105,33 @@ def test_proactive_writer_refuses_to_overwrite_error_code(monkeypatch):
 
 def test_writer_refuses_to_overwrite_real_value(monkeypatch):
     sheet = _patch_writer(monkeypatch, "-110")
-    ok = sheets_writer.write_closing_odds(2, "42", "-120", 1.83, 0.01)
+    ok = sheets_writer.write_closing_odds(2, "42", "-120", 1.83, 0.01, provenance=_PROVENANCE)
     assert ok is False
     assert sheet.updates == []  # nothing written
 
 
 def test_writer_refuses_to_overwrite_na(monkeypatch):
     sheet = _patch_writer(monkeypatch, "N/A")
-    ok = sheets_writer.write_closing_odds(2, "42", "-110", 1.909, 0.02)
+    ok = sheets_writer.write_closing_odds(2, "42", "-110", 1.909, 0.02, provenance=_PROVENANCE)
     assert ok is False
     assert sheet.updates == []
 
 
 def test_writer_noops_on_identical_error_code(monkeypatch):
     sheet = _patch_writer(monkeypatch, CLOSING_ODDS_BOOK_NOT_FOUND)
-    ok = sheets_writer.write_closing_odds(2, "42", CLOSING_ODDS_BOOK_NOT_FOUND, None, None)
+    ok = sheets_writer.write_closing_odds(2, "42", CLOSING_ODDS_BOOK_NOT_FOUND, None, None, provenance=_PROVENANCE)
     assert ok is False           # no-op signalled
     assert sheet.updates == []   # cell not churned
 
 
 def test_writer_updates_error_code_to_different_code(monkeypatch):
     sheet = _patch_writer(monkeypatch, CLOSING_ODDS_BOOK_NOT_FOUND)
-    ok = sheets_writer.write_closing_odds(2, "42", CLOSING_ODDS_GAME_NOT_FOUND, None, None)
+    ok = sheets_writer.write_closing_odds(2, "42", CLOSING_ODDS_GAME_NOT_FOUND, None, None, provenance=_PROVENANCE)
     assert ok is True
     assert len(sheet.updates) == 1
+
+
+def test_writer_refuses_missing_provenance_payload(monkeypatch):
+    sheet = _patch_writer(monkeypatch, "")
+    assert sheets_writer.write_closing_odds(2, "42", "-110", 1.909, 0.02) is False
+    assert sheet.updates == []
