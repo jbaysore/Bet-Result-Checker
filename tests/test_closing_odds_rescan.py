@@ -44,12 +44,29 @@ def test_loader_rescans_error_codes_only(monkeypatch):
     assert ids == {"1", "2", "3"}
 
 
-def test_loader_excludes_blank_provenance_after_schema_cutover(monkeypatch):
+def test_loader_repairs_blank_provenance_when_no_live_capture_owns_it(monkeypatch):
     headers = [*_HEADERS, "Start Status", "Closing Quality"]
     blank = [*_row("20", ""), "", ""]
     legacy = [*_row("21", ""), "LEGACY_UNAUDITED", ""]
     monkeypatch.setattr(sheets_reader, "_get_bets_rows", lambda tab: [headers, blank, legacy])
-    assert [bet["bet_id"] for bet in sheets_reader.load_bets_needing_closing_odds("Bets")] == ["21"]
+    monkeypatch.setattr(sheets_reader, "_active_closing_capture_bet_ids", lambda: set())
+    assert [bet["bet_id"] for bet in sheets_reader.load_bets_needing_closing_odds("Bets")] == ["20", "21"]
+
+
+def test_loader_keeps_blank_provenance_fail_closed_while_capture_is_active(monkeypatch):
+    headers = [*_HEADERS, "Start Status", "Closing Quality"]
+    blank = [*_row("20", ""), "", ""]
+    monkeypatch.setattr(sheets_reader, "_get_bets_rows", lambda tab: [headers, blank])
+    monkeypatch.setattr(sheets_reader, "_active_closing_capture_bet_ids", lambda: {"20"})
+    assert sheets_reader.load_bets_needing_closing_odds("Bets") == []
+
+
+def test_loader_keeps_blank_provenance_fail_closed_when_queue_read_fails(monkeypatch):
+    headers = [*_HEADERS, "Start Status", "Closing Quality"]
+    blank = [*_row("20", ""), "", ""]
+    monkeypatch.setattr(sheets_reader, "_get_bets_rows", lambda tab: [headers, blank])
+    monkeypatch.setattr(sheets_reader, "_active_closing_capture_bet_ids", lambda: None)
+    assert sheets_reader.load_bets_needing_closing_odds("Bets") == []
 
 
 # ── Writer: overwrite rules ────────────────────────────────────────────────────

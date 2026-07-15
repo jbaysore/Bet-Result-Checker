@@ -1,0 +1,60 @@
+{
+  "aggregate_clv": {
+    "all": {
+      "average": 1.4755081967213115,
+      "count": 305
+    },
+    "without_bucket": {
+      "INDETERMINATE": {
+        "average": 1.661086956521739,
+        "count": 276
+      },
+      "LIKELY_SUSPECT": {
+        "average": 1.5521830985915492,
+        "count": 284
+      },
+      "SAFE": {
+        "average": 2.0551612903225807,
+        "count": 217
+      },
+      "UNRESOLVABLE": {
+        "average": 0.03507246376811595,
+        "count": 138
+      }
+    }
+  },
+  "buckets": {
+    "INDETERMINATE": 32,
+    "LIKELY_SUSPECT": 24,
+    "SAFE": 118,
+    "UNRESOLVABLE": 207
+  },
+  "clv_by_bucket": {
+    "INDETERMINATE": {
+      "average": -0.2906896551724138,
+      "count": 29
+    },
+    "LIKELY_SUSPECT": {
+      "average": 0.4385714285714286,
+      "count": 21
+    },
+    "SAFE": {
+      "average": 0.046136363636363635,
+      "count": 88
+    },
+    "UNRESOLVABLE": {
+      "average": 2.665808383233533,
+      "count": 167
+    }
+  },
+  "clv_pooled_safe_only": [
+    "SAFE"
+  ],
+  "delta_seconds": {
+    "max": 62760.0,
+    "median": 60.0,
+    "min": -18000.0
+  },
+  "generated_at": "2026-07-15T22:58:43.352710Z",
+  "rows": 381
+}

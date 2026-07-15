@@ -45,6 +45,22 @@ _snapshot_cache: dict[tuple[str, str, str, str], list | None] = {}
 _live_snapshot_cache: dict[tuple, tuple[float, list]] = {}
 _live_events_cache: dict[str, tuple[float, list]] = {}
 _LIVE_SNAPSHOT_TTL_SECONDS = 20
+_live_credit_total = 0
+
+
+def _record_live_response_credits(response) -> None:
+    """Accumulate actual live-call costs, including market cascades."""
+    global _live_credit_total
+    try:
+        charged = max(0, int(response.headers.get("x-requests-last")))
+    except (AttributeError, TypeError, ValueError):
+        charged = 1
+    _live_credit_total += charged
+
+
+def live_credit_total() -> int:
+    """Monotonic process-local total used by the capture worker's budget."""
+    return _live_credit_total
 
 # Odds API market keys that share spread-style extraction (team + point).
 _SPREAD_MARKETS = frozenset({"spreads", "alternate_spreads", "spreads_h1"})
@@ -456,6 +472,7 @@ def _fetch_live_events(sport: str) -> list:
     url = f"{ODDS_API_BASE}/sports/{sport}/events"
     try:
         resp = requests.get(url, params={"apiKey": ODDS_API_KEY, "dateFormat": "iso"}, timeout=15)
+        _record_live_response_credits(resp)
         if resp.status_code == 401:
             raise RuntimeError("invalid Odds API key")
         if resp.status_code == 429:
@@ -497,6 +514,7 @@ def _fetch_live_snapshot(sport: str, book_key: str, market: str,
     }
     try:
         resp = requests.get(url, params=params, timeout=15)
+        _record_live_response_credits(resp)
         if resp.status_code == 401:
             raise RuntimeError("invalid Odds API key")
         if resp.status_code == 422:

@@ -14,6 +14,7 @@ from closing_odds import (
     _fetch_live_events,
     fetch_live_closing_odds,
     find_event,
+    live_credit_total,
     needs_manual_closing_odds,
     parse_selection,
     to_decimal_odds,
@@ -54,6 +55,11 @@ POLL_SECONDS = max(10, int(os.getenv("CLOSING_CAPTURE_POLL_SECONDS", str(SAMPLE_
 RECONCILE_SECONDS = max(300, int(os.getenv("CLOSING_CAPTURE_RECONCILE_SECONDS", "900")))
 DAILY_SOFT_BUDGET = max(1, int(os.getenv("CLOSING_DAILY_SOFT_BUDGET", "2500")))
 SLOW_BUDGET_FRACTION = min(1.0, max(0.1, float(os.getenv("CLOSING_SLOW_BUDGET_FRACTION", "0.70"))))
+TRACK_BEFORE_COMMENCE_SECONDS = max(
+    60, int(os.getenv("CLOSING_TRACK_BEFORE_COMMENCE_SECONDS", "900"))
+)
+UNKNOWN_GRACE_SECONDS = max(0, int(os.getenv("CLOSING_UNKNOWN_GRACE_SECONDS", "300")))
+CRITICAL_WINDOW_SECONDS = max(60, int(os.getenv("CLOSING_CRITICAL_WINDOW_SECONDS", "300")))
 _budget_day = ""
 _estimated_daily_credits = 0
 
@@ -218,7 +224,10 @@ def _record_credits(value, fallback: int = 0) -> None:
 def credit_mode() -> str:
     _record_credits(0)
     if _estimated_daily_credits >= DAILY_SOFT_BUDGET:
-        return "scores-only"
+        # Preserve the core same-book close inside the final five minutes.  At
+        # the soft ceiling we drop Pinnacle and non-critical samples, not the
+        # actual closing capture the worker exists to obtain.
+        return "critical"
     if _estimated_daily_credits >= DAILY_SOFT_BUDGET * SLOW_BUDGET_FRACTION:
         return "slow"
     return "full"
@@ -231,6 +240,24 @@ def sample_due(record: dict, now: datetime, cadence_seconds: int | None = None) 
     newest = max(samples, key=lambda sample: sample.fetched_at)
     cadence = cadence_seconds or SAMPLE_CADENCE_SECONDS
     return (now - newest.fetched_at).total_seconds() >= cadence
+
+
+def in_tracking_window(now: datetime, commence: datetime) -> bool:
+    return (
+        commence - timedelta(seconds=TRACK_BEFORE_COMMENCE_SECONDS)
+        <= now
+        <= commence + timedelta(seconds=CAP_AFTER_COMMENCE_SECONDS)
+    )
+
+
+def critical_sample_allowed(now: datetime, commence: datetime, start_state: str) -> bool:
+    if now >= commence and start_state == "VERIFIED_PREGAME":
+        return True
+    return now >= commence - timedelta(seconds=CRITICAL_WINDOW_SECONDS)
+
+
+def unknown_finalize_due(now: datetime, commence: datetime) -> bool:
+    return now >= commence + timedelta(seconds=UNKNOWN_GRACE_SECONDS)
 
 
 def find_bet_row(bet_id: str) -> tuple[int | None, dict | None]:
@@ -351,6 +378,7 @@ def capture_record(tab, row_idx: int, record: dict, start_state: str,
                    cadence_seconds: int | None = None):
     if not sample_due(record, now, cadence_seconds):
         return
+    credits_before = live_credit_total()
     result = fetch_live_closing_odds({
         "bet_id": record["BetID"], "sport": record["Sport"],
         "book": record["Book"], "team1": record["Team 1"],
@@ -358,10 +386,7 @@ def capture_record(tab, row_idx: int, record: dict, start_state: str,
         "bet_type": record["Bet Type"], "market_key": record["Market Key"],
         "commence_utc": record.get("Commence UTC", ""),
     })
-    # The live helper batches/cache-deduplicates calls but does not expose
-    # response headers. Counting one unit per attempted capture intentionally
-    # overestimates usage and makes the soft-budget degradation conservative.
-    _record_credits(None, fallback=1)
+    _record_credits(live_credit_total() - credits_before)
     fetched_at = parse_utc(result.get("fetched_at")) or now
     slot = next_sample_slot(record)
     price = result.get("closing_odds") or ""
@@ -398,7 +423,10 @@ def _resolve_event_id(record: dict, games: list, commence: datetime,
     event_id = str(record.get("Event ID", "")).strip()
     if event_id:
         return event_id
-    event = find_event(games, record.get("Team 1", ""), record.get("Team 2", ""), commence)
+    # Event-id backfill is deliberately stricter than price lookup.  A repeated
+    # matchup (notably an MLB doubleheader) is ambiguous without the original
+    # Odds API id, even when one commence time looks closer, so never guess.
+    event = find_event(games, record.get("Team 1", ""), record.get("Team 2", ""))
     if event and event.get("id"):
         return event["id"]
     sport = record.get("Sport", "")
@@ -407,7 +435,7 @@ def _resolve_event_id(record: dict, games: list, commence: datetime,
             roster_cache[sport] = _fetch_live_events(sport)
         except RuntimeError:
             roster_cache[sport] = []
-    event = find_event(roster_cache[sport], record.get("Team 1", ""), record.get("Team 2", ""), commence)
+    event = find_event(roster_cache[sport], record.get("Team 1", ""), record.get("Team 2", ""))
     return event.get("id") if event else None
 
 
@@ -422,8 +450,22 @@ def process_queue(tab, now: datetime | None = None):
     records = [(idx, row_record(headers, row)) for idx, row in enumerate(rows[1:], start=2)]
     active = [(idx, rec) for idx, rec in records
               if rec.get("BetID") and rec.get("Status") not in FINAL_STATUSES]
+    parsed_active = []
+    for row_idx, record in active:
+        commence = parse_utc(record.get("Commence UTC", ""))
+        if commence is None:
+            update_queue_row(
+                tab, row_idx,
+                {"Status": "INVALID", "Last Error": "Invalid Commence UTC"}, headers,
+            )
+            continue
+        parsed_active.append((row_idx, record, commence))
+
+    # H1: rows can enter the queue days in advance, but no paid polling begins
+    # until T-15.  Rows already beyond the cap are finalized locally below.
+    tracking = [item for item in parsed_active if in_tracking_window(now, item[2])]
     scores_by_sport = {}
-    for sport in {rec.get("Sport", "") for _, rec in active}:
+    for sport in {rec.get("Sport", "") for _, rec, _ in tracking}:
         if not sport:
             continue
         scores_by_sport[sport] = fetch_scores_live(sport)
@@ -432,9 +474,9 @@ def process_queue(tab, now: datetime | None = None):
         print(f"[closing-capture] scores {sport} credits: last={score_credits.get('last')} "
               f"used={score_credits.get('used')} remaining={score_credits.get('remaining')}")
     mode = credit_mode()
-    cadence_seconds = SAMPLE_CADENCE_SECONDS * (2 if mode == "slow" else 1)
+    cadence_seconds = SAMPLE_CADENCE_SECONDS * (2 if mode in {"slow", "critical"} else 1)
     pinnacle_by_sport = {}
-    if mode != "scores-only":
+    if mode != "critical":
         for sport in scores_by_sport:
             pinnacle_by_sport[sport] = fetch_pinnacle_featured(sport)
             pinnacle_credits = pinnacle_by_sport[sport].get("credits", {})
@@ -445,10 +487,25 @@ def process_queue(tab, now: datetime | None = None):
           f"{_estimated_daily_credits}/{DAILY_SOFT_BUDGET}; cadence={cadence_seconds}s")
     roster_cache: dict[str, list] = {}
 
-    for row_idx, record in active:
-        commence = parse_utc(record.get("Commence UTC", ""))
-        if commence is None:
-            update_queue_row(tab, row_idx, {"Status": "INVALID", "Last Error": "Invalid Commence UTC"}, headers)
+    for row_idx, record, commence in parsed_active:
+        if now < commence - timedelta(seconds=TRACK_BEFORE_COMMENCE_SECONDS):
+            continue
+        if now > commence + timedelta(seconds=CAP_AFTER_COMMENCE_SECONDS):
+            samples = samples_from_record(record)
+            verified = max(
+                (sample for sample in samples if sample.start_state == "VERIFIED_PREGAME"),
+                key=lambda item: item.fetched_at, default=None,
+            )
+            sample = verified or max(samples, key=lambda item: item.fetched_at, default=None)
+            trusted = record.get("Sport", "") in TRUSTED_FLIP_SPORTS
+            finalize(
+                tab, row_idx, record, sample.price if sample else None,
+                start_status=(START_VERIFIED if verified and trusted else (
+                    START_UNVERIFIED if sample else START_UNKNOWN
+                )),
+                quality=(QUALITY_EARLY if verified and trusted else QUALITY_PROVISIONAL),
+                sample=sample, headers=headers,
+            )
             continue
         sport = record.get("Sport", "")
         scores = scores_by_sport.get(sport)
@@ -494,7 +551,7 @@ def process_queue(tab, now: datetime | None = None):
                      sample=sample, headers=headers)
             continue
 
-        if now >= commence and sample_state == "UNKNOWN":
+        if unknown_finalize_due(now, commence) and sample_state == "UNKNOWN":
             samples = samples_from_record(record)
             sample = max(samples, key=lambda item: item.fetched_at, default=None)
             finalize(tab, row_idx, record, sample.price if sample else None,
@@ -504,7 +561,10 @@ def process_queue(tab, now: datetime | None = None):
 
         # Keep sampling after scheduled commence only when a fresh, trusted
         # scores response explicitly proves the event is still pregame.
-        if mode != "scores-only" and (now < commence or sample_state == "VERIFIED_PREGAME"):
+        may_sample = now < commence or sample_state == "VERIFIED_PREGAME"
+        if (may_sample and (
+                mode != "critical" or critical_sample_allowed(now, commence, sample_state)
+        )):
             pinnacle = pinnacle_by_sport.get(sport) or {}
             capture_record(tab, row_idx, record, sample_state, now, headers,
                            pinnacle.get("events") if pinnacle.get("ok") else None,

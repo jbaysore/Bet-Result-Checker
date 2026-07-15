@@ -93,14 +93,26 @@ def _matches_selected(outcome: dict, selection: dict, mode: str) -> bool:
         )
     if mode == "spread":
         wanted = str(selection.get("selection_team") or "")
-        return (wanted.lower() in name.lower() or name.lower() in wanted.lower()) and abs(
-            float(outcome.get("point")) - float(selection.get("selection_point"))
-        ) < 1e-6
+        return (wanted.lower() in name.lower() or name.lower() in wanted.lower()) and _points_equal(
+            outcome.get("point"), selection.get("selection_point")
+        )
     if mode == "total":
-        return name.lower() == selection.get("selection_side") and abs(
-            float(outcome.get("point")) - float(selection.get("selection_point"))
-        ) < 1e-6
+        return name.lower() == selection.get("selection_side") and _points_equal(
+            outcome.get("point"), selection.get("selection_point")
+        )
     return False
+
+
+def _point(value) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _points_equal(left, right) -> bool:
+    a, b = _point(left), _point(right)
+    return a is not None and b is not None and abs(a - b) < 1e-6
 
 
 def pinnacle_quote_for_bet(events: list, bet: dict) -> dict | None:
@@ -128,13 +140,20 @@ def pinnacle_quote_for_bet(events: list, bet: dict) -> dict | None:
     if not selected:
         return None
     if mode == "spread":
-        point = float(selected.get("point"))
+        point = _point(selected.get("point"))
+        if point is None:
+            return None
         market_outcomes = [outcome for outcome in outcomes if (
-            outcome is selected or abs(float(outcome.get("point", 999999)) + point) < 1e-6
+            outcome is selected or (
+                _point(outcome.get("point")) is not None
+                and abs(_point(outcome.get("point")) + point) < 1e-6
+            )
         )]
     elif mode == "total":
-        point = float(selected.get("point"))
-        market_outcomes = [outcome for outcome in outcomes if abs(float(outcome.get("point", 999999)) - point) < 1e-6]
+        point = _point(selected.get("point"))
+        if point is None:
+            return None
+        market_outcomes = [outcome for outcome in outcomes if _points_equal(outcome.get("point"), point)]
     else:
         market_outcomes = outcomes
     if len(market_outcomes) not in (2, 3) or selected not in market_outcomes:

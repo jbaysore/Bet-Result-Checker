@@ -155,12 +155,15 @@ start command and restart policy. Set these service variables:
 | `CLOSING_CAPTURE_TAB` | No | `ClosingCapture` (default) |
 | `CLOSING_CAPTURE_POLL_SECONDS` | No | `90` (minimum 10) |
 | `CLOSING_CAPTURE_RECONCILE_SECONDS` | No | `900` (minimum 300) |
+| `CLOSING_TRACK_BEFORE_COMMENCE_SECONDS` | No | `900` (paid polling starts at T-15) |
 | `CLOSING_SAFETY_MARGIN_SECONDS` | No | `90` |
 | `CLOSING_MAX_SAMPLE_AGE_SECONDS` | No | `300` |
 | `CLOSING_BOOK_STALE_SECONDS` | No | `600` |
 | `CLOSING_SAMPLE_CADENCE_SECONDS` | No | `90` |
 | `CLOSING_SAMPLE_SLOTS` | No | `4` |
-| `CLOSING_DAILY_SOFT_BUDGET` | No | `2500` (slows at 70%, then scores-only) |
+| `CLOSING_UNKNOWN_GRACE_SECONDS` | No | `300` (wait through transient score failures) |
+| `CLOSING_CRITICAL_WINDOW_SECONDS` | No | `300` (same-book capture retained at budget ceiling) |
+| `CLOSING_DAILY_SOFT_BUDGET` | No | `2500` (slows at 70%; at the ceiling drops Pinnacle/non-critical samples but preserves the close) |
 
 The service account needs edit access to the spreadsheet. On first startup the
 worker creates the queue tab if `odds-tool` has not already created it. A healthy

@@ -40,3 +40,19 @@ def test_pinnacle_requires_exact_point_and_devigs_full_market():
         "event_id": "event-1", "bet_type": "Total", "selection": "Over 10.5",
         "team1": "Away", "team2": "Home",
     }) is None
+
+
+def test_pinnacle_missing_points_fail_closed_instead_of_raising():
+    events = [{
+        "id": "event-1",
+        "bookmakers": [{"key": "pinnacle", "markets": [{
+            "key": "spreads", "outcomes": [
+                {"name": "Away", "price": -110},
+                {"name": "Home", "point": 3.5, "price": -110},
+            ],
+        }]}],
+    }]
+    assert pinnacle_quote_for_bet(events, {
+        "event_id": "event-1", "bet_type": "Spread", "selection": "Away -3.5",
+        "team1": "Away", "team2": "Home",
+    }) is None

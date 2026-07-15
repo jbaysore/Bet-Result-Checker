@@ -428,3 +428,104 @@ freshness. Keep the defaults unless the shadow/capture data supports changing
 them. If any required margin exceeds approximately 180 seconds, implement the
 plan's append-only samples-tab escape hatch before increasing rolling-slot
 requirements further.
+
+---
+
+# Implementation Audit — 2026-07-15 (post-implementation review)
+
+Audited commit `8134dc2` (Bet-Result-Checker) + current odds-tool tree against rev 3. Test suites: **374 passed (Python), 552 passed (JS), 0 failures** — including the Python/JS power-devig parity fixture. The Phase 6 audit was already run against the live sheet (381 legacy rows stamped).
+
+## Verified correct (spot-checked against source, not just tests)
+
+- **§2.1/2.2 model**: three start states with UNKNOWN fail-closed; `Start Status` vs `Closing Quality` split; margin (90s) + max-age (5 min) + book-quote freshness all enforced at finalize (`closing_provenance.py`); `quote_is_fresh` treats a missing `book_last_update` as not-fresh (strict, correct).
+- **Guarded single write**: `write_closing_odds` refuses to write without a provenance payload or with the 8 provenance columns missing; odds-tool's manual-entry endpoint has the same refusal.
+- **Migration**: `SchemaMigrations` marker, fail-closed worker startup (`require_migration_marker`), LEGACY_UNAUDITED backfill, prefix-tolerant queue-header validation on BOTH repos, extension columns addressed by name — the staged migration is as specified.
+- **Phase 2**: importer targets `actual_start − 90s` in either direction when CONFIDENT (→ VERIFIED_CLOSE, downgraded to STALE when the book quote wasn't fresh in the snapshot); `min()` fallback → SAFE_BUT_EARLY/PROVISIONAL; resolvers for MLB (statsapi firstPitch via schedule-hydrate, feed/live fallback) + WNBA/MLS/World Cup (ESPN first-play wallclock); ambiguous ESPN match → UNRESOLVED, never guessed.
+- **Parlays**: per-leg resolution, worst-leg-wins combined quality, per-leg audit JSON persisted to ClosingCapture (`write_closing_capture_audit`).
+- **Kalshi**: candle window ends at actual start when resolved, `min(actual, scheduled)` otherwise.
+- **Scanner (Phase 3)**: `event_lifecycle` tombstone checked before price recording/opportunity computation and in upsert (`tombstoned` classification); reschedule-clear at >6h commence shift; purge wired into the existing pruner; `closing_samples` with at-or-before + freshness stamping (incl. `book_last_update`) on live detection; verified-PREGAME games stay alive past scheduled commence; `hardExpireCommenced` excludes them and now also reads closing_samples.
+- **Consumers (Phase 4)**: `clvQuality.mjs` implements the exact legacy contract (VERIFIED_CLOSE pooled; LEGACY_UNAUDITED pooled until `Start Audit`, then SAFE only; blank provenance on a post-migration row → excluded), used by StatsPage (excluded counts + include toggle) and Coach; JS mirrors Python `legacy_row_is_pooled`.
+- **Pinnacle (Phase 5)**: featured markets batched per sport; exact event-id + exact-point contract (point mismatch → no quote); 2-way and 3-way power devig (bisection) with shared vectors (`tests/fixtures/power_devig_vectors.json` ↔ `powerDevigParity.test.js`); reproducibility JSON in ClosingCapture; Bets carries only `Pinnacle Close`/`Pinnacle CLV`; Pinnacle quote freshness checked before writing.
+- **Recovery**: reads `Actual Start` from the sheet (checker is sole resolver); fingerprint now includes resolver version, actual start, confidence, and start status per leg.
+- **Phase 6 audit**: buckets per spec (strict `>` on the boundary → INDETERMINATE), flag-only, LEGACY_UNAUDITED rows only. **It was run**: 381 rows → SAFE 118 · LIKELY_SUSPECT 24 · INDETERMINATE 32 · UNRESOLVABLE 207; delta median +60s, min −5h, max +17.4h. Pooled-CLV averages: SAFE ≈ 0.05 vs UNRESOLVABLE ≈ 2.67 — inflated CLV concentrates almost entirely in UNRESOLVABLE rows (sports with no resolver: fight cards etc.), consistent with the Phase 0 prediction that MMA/boxing timing, not MLB early starts, is the main poison vector.
+
+## Findings
+
+### HIGH
+
+**H1 — No capture window: the worker samples from queue-entry, not T-15, and the budget degrade then starves the actual close.**
+`process_queue` has no time gate: every non-final queue row triggers scores polling for its sport, Pinnacle featured fetches, and (via `sample_due`, cadence-only) odds sampling every 90s cycle — even for games days away. A day-ahead slate ≈ 960 scores + 960 Pinnacle credits per sport per day plus ~960/day per bet, so `CLOSING_DAILY_SOFT_BUDGET=2500` exhausts within hours; the worker then enters `scores-only` mode, in which sampling is blocked entirely (worker line 507) — including for games actually approaching their close that evening. Net effect under realistic load: budget burned on far-future rows in the morning, no samples at night, everything finalizes FALLBACK — and via H2 those bets then never get closing odds at all.
+*Fix:* gate scores polling, Pinnacle fetches, and sampling to rows inside `commence − 15 min → cap` (plan Phase 1.3); optionally make degrade modes drop far-from-close rows first instead of disabling sampling globally.
+
+**H2 — Blank-provenance dead end: new parlays and worker-missed bets never get closing odds again.**
+`/api/bets` appends new rows with **blank** `Start Status` (server.js:3040-3074 writes no provenance). The new importer guard in `load_bets_needing_closing_odds` skips any blank-status row once the provenance schema exists ("blank must fail closed"). But: (a) parlays are never queue-eligible, so they stay blank forever and the importer — the only path that prices them, including all the new per-leg Phase 2 machinery — never picks them up; (b) worker `finalize()` on FALLBACK writes provenance to the queue row only, never the Bets row, so worker-missed singles also stay blank and are skipped forever. Fail-closed for contamination, but a silent functional kill of parlay CLV and of the importer's backstop role.
+*Fix (pick one):* let the importer treat a blank-status row whose game has commenced and which has no active queue row as eligible — it now writes correct provenance itself, which is exactly the designed Phase 2 path; or stamp Bets `Start Status` at log time (e.g. parlays → a `PENDING_IMPORT` value the guard allows) and on worker FALLBACK.
+
+### MEDIUM
+
+**M1 — One transient scores error at/after commence finalizes prematurely.** In `process_queue`, `now >= commence and sample_state == "UNKNOWN"` finalizes immediately as PROVISIONAL. A single failed `/scores` call (network blip, 429) at commence+1s forfeits the late-start path for every pending bet in that sport that cycle — the same game may be verified PREGAME 90s later. *Fix:* require N consecutive UNKNOWN cycles (or a grace window, e.g. commence+5 min) before the UNKNOWN finalize.
+
+**M2 — Scanner `closing_samples` stops recording at scheduled commence, defeating its own late-start handling.** `recordPrices` only inserts samples when `observedMs <= commenceMs` (scannerDb.js:447), but the scan loop deliberately keeps verified-PREGAME games alive past commence. For a late start, prices keep flowing to `price_latest` but never into `closing_samples`, so `markEventLive` finds only a stale pre-commence sample → `stale_quote` skip instead of the better post-commence pregame close. *Fix:* extend the insert window while the event has no lifecycle row, e.g. `observedMs <= commenceMs + cap` gated on tombstone absence.
+
+**M3 — Recovery "earlier snapshots" are scheduled-relative and can be post-start for early games.** With `includeEarlierSnapshots`, fallback snapshots are `commence − 6/−11 min` even when a CONFIDENT actual start exists (closingOddsRecovery.js:159-162). For a game that started well early — the exact rows this tool exists to repair — those fallbacks can be after actual start (live prices) while the leg's pre-assigned quality stays VERIFIED_CLOSE regardless of which snapshot supplied the price. *Fix:* compute fallbacks relative to the effective cutoff and/or downgrade quality when a non-primary snapshot is used.
+
+### LOW
+
+- **L1** — `pinnacle_quote_for_bet`/`_matches_selected` call `float(outcome.get("point"))` unguarded; a missing point raises TypeError inside the worker cycle (caught by the outer loop, but aborts the remaining rows that cycle). Wrap per-row.
+- **L2** — Doubleheader event-id resolution uses closest-commence (`find_event`) rather than the plan's ambiguous→UNKNOWN. Low risk since the queue's Commence UTC originates from the same TOA event, but it is a spec deviation.
+- **L3** — Housekeeping: the two `sys.path` script fixes are uncommitted; `clv_start_audit_report.txt` is UTF-16 (PowerShell redirect artifact) — re-emit as UTF-8 if it's meant to be kept.
+- **L4** — `_record_credits` counts 1 per capture attempt; a market-family cascade (2 calls) or the multi-market Pinnacle fetch costs more, so the soft budget undercounts in exactly the situations that are already expensive (compounds H1).
+
+## Recommended action order
+
+1. **H1 + H2 before the next slate** — both are small, contained changes (a window gate in `process_queue`; an importer-eligibility tweak) and both silently defeat the system's purpose under real load.
+2. M1/M2 next (each is one conditional); M3 whenever recovery is next touched (or disable `includeEarlierSnapshots` for confident-actual rows in the interim).
+3. The re-pull decision for the 24 LIKELY_SUSPECT + 32 INDETERMINATE rows is now unblocked; the 207 UNRESOLVABLE rows (avg CLV 2.67 vs SAFE's 0.05) argue for extending resolvers to fight cards or accepting their permanent exclusion from pooled CLV.
+
+---
+
+# Implementation Audit Resolution — 2026-07-15
+
+Every finding in the post-implementation audit above was addressed.
+
+- **H1:** the Railway worker now gates scores, Pinnacle, event resolution, and
+  same-book sampling to `T-15` through the 45-minute delayed-start cap. At the
+  daily soft ceiling it enters a critical mode that drops Pinnacle and
+  non-critical sampling while preserving same-book capture in the final five
+  minutes and through a verified delayed start.
+- **H2:** blank post-cutover rows remain excluded from consumers, but the
+  historical importer may repair them after verifying that no active
+  ClosingCapture row owns the BetID. This restores parlay imports and the
+  fallback path for worker-missed singles without racing the live worker;
+  inability to read the queue remains fail-closed.
+- **M1:** UNKNOWN scores state no longer finalizes at commence. The worker waits
+  a configurable five-minute grace period for transient `/scores` failures.
+- **M2:** scanner `closing_samples` now retain verified-pregame observations
+  through the same 45-minute late-start cap. The existing lifecycle tombstone
+  check still prevents any detected-live price from entering the archive.
+- **M3:** optional recovery snapshots are now five/ten minutes before the
+  effective safe cutoff rather than scheduled commence. An earlier fallback
+  continues to downgrade a nominally verified leg to `SAFE_BUT_EARLY` and
+  require confirmation.
+- **L1:** missing or malformed Pinnacle points fail closed instead of raising.
+- **L2:** worker event-ID backfill now refuses repeated-team matchups, including
+  doubleheaders, rather than selecting the closest commence.
+- **L3:** the direct-invocation `sys.path` fixes remain included, and the saved
+  Phase 6 audit report was converted from PowerShell UTF-16 to UTF-8.
+- **L4:** live market credit accounting now uses the actual
+  `x-requests-last` cost of every uncached request, including market-family
+  cascades and event lookups, instead of assuming one credit per bet attempt.
+
+Regression coverage was added for the T-15 gate, UNKNOWN grace, blank-row
+importer ownership, doubleheader deferral, exact cascade credit cost, malformed
+Pinnacle points, late-start scanner samples, actual-start-relative recovery
+fallbacks, and fallback quality downgrade.
+
+Validation after the audit fixes:
+
+- Bet-Result-Checker: **381 pytest tests passed**.
+- odds-tool: **555 Node tests passed**.
+- Focused CLV/scanner suites: **49 Python + 35 Node tests passed**.
+- odds-tool production Vite build passed (existing large-chunk warning only).
+- Python/JavaScript syntax checks, UTF-8 JSON parse, and checker
+  `git diff --check` passed.

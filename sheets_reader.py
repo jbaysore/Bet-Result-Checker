@@ -1,3 +1,5 @@
+import os
+
 import gspread
 from google.oauth2.service_account import Credentials
 from config import SHEET_ID, get_credentials_info
@@ -15,6 +17,45 @@ _bets_rows_cache: dict[str, list[list[str]]] = {}
 _missing_col_warnings: set[str] = set()
 _book_settings_rows_cache = None
 _promotions_rows_cache = None
+
+
+_CLOSING_CAPTURE_FINAL_STATUSES = {
+    "COMPLETED", "SKIPPED_EXISTING", "FALLBACK", "UNSUPPORTED", "INVALID",
+    "STALE", "SAFE_BUT_EARLY", "PROVISIONAL",
+}
+
+
+def _active_closing_capture_bet_ids() -> set[str] | None:
+    """Return active worker BetIDs; None means the queue could not be verified.
+
+    A missing ClosingCapture tab is a valid importer-only deployment and has no
+    active worker rows.  Other read failures stay fail-closed so a transient
+    Sheets problem cannot make the importer race the live worker.
+    """
+    tab_name = os.getenv("CLOSING_CAPTURE_TAB", "ClosingCapture")
+    try:
+        rows = call_with_sheets_retry(
+            f"{tab_name} get_all_values",
+            _get_spreadsheet().worksheet(tab_name).get_all_values,
+        )
+    except gspread.WorksheetNotFound:
+        return set()
+    except Exception as exc:
+        print(f"[sheets_reader] Could not verify active {tab_name} rows: {exc}")
+        return None
+    if not rows:
+        return set()
+    headers = rows[0]
+    if "BetID" not in headers or "Status" not in headers:
+        return None
+    bet_idx, status_idx = headers.index("BetID"), headers.index("Status")
+    active = set()
+    for row in rows[1:]:
+        bet_id = row[bet_idx].strip() if bet_idx < len(row) else ""
+        status = row[status_idx].strip().upper() if status_idx < len(row) else ""
+        if bet_id and status not in _CLOSING_CAPTURE_FINAL_STATUSES:
+            active.add(bet_id)
+    return active
 
 
 def _get_book_settings_rows() -> list:
@@ -535,6 +576,8 @@ def load_bets_needing_closing_odds(tab_name: str) -> list[dict]:
     duplicate_ids = _duplicate_bet_ids(rows, col)
 
     bets = []
+    active_capture_ids = None
+    active_capture_ids_loaded = False
     for row_idx, row in enumerate(rows[1:], start=2):
         row = _pad_bet_row(row, col)
 
@@ -568,11 +611,16 @@ def load_bets_needing_closing_odds(tab_name: str) -> list[dict]:
         provenance_schema_present = (
             col.get("start_status") is not None and col.get("closing_quality") is not None
         )
-        # Once the migration columns exist, a blank status is a failed/new
-        # provenance write, not legacy data. Legacy rows are explicitly stamped
-        # LEGACY_UNAUDITED, so blank must fail closed.
+        # Blank post-cutover provenance remains excluded from consumers, but it
+        # must not become a permanent importer dead end.  Once no live capture
+        # row owns the BetID (parlays never have one; FALLBACK rows are final),
+        # the actual-start-aware importer is allowed to repair it atomically.
         if provenance_schema_present and not start_status:
-            continue
+            if not active_capture_ids_loaded:
+                active_capture_ids = _active_closing_capture_bet_ids()
+                active_capture_ids_loaded = True
+            if active_capture_ids is None or bet_id in active_capture_ids:
+                continue
         if start_status in {"UNKNOWN", "UNVERIFIED"} or closing_quality in {
             "PROVISIONAL", "SAFE_BUT_EARLY", "STALE"
         }:
