@@ -394,3 +394,18 @@ CASE_REOPEN_REASONS = frozenset({"new_source_mapping", "policy_bump", "new_quali
 
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def parse_utc_datetime(value) -> datetime | None:
+    """Parse an ISO date or datetime string to an aware UTC datetime, or None.
+    A bare date (`2026-07-16`) parses to that day's midnight UTC."""
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)

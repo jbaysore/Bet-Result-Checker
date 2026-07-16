@@ -126,6 +126,12 @@ def poll_bet(bet: dict) -> bool:
     if bet.get("is_prop_entry"):
         return _poll_prop_entry(bet, now_utc)
 
+    # Ordinary sportsbook parlays with custom props or incomplete legacy legs
+    # cannot be graded automatically, but must still enter the NEEDS_REVIEW
+    # contract that powers odds-tool's notification bell.
+    if bet.get("manual_review_required"):
+        return _poll_manual_review(bet, now_utc, give_up_at)
+
     # Parlays settle from their legs, not a single game lookup. The gating
     # above already used the parlay row's Game Date/Start (set to the LATEST
     # leg), so by here every leg's game should have started.
@@ -305,6 +311,26 @@ def _poll_prop_entry(bet: dict, now_utc) -> str:
     if success and pl is not None:
         clear_pl_blocked_flag(row_idx, bet_id)
     return "resolved" if success else "error"
+
+
+def _poll_manual_review(bet: dict, now_utc, give_up_at) -> str:
+    """Notify for a known-ungradable bet after the normal game-time window.
+
+    No score lookup or result guess is attempted. Waiting through the existing
+    give-up window avoids asking for manual settlement while the latest event
+    may still be in progress.
+    """
+    bet_id = bet["bet_id"]
+    reason = bet.get("manual_review_reason") or "Automatic grading is unavailable"
+    if now_utc < give_up_at:
+        print(f"[poller] BetID {bet_id}: {reason}; waiting until the standard "
+              "manual-review window before notifying.")
+        return "still_pending"
+
+    print(f"[poller] BetID {bet_id}: {reason}. Writing NEEDS_REVIEW for the "
+          "odds-tool notification bell.")
+    write_result(bet["row_idx"], RESULT_NEEDS_REVIEW, bet_id)
+    return "needs_review"
 
 
 def _poll_parlay(bet: dict, now_utc, give_up_at) -> str:

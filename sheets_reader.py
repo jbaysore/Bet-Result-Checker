@@ -309,6 +309,8 @@ def load_pending_bets(tab_name: str) -> list[dict]:
 
         is_parlay = False
         is_prop_entry = False      # Phase 3: single MLB prop OR a pick'em parlay
+        manual_review_required = False
+        manual_review_reason = ""
         pickem = None              # (mode, pick_count) for a pick'em row, else None
         legs = []
         prop_legs = []             # [{selection, team1, team2, game_date}] for the prop resolver
@@ -330,8 +332,14 @@ def load_pending_bets(tab_name: str) -> list[dict]:
                 is_parlay = True
             else:
                 # A parlay with a non-automatable (e.g. Prop) leg and NO pick'em
-                # marker predates the convention → leave for manual Result entry.
-                continue
+                # marker needs manual settlement. Keep it in the pending set
+                # so the poller can stamp NEEDS_REVIEW after the normal window;
+                # skipping it leaves Result blank and hides it from the bell.
+                manual_review_required = True
+                manual_review_reason = (
+                    "Parlay contains a leg that cannot be graded automatically"
+                    if legs else "Parlay legs are missing or could not be parsed"
+                )
         elif bet_type == BET_TYPE_PROP:
             # Single player prop. v1 auto-resolves MLB only (statsapi); other
             # sports have no box-score source yet → left for manual, as today.
@@ -365,6 +373,8 @@ def load_pending_bets(tab_name: str) -> list[dict]:
             "notes":       notes,
             "is_parlay":   is_parlay,
             "is_prop_entry": is_prop_entry,
+            "manual_review_required": manual_review_required,
+            "manual_review_reason": manual_review_reason,
             "pickem":      pickem,
             "legs":        legs,
             "prop_legs":   prop_legs,

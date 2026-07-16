@@ -205,6 +205,23 @@ class CapabilityProfile:
     def get_record(self, key: str) -> CapabilityRecord | None:
         return self._records.get(key)
 
+    def records(self) -> list[CapabilityRecord]:
+        """All records (verifier + family-prior scans)."""
+        return list(self._records.values())
+
+    def records_for(self, context_id: str, capability: str) -> list[CapabilityRecord]:
+        return list(self._by_ctx_cap.get((context_id, capability), []))
+
+    def annotate(self, key: str, note: str) -> CapabilityRecord | None:
+        """Append a Notes line to a record without changing its classification —
+        used for the Phase 4 `proposed:` shadow markers. No-op if absent."""
+        rec = self._records.get(key)
+        if rec is None:
+            return None
+        rec.notes = _append_note(rec.notes, note)
+        self._store(rec)
+        return rec
+
     # ── trust evaluation ─────────────────────────────────────────────────────
     def require(self, requirements: list[Requirement]) -> TrustDecision:
         """Trusted only if EVERY requirement is met by at least one candidate

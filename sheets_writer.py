@@ -760,6 +760,15 @@ def clear_closing_odds_fail_streak(row_idx: int, bet_id: str) -> bool:
 PL_BLOCKED_PREFIX = "⚠ P/L not calculated:"
 DUPLICATE_BET_ID_PREFIX = "⚠ Duplicate BetID:"
 
+# New-context onboarding repair (plan Phase 5). A row capped PROVISIONAL by the
+# onboarding gate carries an `onboarding:` marker; once its grain is promoted the
+# repair pipeline re-derives a trusted close, preserving the ORIGINAL values in a
+# permanent `pre-repair:` marker and tagging the new close `recovery-onboarding`
+# so provenance stays distinguishable forever (concept §9 / safety #8).
+ONBOARDING_MARKER_PREFIX = "onboarding:"
+PRE_REPAIR_PREFIX = "pre-repair:"
+REPAIR_CLOSING_SOURCE = "recovery-onboarding"
+
 
 def flag_duplicate_bet_id(row_idx: int, bet_id: str, detail: str) -> bool:
     """
@@ -847,6 +856,53 @@ def upsert_notes_line(row_idx: int, bet_id: str, prefix: str, line: str | None) 
     except Exception as e:
         print(f"[sheets_writer] ❌ Unexpected error upserting note row {row_idx} (BetID {bet_id}): {e}")
         return False
+
+
+def row_already_repaired(row_idx: int, bet_id: str) -> bool:
+    """True if the row carries a `pre-repair:` marker (already onboarding-repaired)
+    — the double-repair guard (plan P5). BetID-guarded; conservative on any read
+    failure it returns True so a miss never double-repairs."""
+    idx = _bets_col_letter_lookup()
+    notes_col, bet_id_col = idx.get("notes"), idx.get("bet_id")
+    if None in (notes_col, bet_id_col):
+        return True
+    try:
+        row = _read_bet_row(_get_sheet(), row_idx)
+        if not _bet_id_matches(row, bet_id_col, bet_id):
+            return True
+        return any(line.strip().startswith(PRE_REPAIR_PREFIX)
+                   for line in _cell_at(row, notes_col).split("\n"))
+    except Exception:
+        return True
+
+
+def repair_onboarded_close(row_idx: int, bet_id: str, price, decimal_closing, clv,
+                           *, original: dict, provenance: dict) -> bool:
+    """Write a repaired, trusted close for an onboarding-provisional row.
+
+    The caller must have CLEARED the closing cells first (so the new value can be
+    written) and only call this when the derivation met the full quality contract
+    (VERIFIED_CLOSE). Order: write the new close (tagged Closing Source =
+    recovery-onboarding) FIRST, then — only if that succeeded — preserve the
+    `original` values in a permanent `pre-repair:` marker and clear the
+    `onboarding:` marker. A failed write leaves no partial markers, so the caller
+    can restore cleanly. Refuses to double-repair.
+    """
+    if row_already_repaired(row_idx, bet_id):
+        print(f"[sheets_writer] row {row_idx} (BetID {bet_id}) already repaired — skipping.")
+        return False
+
+    prov = {**provenance, "closing_source": REPAIR_CLOSING_SOURCE}
+    if not write_closing_odds(row_idx, bet_id, price, decimal_closing, clv,
+                              overwrite_errors=True, provenance=prov):
+        return False
+
+    upsert_notes_line(row_idx, bet_id, PRE_REPAIR_PREFIX,
+                      f"{PRE_REPAIR_PREFIX} close={original.get('close', '') or '(blank)'} "
+                      f"clv={original.get('clv', '') or '(blank)'} "
+                      f"quality={original.get('quality', '') or '(blank)'}")
+    upsert_notes_line(row_idx, bet_id, ONBOARDING_MARKER_PREFIX, None)  # no longer provisional
+    return True
 
 
 def flag_pl_blocked(row_idx: int, bet_id: str, reason: str) -> bool:

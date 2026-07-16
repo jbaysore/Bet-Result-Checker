@@ -629,8 +629,102 @@ Tests: node — `capabilityStatus.test.js`, `betsOnboardingResponse.test.js`
 validated by the client build (no runtime e2e — logging a bet writes to the live
 Bets sheet, so the at-log badge is best eyeballed on a real log, not a junk one).
 
-**Next phases:** P4 (post-event verifier / promotion), P5 (repair), P6 (cases +
-notifications), P7 (scanner discovery / ephemeral / benchmark).
+### Phase 4 — post-event verifier / promotion / demotion (implemented 2026-07-16)
+
+- **`family_priors.py`** — `compute_prior(profile, context, source, capability)`:
+  STRONG only with ≥3 Verified+Fresh same-family, same-source siblings AND ≥1
+  irregular handled. A prior, never inheritance; different source / too few
+  siblings / a lone UFC → NO_PRIOR (combat earns its own way).
+- **`onboarding_verifier.py`** — `classify_start` (§5 agreement / recoverable /
+  unresolved / contradiction / missing), evidence accumulation onto grain records
+  (clean / irregular_ok / neg / quarantined + distinct-day tracking),
+  `evaluate_promotion` (evidence bar × prior), `evaluate_block` (no start path →
+  Blocked), `evaluate`-time **demotion** (immediate Contradicted on
+  start/post-start contradiction; 3-quarantine-in-14-days → Stale; missing market
+  = coverage, never demotes), `rows_in_causal_window`, and `run_verification`
+  (apply vs shadow `proposed:` markers). `observation_from_bet` derives an
+  Observation from a settled row's provenance columns.
+- **`config.py`** — `ONBOARDING_PROMOTE_SHADOW` (default on): promotions are
+  proposed-only until flipped; **demotions never shadow** (concept §8).
+- **`scripts/run_onboarding_verifier.py`** — cron/worker entrypoint, dry-run
+  default; wire into the worker's recovery cadence slot once reviewed.
+
+Tests: `test_family_priors` (6), `test_onboarding_verifier` (8), `test_demotion`
+(6). Full checker suite **501 passed**.
+
+**Live-verified on the real sheet:** a dry run derived **81 observations from
+real bets and proposed 8 promotions** — grandfathered `any|family` capture grains
+narrowing to specific per-book records once they had ≥3 clean events over ≥2 days
+(e.g. `baseball/mlb|capture|fanduel|h2h`), all shadow, zero writes. And a
+throwaway new-league context (`other/zzz_demo_new_league`) walked
+Discovered→Verified live (discovery minted 3 records; the verifier promoted all
+three after 3 clean events), then was fully deleted — tabs restored to 191/22.
+
+**Gate P4:** run with `ONBOARDING_PROMOTE_SHADOW=True` for a stretch, review the
+`proposed:` markers, then flip to False to let promotions land.
+
+### Phase 5 — repair pipeline (implemented 2026-07-16)
+
+Once a grain is promoted (P4), rows the gate capped PROVISIONAL are re-derivable:
+
+- **`sheets_writer.repair_onboarded_close`** — writes the new trusted close FIRST
+  (tagged Closing Source = `recovery-onboarding`), then preserves the ORIGINAL
+  close/clv/quality in a permanent `pre-repair:` Notes marker and clears the
+  `onboarding:` marker. Refuses to double-repair (`row_already_repaired` guard).
+  A failed write leaves no partial markers.
+- **`scripts/repair_onboarded_rows.py`** — repull-shaped. `classify_repair_row`
+  (pure): a row is `retry` only when it has an `onboarding:` marker, is not
+  already repaired, isn't VOID/verified, AND its grain now resolves trusted via
+  `require_clv`. `repair_bet` derives via the existing recovery path
+  (`fetch_closing_odds` with `_resolve_actual_start`); it upgrades the row ONLY
+  when the derivation yields VERIFIED_CLOSE — otherwise the row is left exactly as
+  it was (derive-before-clear; restore on a refused write). `--apply` executes;
+  preview is default. No `closing_odds.py` change was needed — its recovery path
+  already returns VERIFIED_CLOSE only when the full quality contract is met, and
+  the gate passes it through once the grain is trusted.
+
+Tests: `test_repair_onboarded_rows` (10) — classification buckets, double-repair
+guard, VERIFIED_CLOSE-only upgrade, non-verified/fetch-failure leave the row
+untouched, refused-write restores. Full checker suite **511 passed**. Live
+preview runs clean (no rows are gate-capped yet in production).
+
+**Gate P5:** the first real promotion produces a preview to approve before
+`--apply`; after apply, `clv_start_audit.py` still shows zero post-start trusted
+closes. Rollback: `pre-repair:` markers allow a scripted restore.
+
+### Phase 6 — cases + notifications (odds-tool, implemented 2026-07-16)
+
+- **`onboardingCases.js`** — `deriveCases(capabilities, bets)` (pure): one parent
+  case per context with a non-verified capability, child issue per record_key
+  (grain in the key → distinct books never merged), five outcomes
+  (verified/limited/blocked/manual/retired) + `pending`. Case closes when no
+  child is pending; Blocked closes the case but the limitation persists as a
+  child; a Stale/Contradicted record reopens it. Each child carries its specific
+  missing fact.
+- **`notify/onboardingNotify.js`** — `snapshot` + `diffCapabilityStates(prev,
+  curr)` emit one event per MATERIAL change (promoted / demoted / one
+  case_opened per newly-seen context / rows_repaired), so a no-change poll emits
+  nothing (dedupe by construction). `buildOnboardingNotification` keys dedupe on
+  the target state → never re-warns.
+- **`notify/engine.js`** — additive branch: onboarding events route through the
+  same rules/channels/cooldown but skip the scanner EV/market/book criteria. The
+  scanner path is untouched (existing 16 notify tests still green).
+- **`server.js`** — `GET /api/onboarding/cases`; `POST /api/onboarding/cases/
+  :contextId/action` (requireSensitiveAccess) appends a decision row to the
+  Discovery Queue tab (odds-tool's writable tab) for the checker to consume,
+  preserving single-writer on Capabilities. A 5-min `setInterval` polls the
+  Capabilities tab, diffs, and emits notifications (the checker cannot push).
+- **`OnboardingCasesPanel.jsx`** — NeedsReviewPanel-pattern card list in the
+  sidebar; renders open cases + child missing-facts + affected-bet count + Mark
+  manual / Retire actions. Hidden when there are no open cases.
+
+Tests: `onboardingCases.test.js` (8), `notifyOnboarding.test.js` (7). Full
+odds-tool node suite **602 passed**; client build compiles clean. The panel
+renders only when an open case exists (none in production yet), so its on-screen
+appearance is best seen once a real new-league bet is gate-capped (Gate P6).
+
+**Next phase:** P7 (scanner discovery — begin observation at scanner-surfacing
+time; ephemeral/event-scoped contexts; benchmark availability wiring).
 
 ---
 

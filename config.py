@@ -156,6 +156,16 @@ PROPS_REVERIFY_MINUTES = 60
 ONBOARDING_SHADOW_MODE = os.getenv("ONBOARDING_SHADOW_MODE", "1") == "1"
 ONBOARDING_ENFORCE = os.getenv("ONBOARDING_ENFORCE", "1") == "1"
 
+# ONBOARDING_PROMOTE_SHADOW (Phase 4): when True the post-event verifier still
+# accumulates evidence and DECIDES a proposed classification transition
+# (Discovered→Verified/Limited/Blocked) but writes it only as a `proposed:`
+# Notes marker on the Capabilities row + the onboarding JSONL — it does NOT
+# apply the transition. Same shadow-then-enforce shape as PROPS_SHADOW_MODE:
+# review the proposals for a while, then flip to False to let promotions land.
+# Demotions (Contradicted/Stale) are NOT shadowed — a downgrade fails closed
+# immediately (concept §8: silent downgrades are as bad as silent upgrades).
+ONBOARDING_PROMOTE_SHADOW = os.getenv("ONBOARDING_PROMOTE_SHADOW", "1") == "1"
+
 # A leg of a parlay can only be auto-resolved / auto-priced if its own bet
 # type is in this set (same as AUTOMATED_BET_TYPES today, named separately
 # so the parlay path reads clearly and can diverge later if needed).
