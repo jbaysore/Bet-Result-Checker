@@ -19,11 +19,106 @@ import gspread
 
 from actual_start import resolve_actual_start
 from closing_odds import _parse_game_datetime
-from config import BET_COL, SHEET_TAB
+from config import BET_COL, CLOSING_ODDS_ERROR_CODES, SHEET_TAB
+from closing_provenance import (
+    QUALITY_EARLY, QUALITY_MANUAL, QUALITY_PROVISIONAL, QUALITY_STALE, QUALITY_VERIFIED,
+)
 from sheets_reader import _get_spreadsheet
 
 
 SNAPSHOT_INTERVAL = timedelta(minutes=5)
+
+
+# ── Concept operational-state report buckets (plan Phase 2 / concept "Reporting
+# principles") ──────────────────────────────────────────────────────────────
+# A total classification of every Bets row into ONE meaningful next-action
+# state, so upcoming events never inflate the historical-failure count and each
+# count maps to an action. Distinct from the LEGACY start-audit buckets above.
+BUCKET_BY_DESIGN = "by_design"          # live/prop/void/cashout — no CLV by design
+BUCKET_RETIRED = "retired"              # user-excluded context
+BUCKET_PENDING = "pending"             # upcoming event, not yet due
+BUCKET_MANUAL = "manual"               # manual/book-specific or user-attested
+BUCKET_REPAIRED = "repaired"           # recovered close, provenance-marked
+BUCKET_BLOCKED = "blocked"             # stable automatic limitation (no start source)
+BUCKET_TRUSTED = "trusted"             # VERIFIED_CLOSE with a benchmark → pooled CLV
+BUCKET_UNBENCHMARKABLE = "unbenchmarkable"  # trusted close, no compatible benchmark
+BUCKET_OBSERVING = "observing"         # new-context provisional (onboarding: marker)
+BUCKET_CAPTURING = "capturing"         # started, close not captured yet
+BUCKET_RECOVERABLE = "recoverable"     # completed, close missing/error, recoverable
+BUCKET_PROVISIONAL = "provisional"     # provisional for timing reasons (fallback)
+
+REPORT_FAILURE_BUCKETS = frozenset({BUCKET_BLOCKED, BUCKET_RECOVERABLE})
+
+
+def classify_report_bucket(row: dict, now: datetime) -> str:
+    """Map one Bets row to exactly one operational bucket. `row` uses lowercase
+    keys (result, closing_quality, closing_source, closing_odds, pinnacle_close,
+    bet_type, live_bet, notes) plus a parsed `commence_dt` (datetime|None)."""
+    result = str(row.get("result") or "").strip().upper()
+    quality = str(row.get("closing_quality") or "").strip().upper()
+    source = str(row.get("closing_source") or "").strip().lower()
+    closing_odds = str(row.get("closing_odds") or "").strip()
+    pinnacle = str(row.get("pinnacle_close") or "").strip()
+    bet_type = str(row.get("bet_type") or "").strip().lower()
+    live = str(row.get("live_bet") or "").strip().upper() in ("TRUE", "YES", "1")
+    notes = str(row.get("notes") or "")
+    commence = row.get("commence_dt")
+
+    if live or bet_type == "prop" or result in ("VOID", "CASHOUT"):
+        return BUCKET_BY_DESIGN
+    if "retired:" in notes:
+        return BUCKET_RETIRED
+    if commence is not None and commence > now and not result:
+        return BUCKET_PENDING
+    if quality == QUALITY_MANUAL or closing_odds.upper() == "MANUAL ENTRY" \
+            or "manual-evidence:" in notes:
+        return BUCKET_MANUAL
+    if source == "recovery-onboarding":
+        return BUCKET_REPAIRED
+    if "onboarding:" in notes and "blocked" in notes.lower():
+        return BUCKET_BLOCKED
+    if quality == QUALITY_VERIFIED:
+        return BUCKET_TRUSTED if pinnacle else BUCKET_UNBENCHMARKABLE
+    if "onboarding:" in notes:
+        return BUCKET_OBSERVING
+    if not closing_odds:
+        return BUCKET_CAPTURING
+    if closing_odds in CLOSING_ODDS_ERROR_CODES:
+        return BUCKET_RECOVERABLE
+    if quality in (QUALITY_PROVISIONAL, QUALITY_EARLY, QUALITY_STALE):
+        return BUCKET_PROVISIONAL
+    return BUCKET_PROVISIONAL
+
+
+def report_buckets(rows: list[list[str]], headers: list[str], now: datetime | None = None) -> dict:
+    """Tally every data row into operational buckets."""
+    now = now or datetime.now(timezone.utc)
+    idx = {header: headers.index(header) for header in headers}
+
+    def cell(row, key):
+        i = idx.get(BET_COL.get(key, ""))
+        return row[i] if i is not None and i < len(row) else ""
+
+    def header_cell(row, header):
+        i = idx.get(header)
+        return row[i] if i is not None and i < len(row) else ""
+
+    buckets = Counter()
+    for raw in rows:
+        row = raw + [""] * max(0, len(headers) - len(raw))
+        if not str(cell(row, "bet_id") or "").strip():
+            continue
+        commence = _parse_game_datetime(cell(row, "game_date"), cell(row, "game_start"))
+        bucket = classify_report_bucket({
+            "result": cell(row, "result"), "closing_quality": cell(row, "closing_quality"),
+            "closing_source": cell(row, "closing_source"), "closing_odds": cell(row, "closing_odds"),
+            "pinnacle_close": cell(row, "pinnacle_close"), "bet_type": cell(row, "bet_type"),
+            "live_bet": header_cell(row, "Live Bet"), "notes": cell(row, "notes"),
+            "commence_dt": commence.astimezone(timezone.utc) if commence else None,
+        }, now)
+        buckets[bucket] += 1
+    return {"rows": sum(buckets.values()), "buckets": dict(buckets),
+            "generated_at": now.isoformat().replace("+00:00", "Z")}
 
 
 def classify_start_audit(actual_start: datetime | None, scheduled_start: datetime | None) -> str:
@@ -190,7 +285,17 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Include per-row resolution details in the JSON report",
     )
+    parser.add_argument(
+        "--buckets",
+        action="store_true",
+        help="Report the concept operational-state buckets over all rows (read-only)",
+    )
     args = parser.parse_args(argv)
+    if args.buckets:
+        rows = _get_spreadsheet().worksheet(SHEET_TAB).get_all_values()
+        report = report_buckets(rows[1:], rows[0]) if rows else {"rows": 0, "buckets": {}}
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return 0
     report = run_audit(
         write=not args.dry_run,
         bet_ids=set(args.bet_id or []),

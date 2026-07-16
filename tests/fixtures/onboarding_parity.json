@@ -1,0 +1,63 @@
+{
+  "_comment": "Shared onboarding trust-decision fixture (NEW_CONTEXT_ONBOARDING_PLAN Phase 3). Committed IDENTICALLY to odds-tool/tests/fixtures/ and Bet-Result-Checker-github/tests/fixtures/. Asserted by capabilityStatus.test.js (node) and test_onboarding_parity.py (pytest). Any drift between the two implementations OR the two JSON copies fails a suite. Rows use live sheet header names so both repos parse them exactly as they parse the live tabs.",
+  "capabilitiesRows": [
+    ["Record Key", "Context ID", "Capability", "Qualifier", "Classification", "Health", "Activity", "Policy Version", "Evidence Summary", "First Seen", "Last Verified", "Last Checked", "Constraints", "Notes"],
+    ["baseball/mlb|identity|toa", "baseball/mlb", "identity", "toa", "Verified", "Fresh", "Idle", "1", "", "", "", "", "", "seeded"],
+    ["baseball/mlb|start_live|toa_scores", "baseball/mlb", "start_live", "toa_scores", "Verified", "Fresh", "Idle", "1", "", "", "", "", "", "seeded"],
+    ["baseball/mlb|capture|any|h2h", "baseball/mlb", "capture", "any|h2h", "Verified", "Fresh", "Idle", "1", "", "", "", "", "", "seeded"],
+    ["baseball/mlb|capture|any|featured", "baseball/mlb", "capture", "any|featured", "Verified", "Fresh", "Idle", "1", "", "", "", "", "", "seeded"],
+    ["baseball/mlb|capture|any|team_total", "baseball/mlb", "capture", "any|team_total", "Verified", "Fresh", "Idle", "1", "", "", "", "", "", "seeded"],
+    ["mma/ufc|identity|toa", "mma/ufc", "identity", "toa", "Verified", "Fresh", "Idle", "1", "", "", "", "", "", "seeded"],
+    ["mma/ufc|start_authoritative|espn_fights", "mma/ufc", "start_authoritative", "espn_fights", "Verified", "Fresh", "Idle", "1", "", "", "", "", "", "seeded"],
+    ["mma/ufc|capture|any|h2h", "mma/ufc", "capture", "any|h2h", "Verified", "Fresh", "Idle", "1", "", "", "", "", "", "seeded"],
+    ["hockey/nhl|identity|toa", "hockey/nhl", "identity", "toa", "Verified", "Fresh", "Idle", "1", "", "", "", "", "", "seeded"],
+    ["hockey/nhl|start_live|toa_scores", "hockey/nhl", "start_live", "toa_scores", "Verified", "Stale", "Idle", "1", "", "", "", "", "", "aged out"],
+    ["hockey/nhl|capture|any|featured", "hockey/nhl", "capture", "any|featured", "Verified", "Fresh", "Idle", "1", "", "", "", "", "", "seeded"],
+    ["boxing/boxing|identity|toa", "boxing/boxing", "identity", "toa", "Verified", "Fresh", "Idle", "1", "", "", "", "", "", "seeded"],
+    ["boxing/boxing|capture|any|h2h", "boxing/boxing", "capture", "any|h2h", "Verified", "Fresh", "Idle", "1", "", "", "", "", "", "seeded"]
+  ],
+  "registryRows": [
+    ["Context ID", "Alias Type", "Alias Value", "Edition Start", "Edition End", "Mapping Version", "Status", "Notes"],
+    ["baseball/mlb", "sport_key", "baseball_mlb", "", "", "1", "active", "seeded"],
+    ["mma/ufc", "sport_key", "mma_mixed_martial_arts", "", "", "1", "active", "seeded"],
+    ["hockey/nhl", "sport_key", "icehockey_nhl", "", "", "1", "active", "seeded"],
+    ["boxing/boxing", "sport_key", "boxing_boxing", "", "", "1", "active", "seeded"]
+  ],
+  "cases": [
+    {
+      "name": "mlb draftkings spread — trusted (grandfathered featured capture)",
+      "bet": { "sportKey": "baseball_mlb", "book": "draftkings", "marketKey": "spreads" },
+      "expected": { "contextId": "baseball/mlb", "provisional": false, "unresolved": [] }
+    },
+    {
+      "name": "mlb fanduel team total — trusted (team_total capture seeded)",
+      "bet": { "sportKey": "baseball_mlb", "book": "fanduel", "marketKey": "batter_team_totals" },
+      "expected": { "contextId": "baseball/mlb", "provisional": false, "unresolved": [] }
+    },
+    {
+      "name": "mma fanduel moneyline — trusted via authoritative start (no start_live)",
+      "bet": { "sportKey": "mma_mixed_martial_arts", "book": "fanduel", "marketKey": "h2h" },
+      "expected": { "contextId": "mma/ufc", "provisional": false, "unresolved": [] }
+    },
+    {
+      "name": "nhl — start_live stale, no authoritative → provisional on start",
+      "bet": { "sportKey": "icehockey_nhl", "book": "draftkings", "marketKey": "totals" },
+      "expected": { "contextId": "hockey/nhl", "provisional": true, "unresolved": ["start"] }
+    },
+    {
+      "name": "boxing — no start capability at all → provisional on start",
+      "bet": { "sportKey": "boxing_boxing", "book": "draftkings", "marketKey": "h2h" },
+      "expected": { "contextId": "boxing/boxing", "provisional": true, "unresolved": ["start"] }
+    },
+    {
+      "name": "unknown league → NEW context, all unresolved",
+      "bet": { "sportKey": "cricket_ipl", "book": "draftkings", "marketKey": "h2h" },
+      "expected": { "contextId": null, "provisional": true, "unresolved": ["identity", "start", "capture"] }
+    },
+    {
+      "name": "mlb draftkings prop — capture family unseeded → provisional on capture",
+      "bet": { "sportKey": "baseball_mlb", "book": "draftkings", "marketKey": "player_hits" },
+      "expected": { "contextId": "baseball/mlb", "provisional": true, "unresolved": ["capture"] }
+    }
+  ]
+}

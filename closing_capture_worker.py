@@ -43,9 +43,10 @@ from closing_provenance import (
 from config import SHEET_ID, SHEET_TAB
 from poller import _parse_game_datetime
 from sheets_reader import _get_spreadsheet
-from sheets_writer import write_closing_odds
+from sheets_writer import upsert_notes_line, write_closing_odds
 from sources.scores_live import COMPLETED, LIVE, PREGAME, event_live_state, fetch_scores_live
 from pinnacle_closing import fetch_pinnacle_featured, pinnacle_quote_for_bet
+import onboarding_gate
 
 
 QUEUE_TAB = os.getenv("CLOSING_CAPTURE_TAB", "ClosingCapture")
@@ -318,6 +319,11 @@ def finalize(
         }, headers)
         return "FALLBACK"
 
+    # New-context onboarding gate: a would-be VERIFIED_CLOSE whose capability
+    # grain is not trusted is shadow-logged and (under ONBOARDING_ENFORCE) capped
+    # at PROVISIONAL, with an `onboarding:` marker written below. Never raises.
+    quality, onboarding_marker = onboarding_gate.gate_finalize_quality(record, quality)
+
     sample = sample or _sample_from_price(record, price)
     decimal_closing = to_decimal_odds(price)
     try:
@@ -362,6 +368,9 @@ def finalize(
         bet_row_idx, bet_id, price, decimal_closing, clv,
         overwrite_errors=False, provenance=provenance,
     )
+    if wrote and onboarding_marker:
+        upsert_notes_line(bet_row_idx, bet_id,
+                          onboarding_gate.ONBOARDING_MARKER_PREFIX, onboarding_marker)
     status = quality if wrote and quality != QUALITY_VERIFIED else ("COMPLETED" if wrote else "SKIPPED_EXISTING")
     update_queue_row(tab, queue_row_idx, {
         "Status": status, "Final Price": price, "Finalized At": iso(finalized_at),

@@ -21,3 +21,6 @@ local-run-outputs/
 repull_suspect_report*.json
 closing_gap_taxonomy*.json
 clv_start_audit_report.txt
+
+# Shadow-mode runtime logs (start monitor + onboarding gate JSONL) — ephemeral
+shadow_logs/

@@ -34,6 +34,7 @@ from sheets_reader import (
     get_promo_boost_percentage, get_book_fee_before_odds, get_book_fee_config,
     load_unresolved_pl_bets, load_manual_payout_pending_pl_bets,
 )
+import onboarding_gate
 
 CENTRAL = pytz.timezone("America/Chicago")
 
@@ -101,6 +102,11 @@ def poll_bet(bet: dict) -> bool:
         print(f"[poller] ❌ BetID {bet_id}: could not parse game datetime "
               f"('{bet['game_date']}' '{bet['game_start']}'). Skipping.")
         return "error"
+
+    # New-context onboarding: start observation for an unfamiliar context's grain
+    # (or note it in shadow mode). Best-effort — never affects settlement below
+    # (concept safety #6: onboarding failure must not interfere with settlement).
+    onboarding_gate.discover_for_bet(bet)
 
     now_utc = datetime.now(timezone.utc)
     game_dt_utc = game_dt.astimezone(timezone.utc).replace(tzinfo=timezone.utc)

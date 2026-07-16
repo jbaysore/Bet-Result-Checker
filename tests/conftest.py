@@ -1,5 +1,27 @@
 """Shared factories for bet/promo row dicts used across promo_resolver tests."""
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _neutralize_onboarding_gate(monkeypatch):
+    """Default every test to onboarding OFF so the gate never reaches out to the
+    live Google Sheet (worker/closing_odds/poller tests all call finalize paths
+    that would otherwise trigger a profile load + shadow-log write). Tests that
+    exercise the gate re-enable the flags and inject in-memory caches themselves.
+    """
+    try:
+        import config
+        import onboarding_gate
+    except Exception:
+        return
+    monkeypatch.setattr(config, "ONBOARDING_SHADOW_MODE", False, raising=False)
+    monkeypatch.setattr(config, "ONBOARDING_ENFORCE", False, raising=False)
+    monkeypatch.setattr(onboarding_gate, "_profile", None, raising=False)
+    monkeypatch.setattr(onboarding_gate, "_registry", None, raising=False)
+    monkeypatch.setattr(onboarding_gate, "_SHADOW_LOG_PATH",
+                        "shadow_logs/_test_should_not_write.jsonl", raising=False)
+
 
 def make_bet(**overrides):
     base = {

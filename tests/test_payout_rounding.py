@@ -41,6 +41,16 @@ def test_caesars_is_configured_nearest():
     assert "williamhill_us" in PAYOUT_ROUND_NEAREST_BOOKS
 
 
+def test_real_lowvig_settlement_rounds_to_nearest_cent():
+    # Confirmed payout: $5 @ -106 pays $9.72, not truncated $9.71.
+    pl, payout = calculate_pl_and_payout(
+        RESULT_WIN, 5.0, -106, BET_CATEGORY_STANDARD,
+        fee=0.0,
+        round_to_nearest="lowvig" in PAYOUT_ROUND_NEAREST_BOOKS)
+    assert payout == 9.72
+    assert pl == 4.72
+
+
 def test_real_hard_rock_settlement_rounds_up():
     # Confirmed real settlement: stake $26 @ -350 -> $33.43 (profit $7.4285...).
     pl, payout = calculate_pl_and_payout(

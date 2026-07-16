@@ -35,6 +35,7 @@ from closing_provenance import (
     quote_is_fresh,
 )
 from actual_start import ActualStartResult, resolve_actual_start
+import onboarding_gate
 
 # One historical snapshot per (sport, timestamp, book, market[, event]) per
 # process — multiple bets on the same game/book reuse the same API response.
@@ -1006,14 +1007,20 @@ def fetch_closing_odds(bet: dict) -> dict:
     print(f"[closing_odds] BetID {bet_id}: ClosingOdds={closing_odds_str}, "
           f"DecimalClosing={decimal_closing}, CLV={clv}")
 
+    # Onboarding gate: a recovered VERIFIED_CLOSE whose capability grain is not
+    # trusted is capped at PROVISIONAL (same rule as live capture, plan §0.5).
+    closing_quality, onboarding_marker = onboarding_gate.gate_finalize_quality(
+        resolved_bet, res.get("closing_quality", QUALITY_PROVISIONAL))
+
     return {
         "closing_odds": closing_odds_str,
         "decimal_closing": decimal_closing,
         "clv": clv,
         "error": None,
-        "closing_quality": res.get("closing_quality", QUALITY_PROVISIONAL),
+        "closing_quality": closing_quality,
         "closing_observed_at": res.get("snapshot_at") or res.get("snapshot_target"),
         "book_last_update": res.get("book_last_update"),
+        "onboarding_marker": onboarding_marker,
         "actual_start_resolution": resolution,
     }
 
@@ -1051,7 +1058,10 @@ def fetch_parlay_closing_odds(bet: dict) -> dict:
             return {"closing_odds": None, "decimal_closing": None, "clv": None,
                     "error": res["error"]}
         leg_decimals.append(to_decimal_odds(res["price"]))
-        quality = res.get("closing_quality", QUALITY_PROVISIONAL)
+        # Gate each leg independently; the combined quality below is VERIFIED only
+        # if every leg is, so an untrusted leg grain provisionalizes the parlay.
+        quality, _ = onboarding_gate.gate_finalize_quality(
+            resolved_leg, res.get("closing_quality", QUALITY_PROVISIONAL))
         qualities.append(quality)
         start_status = (
             "VERIFIED" if resolution.actual_start and resolution.confidence == "CONFIDENT"

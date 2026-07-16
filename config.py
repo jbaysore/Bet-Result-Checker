@@ -135,6 +135,27 @@ PROPS_SHADOW_MODE = True
 # is unacceptable). State lives in the row's Notes (Railway has no durable disk).
 PROPS_REVERIFY_MINUTES = 60
 
+# ── New Context Onboarding (NEW_CONTEXT_ONBOARDING_PLAN.md) ────────────────
+# Two independent flags, same shadow-then-enforce shape as PROPS_SHADOW_MODE.
+#
+# ONBOARDING_SHADOW_MODE: for every closing line that WOULD finalize
+# VERIFIED_CLOSE, compute the capability-gate decision (does the bet's
+# context/start/capture grain authorize trust?) and LOG the would-be outcome to
+# the onboarding shadow JSONL + stdout. Changes nothing on the sheet.
+#
+# ONBOARDING_ENFORCE: additionally CAP a would-be VERIFIED_CLOSE at
+# QUALITY_PROVISIONAL when the grain is not trusted, writing an `onboarding:`
+# Notes marker naming why. Pooled CLV already excludes everything but
+# VERIFIED_CLOSE, so exclusion is inherited for free (plan §0.5).
+#
+# ENFORCE was flipped ON 2026-07-16 after the seed-parity gate
+# (tests/test_seed_parity.py) + a live simulation over real Bets both showed
+# ZERO VERIFIED_CLOSE downgrades on already-supported contexts — the safety
+# proof that replaced the plan's one-week shadow observation. To revert without
+# a code change, set env ONBOARDING_ENFORCE=0 (kill switch).
+ONBOARDING_SHADOW_MODE = os.getenv("ONBOARDING_SHADOW_MODE", "1") == "1"
+ONBOARDING_ENFORCE = os.getenv("ONBOARDING_ENFORCE", "1") == "1"
+
 # A leg of a parlay can only be auto-resolved / auto-priced if its own bet
 # type is in this set (same as AUTOMATED_BET_TYPES today, named separately
 # so the parlay path reads clearly and can diverge later if needed).
@@ -196,10 +217,12 @@ MANUAL_PAYOUT_REQUIRED_BOOKS = {"kalshi", "rebet"}
 # profit 7.4285... paid as $7.43 (payout $33.43); truncation gives $33.42.
 # Caesars does too: Bet 297, stake $50 @ -105, paid $97.62 rather than
 # the truncated $97.61; Bets 55 and 180 independently match nearest-cent math.
+# LowVig also rounds nearest: confirmed 2026-07-16, stake $5 @ -106,
+# profit 4.7169... paid as $4.72 (payout $9.72), not truncated to $9.71.
 # All TOA regional keys are included so the rule follows the registered book.
 # Keyed by lowercased book key, same convention as MANUAL_PAYOUT_REQUIRED_BOOKS.
 PAYOUT_ROUND_NEAREST_BOOKS = {
-    "fanduel", "prophetx", "fanatics", "williamhill_us",
+    "fanduel", "prophetx", "fanatics", "williamhill_us", "lowvig",
     "hardrockbet", "hardrockbet_az", "hardrockbet_fl", "hardrockbet_oh",
 }
 

@@ -38,9 +38,11 @@ capabilities:
 
 A new context may support some of these capabilities but not others. And most
 capabilities do not vary only by context: price capture and recovery vary by
-**sportsbook**, settlement varies by **market class** (moneyline, spread,
-total, prop, …). "This league works" is therefore not a well-formed claim; the
-well-formed claim is "this capability is verified at this grain."
+**sportsbook and market family**, settlement varies by **market class**
+(moneyline, spread, total, prop, …), and benchmark availability varies by
+**benchmark source and market family**. "This league works" is therefore not a
+well-formed claim; the well-formed claim is "this capability is verified at
+this grain."
 
 ### Why identity comes first
 
@@ -56,6 +58,20 @@ modes matter:
 
 Identity resolution is therefore capability #0, and ambiguity in identity must
 always resolve toward "new," never toward "known."
+
+Identity also needs hierarchy. A stable canonical identity should distinguish:
+
+- The broad family or sport.
+- A recurring competition or promotion.
+- A season, tournament edition, or card.
+- The individual event.
+- Source-specific keys, display names, former names, and aliases.
+
+Aliases point to canonical identities; they do not carry trust themselves.
+Provider keys may be renamed or reused, so evidence belongs to the canonical
+identity and the source mapping version that produced it. Family relationships
+may inform onboarding, but they do not collapse distinct competitions or
+editions into one trust record.
 
 ### Why scheduled start is not sufficient
 
@@ -110,40 +126,61 @@ work toward resolving it.
 
 ## Core principles
 
-Four ideas underpin everything below. They are stated once here so the rest of
+Five ideas underpin everything below. They are stated once here so the rest of
 the document can rely on them.
 
 **1. Capabilities are verified at their natural grain.**
-Identity, discovery, and start detection are roughly per-context. Price
-capture and recovery are per-(context × sportsbook). Settlement is
-per-(context × market class). The state machine in this document belongs to
-each capability at its own grain. A single "context state" exists only as a
-derived, display-level rollup — it is never the source of truth, and nothing
-may consult the rollup to make a trust decision.
+The grain must be narrow enough that success in one route cannot bless an
+untested route. The conceptual defaults are:
+
+| Capability | Natural grain |
+|---|---|
+| Canonical identity | context × source mapping |
+| Event discovery and matching | context × discovery source |
+| Real-start detection | context × start source |
+| Sportsbook price capture and recovery | context × sportsbook × market family |
+| Settlement | context × market class × result source |
+| Benchmark availability | context × benchmark source × market family |
+| Final CLV trust | individual bet row |
+
+Records should be created lazily for combinations the user actually encounters;
+the model does not require pre-creating every possible book and market.
+A single "context state" exists only as a derived display summary — it is never
+the source of truth, and nothing may consult that rollup to make a trust
+decision.
 
 **2. Rows are the unit of trust.**
 A bet row's CLV is trusted because of evidence attached to *that row*, not
 because of the state of its context. A row captured while a context was under
 observation stays provisional until the row itself is re-evaluated —
 promotion never retroactively blesses rows. Conversely, user-attested manual
-evidence can make an individual row trustworthy without making its context
-verified. Context state only sets defaults and gates automation.
+evidence that meets the manual-evidence standard can make an individual row
+trustworthy without making its context verified. Context capability records
+only set defaults and gate automation.
 
 **3. Two kinds of evidence, two kinds of trust.**
 - *System correctness*: did our matching, parsing, and capture work for this
-  context? One clean, exactly-matched event genuinely verifies this.
+  exact capability path and grain? One clean, exactly-matched event can verify
+  only the route, book, market family, and source actually exercised.
 - *Source correctness*: does this source report true starts and results,
   **including when events go sideways** (delays, postponements, card
   reshuffles)? This is a distributional claim. One on-time game proves almost
   nothing about it, because on-time games were never the risk.
 
-Promotion policy, family inheritance, and evidence quantity requirements all
+Promotion policy, family priors, and evidence quantity requirements all
 follow from keeping these separate.
 
 **4. Fail closed, loudly.**
 Unknown means provisional or excluded, never trusted by default — and every
 exclusion must be visible and carry a path to resolution (automatic, manual,
 or a deliberate user decision to stop).
+
+**5. Provenance and trust are independent.**
+A value's origin — native capture, automatic reconstruction, or manual
+evidence — must remain visible forever. Its trust verdict is a separate
+decision based on the strength of the attached evidence. A reconstructed close
+is not automatically weaker than a native one, and a native capture is not
+automatically trustworthy.
 
 ---
 
@@ -164,15 +201,17 @@ The system should:
 5. Attempt to verify capabilities automatically during and after the event.
 6. Promote capabilities when the evidence is sufficient — and keep verifying
    them afterward.
-7. Re-evaluate **all** affected provisional rows when promotion or recovery
-   makes a trustworthy close establishable, marking repaired rows permanently
-   as repaired.
+7. Re-evaluate **all affected** provisional rows when promotion or recovery
+   makes a trustworthy close establishable, preserving permanent provenance.
 8. Keep unresolved rows excluded and present one clear, consolidated action
    item per unresolved case.
 
 The user should not have to remember that the context was new. An unresolved
-onboarding case should remain visible until the system verifies it, the user
-classifies it as manual, or the user accepts it as permanently excluded.
+onboarding investigation should remain visible until it reaches a classified
+outcome: verified, limited, blocked, manual, or retired. A blocked outcome is
+not trusted and may be reopened automatically if new evidence or a new source
+appears; it exists so an impossible investigation does not remain "in
+progress" forever or require the user to retire it manually.
 
 ---
 
@@ -182,73 +221,133 @@ classifies it as manual, or the user accepts it as permanently excluded.
 
 Each context has one authoritative capability profile: the set of capability
 records at their natural grains (see Core principle 1), each carrying its own
-state and evidence summary.
+classification, activity, health, policy version, and evidence summary.
 
 The profile conceptually answers:
 
 - Is the context's identity resolved unambiguously across all sources?
 - Can events and markets be discovered?
-- Can the selected sportsbook be priced? (per book)
-- Can the live start transition be trusted?
+- Can the selected sportsbook and market family be priced?
+- Can the live start transition from the selected source be trusted?
 - Is an authoritative actual-start source available after the event?
-- Can results be settled automatically? (per market class)
-- Can missed closing prices be recovered historically? (per book)
-- Does a benchmark line exist to measure CLV against?
+- Can results be settled automatically? (per market class and source)
+- Can missed closing prices be recovered historically? (per book and market
+  family)
+- Does a compatible benchmark line exist for the selected market family?
 - Are there known exceptions for this context or event type?
 
 Every consumer — logging, live capture, settlement, recovery, reporting —
 relies on the same profile, so all parts of the system agree. Because the
 consumers span more than one deployed system, where this single profile lives
 is an explicit pre-implementation decision, not a detail (see *Decisions*).
+One component owns profile mutations and transition decisions. If the profile
+cannot be read, consumers fail closed rather than falling back to private
+copies or remembered defaults.
 
-### 2. Give every capability an onboarding state
+### 2. Track classification, activity, and health separately
 
-States apply per capability record. The context-level rollup shown to the user
-is derived (e.g., "Verified" only if all capabilities relevant to the user's
-books and markets are verified; otherwise the rollup names what's missing).
+Each capability record has three orthogonal dimensions. This prevents
+"evidence collection stopped," "the source is stale," and "this capability is
+not trusted" from being collapsed into one ambiguous state.
 
-| State | Meaning |
+#### Trust classification
+
+| Classification | Meaning |
 |---|---|
-| Discovered | A bet or scanner-surfaced opportunity introduced this capability need. No evaluation yet. (There is no stored "Unseen" state — absence of a record *is* unseen.) |
-| Observing | Evidence collection is actively in progress for one or more live cases. |
-| Limited | Evaluation concluded with partial results; nothing is currently being collected. Distinguished from Observing by whether collection is active. |
-| Verified | Sufficient evidence of both system and source correctness. Carries a freshness timestamp — verification ages (see §8). |
+| Discovered | A bet or durable scanner-surfaced opportunity introduced this capability need. No trust conclusion yet. Absence of a record means Unseen. |
+| Verified | Sufficient evidence of system and source correctness for the record's exact grain and policy version. |
+| Limited | Trust is established only within explicit recorded constraints. Rows inside those constraints may be trusted; rows outside them may not. |
+| Blocked | Automatic investigation reached a stable negative conclusion with current sources, such as no authoritative start source or no compatible retained market. Rows remain excluded. This is reopenable, not permanent retirement. |
 | Manual | The user has classified this capability as requiring user-provided or book-specific information. A user decision, recorded with its reason. |
 | Retired | The user has accepted permanent exclusion — "we agreed to stop trying." Always user-ratified, never self-assigned by the system, so cases cannot quietly disappear. |
 
+#### Collection activity
+
+| Activity | Meaning |
+|---|---|
+| Idle | No evidence collection is currently scheduled. |
+| Collecting | Live or pre-event evidence is being collected. |
+| Awaiting post-event | Live collection is complete and authoritative post-event evidence is pending. |
+
+#### Verification health
+
+| Health | Meaning |
+|---|---|
+| Not evaluated | No verification decision exists yet. |
+| Fresh | The verification remains within its freshness policy and has no material contradiction. |
+| Stale | The verification aged beyond policy or crossed a defined boundary. Historical row verdicts remain intact, but new rows fail closed until re-confirmation. |
+| Contradicted | New evidence materially conflicts with the basis of verification. New rows fail closed and the causally affected rows are re-evaluated. |
+
+The user-facing answer should be request-specific, not a single universal
+"context is verified" label. For example: "start detection verified; DraftKings
+moneyline capture verified; benchmark unavailable; settlement manual." A
+context summary may roll these up for navigation, but it must show the matrix
+of relevant capabilities and may never authorize trust.
+
+A capability is eligible to authorize automatic trust only when its
+classification is Verified — or the requested row falls inside a Limited
+classification's explicit constraints — and its health is Fresh. Discovered,
+Blocked, Manual, and Retired classifications never authorize automatic trust.
+Manual evidence may still establish trust for an individual row under Core
+principle 2.
+
 #### Transition governance
 
-Naming states is not enough; each transition needs an authority.
+Naming classifications is not enough; each transition needs an authority.
 
 | Transition | Authority |
 |---|---|
-| Discovered → Observing | Automatic (a real bet or surfaced opportunity exists) |
-| Observing → Verified | Automatic, on meeting the evidence bar (§7) |
-| Observing → Limited | Automatic, when collection ends without sufficient evidence |
-| Limited → Observing | Automatic, on the next relevant bet/opportunity |
-| Verified → Observing (demotion) | Automatic — fail closed on contradiction or staleness (§8) |
+| Unseen → Discovered | Automatic when durable intent exists |
+| Discovered → Verified | Automatic, on meeting the evidence bar (§7) |
+| Discovered → Limited | Automatic, when only explicitly bounded support is proven |
+| Discovered → Blocked | Automatic, when investigation terminates without a viable automatic path |
+| Blocked → Discovered | Automatic when a new source, mapping, policy version, or relevant event creates a real path to re-evaluation |
+| Verified/Limited health → Stale | Automatic under the freshness policy (§8) |
+| Verified/Limited health → Contradicted | Automatic when attributed negative evidence crosses the severity threshold (§8) |
+| Stale/Contradicted → Fresh | Automatic only after the relevant evidence bar is met again |
 | Any → Manual | User decision (system may recommend) |
 | Any → Retired | User decision only |
-| Manual/Retired → Observing | User decision (e.g., a new source appears) |
+| Manual/Retired → Discovered | User decision (e.g., a new source appears) |
+
+Collection activity changes automatically as events enter and leave useful
+observation windows. It does not change the trust classification by itself.
+If new intent falls outside a Limited record's proven constraints, the
+in-scope trust remains intact and the newly required narrower capability grain
+is Discovered separately.
 
 ### 3. Detect early: at surfacing, not only at logging
 
 The earliest useful signal is not the bet — it is the scanner surfacing an
-opportunity in an unfamiliar context. That set is small and high-intent, so
-beginning observation at surfacing time does not violate the "don't monitor
-everything" principle, and it buys back the lead time the cold-start race
-otherwise destroys.
+opportunity in an unfamiliar context. Beginning cheap observation then can buy
+back the lead time the cold-start race otherwise destroys. Scanner surfacing is
+not assumed to be rare or durable, however:
 
-At bet-log time, if any relevant capability is not verified:
+- Repeated sightings of the same context, event, book, and market are
+  deduplicated.
+- A surfaced-only discovery expires if the opportunity disappears and no bet
+  or useful evidence follows.
+- A persistent onboarding case is created only when there is a bet, repeated
+  intent, or material evidence worth retaining.
+- Scanner-driven observation has an explicit cost and rate budget.
+
+At bet-log time, if any relevant capability is not eligible to authorize
+automatic trust:
 
 - The bet is still recorded.
 - The user sees the context's current onboarding **status** — which
   capabilities are verified, which are pending, and the consequence. Status is
-  shown every time but is not an alert; only state *changes* notify.
-- The affected capabilities enter or continue observation automatically.
+  shown every time but is not an alert; only material classification/health
+  changes or a newly required user action notify.
+- The affected capabilities begin or continue evidence collection
+  automatically.
 - The row is captured provisionally.
 
-The explanation describes the consequence, not merely "unsupported":
+If the bet appears to be at or after the real start, or no eligible pre-start
+quote has been retained, the status says plainly that this row may be
+unrepairable. The bet is still logged.
+
+The explanation describes the relevant consequence, not merely "unsupported."
+For example, when real-start timing is the missing capability:
 
 > New context. The bet and available prices will be recorded, but its CLV
 > stays provisional until real-start timing is verified. Verification is
@@ -257,10 +356,10 @@ The explanation describes the consequence, not merely "unsupported":
 ### 4. Observe only contexts connected to real intent
 
 Evidence collection runs when there is an actual bet — or a scanner-surfaced
-opportunity — to protect. The system does not continuously monitor every
-possible context.
+opportunity that passes the durability rules above — to protect. The system
+does not continuously monitor every possible context.
 
-For an observing capability, the system conceptually retains:
+While collecting evidence for a capability, the system conceptually retains:
 
 - Event identity and matchup agreement across sources.
 - Pregame observations, when the window existed.
@@ -268,6 +367,8 @@ For an observing capability, the system conceptually retains:
 - The last eligible sportsbook price before that transition.
 - Quote freshness and source timestamps.
 - Source errors, empty responses, and ambiguous event matches.
+- The exact capability grain and policy version under which each observation
+  was collected.
 
 Observation must be able to begin mid-event: a first bet placed near or after
 the true start yields little or no pregame window, and the design treats that
@@ -292,18 +393,23 @@ Possible outcomes:
   unsafe.
 
 Agreement or safe recovery allows affected rows to be upgraded (see §9).
-Unresolved and contradictory cases remain excluded, and contradiction also
-counts as negative evidence against the source (§7, §8).
+Unresolved and contradictory rows remain excluded. Negative evidence is
+attributed to the capability that failed: an identity mismatch counts against
+identity/matching, a start mismatch against that start source, a stale quote
+against price freshness, and a missing market against that book and market
+family. A normal sportsbook decision not to offer a market is a coverage
+limitation, not evidence that the actual-start source is unreliable.
 
-### 6. Use family inheritance conservatively — and know what it transfers
+### 6. Use family evidence conservatively — as a prior, not inherited trust
 
 New contexts often belong to a familiar family. Framed by the two evidence
-types, inheritance becomes precise:
+types, the permitted use of family evidence becomes precise:
 
-- **Source correctness transfers.** If a results provider's soccer scoreboards
-  have proven reliable across five competitions — including delayed kickoffs —
-  a sixth competition on the same provider inherits most of that
-  distributional trust.
+- **Source correctness supplies a prior.** If a results provider's soccer
+  scoreboards have proven reliable across five competitions — including
+  delayed kickoffs — that evidence can reduce the burden for a sixth
+  competition on the same provider. It does not make the sixth competition
+  trusted before its own path is exercised.
 - **System correctness does not transfer.** Whether *our* identity mapping,
   event matching, and market parsing work for the new competition must be
   re-earned with at least one clean, exactly-matched event. This is cheap —
@@ -311,17 +417,18 @@ types, inheritance becomes precise:
 
 Consequences:
 
-- A standard soccer competition inherits general soccer source-trust while
-  still requiring its own identity and matching confirmation.
-- A new combat promotion inherits nothing from UFC per-bout timing: different
-  promotion, different source behavior — the source-correctness prior does not
-  apply.
-- A special event inherits neither its parent sport's schedule behavior nor
-  its market behavior.
+- A standard soccer competition may receive a strong prior from general soccer
+  source evidence while still requiring its own identity and matching
+  confirmation.
+- A new combat promotion receives no prior from UFC per-bout timing when its
+  promotion or source behavior differs materially.
+- A special event receives no automatic prior for either its parent sport's
+  schedule behavior or its market behavior.
 
-Inheritance reduces the *quantity* of evidence required for an ordinary new
-context in a proven family. It never reduces the requirement to verify system
-correctness for the specific context.
+Family evidence reduces the *quantity* of new source evidence required for an
+ordinary context on a proven provider. It never removes the requirement to
+verify system correctness for the exact context and capability grain, and it
+can be overridden by known provider, competition, or event-type exceptions.
 
 ### 7. Promote on evidence — quality and quantity
 
@@ -333,19 +440,39 @@ protection exists for.
 Promotion policy therefore considers, per capability:
 
 - **System correctness:** at least one event matched exactly and
-  unambiguously, with the full capture path exercised.
-- **Source correctness:** either inherited from a proven family on the *same
-  source* (§6), or accumulated across enough events — with extra weight given
-  to any observed irregular event (delay, reschedule) handled correctly.
+  unambiguously, with the full path exercised at the capability record's exact
+  grain. This verifies only the route, source, book, and market family that
+  were actually tested.
+- **Source correctness:** supported either by a strong family prior on the
+  *same source* (§6) plus context-specific confirmation, or by evidence
+  accumulated across enough events on that source.
 - Whether an independent authoritative start agreed with live detection.
-- Whether the correct sportsbook quote was present and fresh (per book).
+- Whether the correct sportsbook quote and exact market were present and fresh
+  (per book and market family).
 - Whether the event type has unusual timing, such as cards or staged contests
   (stricter bar).
+- Negative as well as positive observations, weighted by attribution,
+  ambiguity, severity, and recency.
 
-Where family inheritance covers source correctness, promotion can follow the
-first clean event. For a genuinely new family or source, verification may
-intentionally take several events — and the interim state is Limited or
-Observing, honestly displayed, not a premature Verified.
+Where the family prior is strong, promotion can follow the first clean
+context-specific event if the defined policy says that is sufficient. For a
+genuinely new family or source, verification may intentionally take several
+events. An irregular event handled correctly is especially valuable, but the
+absence of an irregular event must not leave ordinary contexts unclassifiable
+forever; ongoing re-validation continues to test that risk after promotion.
+
+The evidence bar must be explicit and versioned before automatic promotion is
+enabled. It defines:
+
+- Minimum positive evidence for each capability type and family-prior level.
+- Which failures are high-severity enough for immediate contradiction.
+- How ambiguous observations are quarantined rather than counted as failures.
+- How negative evidence accumulates and decays.
+- Which source, matcher, parser, or policy changes invalidate old evidence.
+
+Changing the evidence policy does not silently reinterpret history. Capability
+records retain the policy version under which they were classified, and rows
+are re-evaluated only when the new policy identifies them as affected.
 
 ### 8. Keep verifying: demotion, freshness, and regression
 
@@ -353,39 +480,51 @@ Verification is not permanent, and "move backward if a source changes" needs a
 detection mechanism, because dedicated observation stops after promotion:
 
 - **Continuous cheap re-validation:** every routine capture on a verified
-  context doubles as a lightweight check. Disagreements (start mismatch, event
-  match failure, missing market) accumulate against the capability and trigger
-  automatic demotion to Observing — fail closed — with affected recent rows
-  re-flagged as provisional.
-- **Freshness:** Verified carries a timestamp. A context idle past a defined
-  age (or across a season boundary) degrades to "verified-stale": trusted
-  history is kept, but the next bet triggers re-confirmation before new rows
-  are admitted as trusted.
-- Demotion generates a notification; silent downgrades are as bad as silent
-  upgrades.
+  capability doubles as a lightweight check. Each disagreement is attributed
+  to the narrowest plausible capability. Missing market coverage does not
+  count against event identity or actual-start reliability.
+- **Severity and thresholds:** a high-confidence post-start capture or
+  authoritative start contradiction may immediately set health to
+  Contradicted. A single ambiguous match or transient empty response is
+  quarantined and investigated; it does not automatically demote unrelated
+  capabilities.
+- **Freshness:** Verified and Limited records carry timestamps. A record idle
+  past a defined age, across a season boundary, or beyond its source/policy
+  version becomes Stale. Trusted history is kept, but new rows depending on
+  that record remain provisional until re-confirmation.
+- **Causal re-evaluation:** contradiction re-evaluates rows within the
+  identified incident window — normally since the last known-good check or
+  source/version change. It does not indiscriminately invalidate all history.
+- A material health downgrade generates a notification; silent downgrades are
+  as bad as silent upgrades.
 
-### 9. Repair rows with provenance — all of them
+### 9. Repair all affected rows with permanent provenance
 
 When promotion or post-event recovery establishes a trustworthy close:
 
-- **Every** provisional row of that context/capability is re-evaluated — not
-  just the first or the triggering one. A context can accumulate several bets
-  across multiple days before verification completes.
-- Repair recomputes from preserved evidence; it never silently mutates. The
-  original captured values remain recoverable, and failure of a repair leaves
-  the row exactly as it was.
-- Repaired CLV is **permanently marked as repaired** — distinguishable from
-  natively captured CLV forever, because it was assembled under weaker
-  guarantees. Reports may aggregate it into trusted statistics, but the
-  provenance mark never disappears.
+- **Every affected** provisional row is re-evaluated — not just the first or
+  triggering row. "Affected" means the row depends on the same capability
+  grain, evidence/policy version, and relevant event or incident window. It
+  does not mean every row sharing only the broad context.
+- Evidence and derived values are conceptually separate. Repair derives a new
+  candidate from immutable preserved evidence; it never silently overwrites
+  the original capture. Failure leaves the existing row verdict unchanged.
+- Provenance is permanent: native capture, automatic reconstruction, and
+  manual reconstruction remain distinguishable forever.
+- Trust is judged independently. A reconstructed close backed by an
+  authoritative actual start and an exact, fresh pre-start quote may be
+  trusted; a native capture with weak timing evidence may remain provisional.
 - Rows that cannot be repaired stay provisional/excluded and roll up into the
   unresolved case (§10).
 
-### 10. Preserve one visible, consolidated unresolved action
+### 10. Preserve one visible, consolidated case
 
-If automatic onboarding cannot finish, the user receives **one case per
-unresolved context-capability**, carrying the list of affected rows — ten bets
-on one unonboarded league are one case, not ten notifications.
+If automatic onboarding cannot finish, the user receives one context-level
+case with capability-level issues and the affected rows. Ten bets on one
+unonboarded league are one case, not ten notifications; ten different missing
+capabilities are child issues, not ten unrelated top-level cases. The
+deduplication key includes the exact capability grain so distinct books or
+market families are not incorrectly merged.
 
 Each case identifies the specific missing fact:
 
@@ -396,17 +535,30 @@ Each case identifies the specific missing fact:
 - No benchmark line exists for CLV comparison.
 - A manual or book-specific source is required.
 
-And each case terminates only in one of three user-visible resolutions:
+Each issue reaches one of five user-visible resolutions:
 
 1. **Verified** — automation eventually succeeded.
-2. **Manual** — the user supplies or commits to supplying the evidence.
-   User-attested facts (e.g., "the fight actually started at 22:41") make the
-   *rows* trustworthy, marked as manually evidenced; they never make the
-   *context* verified.
-3. **Retired** — the user explicitly accepts permanent exclusion.
+2. **Limited** — automation proved explicitly bounded support and records what
+   remains outside it.
+3. **Blocked** — automation completed but current sources cannot establish
+   trust. Rows remain excluded, the reason remains visible, and new evidence
+   can reopen the issue automatically.
+4. **Manual** — the user supplies or commits to supplying qualifying evidence.
+   Manual evidence can make individual rows trustworthy but never promotes the
+   context automatically.
+5. **Retired** — the user explicitly accepts permanent exclusion.
 
-The default, absent any decision, is continued exclusion with the case held
-open. Cases never auto-close unresolved.
+An automatic investigation can therefore finish without pretending that the
+capability works and without requiring the user to retire it. Blocked and
+Limited issues leave a persistent limitation in the capability profile, while
+the active investigation case may close. They reopen when a new source,
+mapping, policy version, or qualifying opportunity creates a real path forward.
+
+Manual evidence is an evidence package, not an unsupported assertion. It
+records the fact being supplied (start, price, result, or other), its source or
+supporting artifact, when it was observed, who attested it, and any confidence
+or limitation. Evidence without adequate support remains visible but cannot
+enter trusted aggregate CLV.
 
 ---
 
@@ -418,6 +570,17 @@ retroactive change to history; showing it unmarked would invite anchoring on
 an untrusted number. The badge (and the repaired mark after §9) makes every
 number's trust level legible at a glance.
 
+The display must distinguish two separate questions:
+
+1. **Is the closing price trustworthy?**
+2. **Is a compatible benchmark available, making CLV computable?**
+
+A row may have a trusted closing price but no benchmark, or a benchmark may
+exist while the user's closing price remains provisional. "Unbenchmarkable"
+does not demote closing-price capture, settlement, or recovery. Benchmark
+compatibility requires the same market definition, period, side, and point;
+the system must not silently substitute a merely similar market.
+
 ---
 
 ## One-off and ephemeral contexts
@@ -425,11 +588,15 @@ number's trust level legible at a glance.
 The full observe → verify → promote pipeline produces reusable knowledge. A
 one-night promotion or single special event produces none — the context will
 never recur. The model therefore allows an **event-scoped** designation at
-discovery time: the user (or a conservative heuristic, user-confirmed) can
-classify a context as ephemeral, which routes it directly to the Manual /
-Retired decision with row-level evidence handling, instead of spending the
-observation machinery on unrepeatable verification. An ephemeral context that
-turns out to recur can be re-opened as ordinary.
+discovery time: the user, or a conservative user-confirmed heuristic, can
+classify a context as ephemeral.
+
+Ephemeral means "do not build reusable context trust," not "do not automate."
+The system still collects useful event evidence, verifies individual rows
+automatically when authoritative facts exist, and uses manual evidence only
+where necessary. It simply avoids promoting the unrepeatable event into a
+reusable context capability. An ephemeral context that turns out to recur can
+be reopened as ordinary.
 
 ---
 
@@ -437,18 +604,19 @@ turns out to recur can be re-opened as ordinary.
 
 | Scenario | Expected behavior |
 |---|---|
-| Known and verified context | Normal capture, settlement, recovery, trusted CLV — each capture doubling as cheap re-validation. |
-| New context in a familiar family, same source | Log the bet, show status, observe, verify post-event; promote after the first clean event (source trust inherited); repair all provisional rows. |
+| Known context with all capabilities needed by this bet fresh and verified | Normal capture and trusted CLV; settlement proceeds independently; each capture doubles as cheap re-validation. |
+| New context in a familiar family, same source | Log the bet, show status, collect evidence, verify post-event; a strong family prior can permit promotion after the first clean event if policy allows; re-evaluate all affected provisional rows. |
 | New context in a new family or on a new source | As above, but promotion may take several events; interim rows stay provisional and badged. |
 | First bet placed at/after the real start | Observation starts mid-event; verification leans on post-hoc sources; the row may be unrepairable — case stays visible either way. |
 | New context with no live start signal | Capture available prices, keep CLV excluded, seek an authoritative post-event start. |
-| New context with no authoritative start source | Retain evidence, classify Limited, present one consolidated unresolved case. |
+| New context with no authoritative start source | Retain evidence, classify the start capability Blocked, keep rows excluded, and record the missing fact in the consolidated case/profile. |
 | Identity ambiguous (could be a known context) | Treat as new — never as known — until identity is positively resolved. |
 | Manual or exotic market | Explain at log time that automatic CLV is unavailable and identify the required manual information. |
-| One-off special event / promotion | Offer event-scoped classification; row-level manual evidence instead of context onboarding. |
+| One-off special event / promotion | Offer event-scoped classification; automatically verify rows where possible without creating reusable context trust. |
 | Upcoming event | Pending, never a historical recovery failure. |
-| Source behavior later changes | Automatic demotion to Observing, recent rows re-flagged, user notified. |
-| Verified context idle for a long gap / new season | Verified-stale; next bet triggers re-confirmation before new trusted rows. |
+| Start-source behavior later changes | Set only the affected start capability to Contradicted, re-evaluate rows in the causal window, and notify the user. |
+| Verified capability idle for a long gap / new season | Health becomes Stale; next relevant bet triggers re-confirmation before dependent new rows are trusted. |
+| Closing price trusted but benchmark missing | Preserve the trusted close, report CLV as unbenchmarkable, and do not demote unrelated capabilities. |
 
 ---
 
@@ -462,7 +630,9 @@ trusted CLV into one failure count. At minimum, reporting separates:
 - New-context observation in progress (provisional rows, badged).
 - Completed rows that are automatically recoverable.
 - Completed rows repaired after verification (provenance-marked).
-- Completed rows blocked by a missing actual-start source.
+- Completed rows blocked by a missing actual-start source or other stable
+  automatic limitation.
+- Rows with a trusted closing price but no compatible CLV benchmark.
 - Manual or book-specific rows (including user-attested ones).
 - Rows excluded by user decision (Retired contexts).
 - Live bets, props, voids, and other rows excluded by design.
@@ -491,6 +661,12 @@ makes every count map to a meaningful next action.
 10. Retirement (permanent exclusion) is a user decision, never a system one.
 11. Manual evidence is identified clearly and never represented as
     automatically verified.
+12. A missing benchmark never turns an otherwise trustworthy closing price
+    into an untrustworthy one; it makes CLV uncomputable.
+13. Negative evidence affects only the capability grains to which it can be
+    confidently attributed.
+14. If the authoritative capability profile is unavailable, consumers fail
+    closed; no consumer falls back to a private support table.
 
 ---
 
@@ -499,20 +675,28 @@ makes every count map to a meaningful next action.
 Vision: the user never needs to remember to request support for a new context.
 Measured by:
 
-- Every new-context first bet reaches a terminal classification (Verified /
-  Manual / Retired) within a defined number of days without the user having to
-  prompt an investigation.
-- Zero rows in trusted CLV whose closing price postdates the authoritative
-  actual start — auditable retrospectively at any time.
+- Every new-context first bet reaches a classified outcome (Verified, Limited,
+  Blocked, Manual, or Retired) within a defined interval after the event and
+  its evidence windows complete, without the user having to prompt an
+  investigation. Upcoming events remain Pending and do not violate this
+  measure.
+- Among trusted rows, zero closing prices postdate the best available
+  authoritative actual start. Every trusted row retains enough evidence to
+  audit that verdict retrospectively.
 - Exactly one store of capability knowledge; no consumer maintains a private
   copy of "what works."
-- All provisional and repaired rows are visually distinguishable in every
-  surface that displays CLV.
+- Provenance and trust are separately visible in every surface that displays
+  closing price or CLV.
 - Upcoming bets never appear in historical-failure counts.
 - Adding an ordinary context in a known family on a proven source requires no
   code deployment.
 - Every open unresolved case is visible in one place, with its affected rows
   and its specific missing fact.
+- The first-bet provisional rate, automatic repair rate, median time to
+  classification, unresolved-case age, false promotion/demotion rate, evidence
+  collection cost, and number of required user interventions are measured.
+- No ordinary sportsbook market-coverage miss demotes an unrelated identity,
+  start, result, or benchmark capability.
 
 ---
 
@@ -522,6 +706,8 @@ Measured by:
   combat promotion.
 - Guaranteeing a CLV benchmark exists for every context (no sharp line listed
   → honestly reported as unbenchmarkable, not approximated).
+- Treating settlement support as a prerequisite for trustworthy closing-price
+  capture or CLV. These capabilities are reported independently.
 - Treating any available timestamp as authoritative.
 - Automatically trusting a context solely because another context in the same
   sport works.
@@ -538,27 +724,39 @@ Measured by:
 The conceptual model leaves policy choices open:
 
 1. Evidence bar: how many events, and which irregular-event observations,
-   promote source correctness for (a) a context in a proven family on the same
-   source, (b) a new family or new source?
-2. Which capability grains matter enough to track separately at first
-   (context × book for capture? context × market class for settlement?), and
-   which can start coarse?
+   promote source correctness for (a) a context with a strong family prior on
+   the same source, (b) a new family or new source? Which severe contradictions
+   cause immediate fail-closed health changes?
+2. Which capability and market-family boundaries are used initially, and how
+   are overly broad records split without retroactively blessing rows?
 3. Where the single authoritative capability profile lives, given that the
    odds tool and the results checker are separately deployed systems — and
-   which one owns writes.
+   which one owns writes and transition decisions.
 4. Which limitations block logging versus produce provisional capture.
 5. Where onboarding status, provisional badges, and unresolved cases are
    displayed.
-6. Freshness policy: how long Verified lasts unexercised; what a season
-   boundary means per sport.
-7. Demotion thresholds: how many routine-capture disagreements trigger
-   automatic demotion.
+6. Freshness policy: how long verification lasts unexercised; what a season
+   boundary means per sport, source, and capability.
+7. Negative-evidence policy: severity, attribution, ambiguity quarantine,
+   causal re-evaluation window, accumulation, and decay.
 8. What counts as acceptable user-attested evidence for a row (start time,
-   result, price), and how it is recorded.
+   result, price), which supporting artifacts are required, and how confidence
+   is represented.
 9. When the ephemeral (event-scoped) designation is offered or suggested.
 10. Evidence retention: how long observation evidence is kept for
-    re-evaluation and audit, and at what storage cost.
-11. Benchmark policy: what CLV is measured against in contexts the primary
-    sharp reference does not list, if anything.
+     re-evaluation and audit, and at what storage cost.
+11. Benchmark policy: compatible market definitions, timestamp policy,
+    devigging, preferred and fallback sources, and what happens when the
+    primary sharp reference does not list the market.
+12. Scanner-intent policy: deduplication, expiry, persistence threshold, and
+    API/credit budget for surfaced opportunities without bets.
+13. Canonical identity policy: hierarchy, aliases, tournament editions,
+    provider-key reuse, and how ambiguous identities are resolved or merged
+    without inheriting trust.
+14. Evidence and policy versioning: which source, matcher, parser, and policy
+    changes require re-confirmation or row re-evaluation.
+15. Case lifecycle: parent/child grouping, reopening, aging, notification
+    severity, and when a Blocked investigation may close while its limitation
+    remains visible.
 
 These decisions should be resolved before choosing implementation mechanics.
