@@ -149,7 +149,7 @@ def test_discover_new_context_mints_records(monkeypatch):
     monkeypatch.setattr(config, "ONBOARDING_ENFORCE", True, raising=False)
     appended = {}
     monkeypatch.setattr(gate, "_append_registry_alias",
-                        lambda cid, sk: appended.update({"cid": cid, "sk": sk}))
+                        lambda cid, sk: appended.update({"cid": cid, "sk": sk}) or True)
     gate.set_caches(CapabilityProfile([]), ContextRegistry([]))
     summary = gate.discover_for_bet(dict(mlb_record(), Sport="cricket_ipl"))
     assert summary["action"] == "new_context"

@@ -58,7 +58,7 @@ def _parse_utc(value) -> datetime | None:
         dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError:
         return None
-    return dt
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
 def _parse_json(value) -> dict:
@@ -144,14 +144,28 @@ class CapabilityRecord:
             "Notes": self.notes,
         }
 
+    def effective_health(self, now: datetime | None = None) -> str:
+        """Health after applying policy-version and idle-aging rules.
+
+        The scheduled verifier persists these transitions, but the hot trust
+        path also evaluates them so a delayed verifier can never leave stale
+        trust active.
+        """
+        now = now or policy.now_utc()
+        if self.health == policy.FRESH and (
+                self.policy_version < policy.POLICY_VERSION
+                or policy.is_idle_stale(self.last_verified, now)):
+            return policy.STALE
+        return self.health
+
     def authorizes_trust(self, *, within_bounds: bool = True) -> bool:
         # A Limited record only authorizes trust for a row inside its bounds; the
         # caller decides bounds membership and passes within_bounds.
         limited_ok = within_bounds if self.classification == policy.LIMITED else False
         if self.classification == policy.LIMITED:
-            return policy.authorizes_trust(self.classification, self.health,
+            return policy.authorizes_trust(self.classification, self.effective_health(),
                                            within_limited_bounds=limited_ok)
-        return policy.authorizes_trust(self.classification, self.health)
+        return policy.authorizes_trust(self.classification, self.effective_health())
 
 
 @dataclass(frozen=True)
@@ -163,6 +177,7 @@ class Requirement:
     qualifier under a capability (used for identity and the start disjunction)."""
     capability: str
     candidate_keys: tuple[str, ...] = ()
+    fallback_keys: tuple[str, ...] = ()
     any_of: tuple[tuple[str, str], ...] = ()
     within_bounds: bool = True
 
@@ -239,7 +254,7 @@ class CapabilityProfile:
             chosen = self._first_authorizing(req)
             if chosen is not None:
                 matrix[req.capability] = {
-                    "classification": chosen.classification, "health": chosen.health,
+                    "classification": chosen.classification, "health": chosen.effective_health(),
                     "authorized": True, "record_key": chosen.record_key,
                 }
             else:
@@ -248,7 +263,7 @@ class CapabilityProfile:
                 fallback = self._best_candidate(req)
                 matrix[req.capability] = {
                     "classification": fallback.classification if fallback else None,
-                    "health": fallback.health if fallback else None,
+                    "health": fallback.effective_health() if fallback else None,
                     "authorized": False,
                     "record_key": fallback.record_key if fallback else None,
                 }
@@ -265,6 +280,15 @@ class CapabilityProfile:
             rec = self._records.get(key)
             if rec is not None and rec.authorizes_trust(within_bounds=req.within_bounds):
                 return rec
+        # An exact record shadows grandfathered fallback trust even while it is
+        # still earning verification. This is how the any|family bridge narrows
+        # safely per book instead of blessing that book forever.
+        if any(key in self._records for key in req.candidate_keys):
+            return None
+        for key in req.fallback_keys:
+            rec = self._records.get(key)
+            if rec is not None and rec.authorizes_trust(within_bounds=req.within_bounds):
+                return rec
         for ctx_cap in req.any_of:
             for rec in self._by_ctx_cap.get(ctx_cap, []):
                 if rec.authorizes_trust(within_bounds=req.within_bounds):
@@ -275,6 +299,10 @@ class CapabilityProfile:
         """Any existing record for this requirement (for the matrix display when
         none authorized trust)."""
         for key in req.candidate_keys:
+            rec = self._records.get(key)
+            if rec is not None:
+                return rec
+        for key in req.fallback_keys:
             rec = self._records.get(key)
             if rec is not None:
                 return rec
@@ -361,6 +389,8 @@ def _append_note(existing: str, reason: str) -> str:
     reason = (reason or "").strip()
     if not reason:
         return existing
+    if any(line.strip().endswith(reason) for line in existing.splitlines()):
+        return existing
     stamp = policy.now_utc().date().isoformat()
     line = f"{stamp} {reason}"
     return f"{existing}\n{line}".strip() if existing else line
@@ -384,7 +414,8 @@ def clv_requirements(context_id: str, book: str, market_family: str) -> list[Req
         Requirement(policy.CAP_IDENTITY, any_of=((context_id, policy.CAP_IDENTITY),)),
         Requirement(CLV_START, any_of=((context_id, policy.CAP_START_LIVE),
                                        (context_id, policy.CAP_START_AUTHORITATIVE))),
-        Requirement(policy.CAP_CAPTURE, candidate_keys=(specific_capture, grandfathered_capture)),
+        Requirement(policy.CAP_CAPTURE, candidate_keys=(specific_capture,),
+                    fallback_keys=(grandfathered_capture,)),
     ]
 
 
@@ -417,8 +448,12 @@ class CapabilitySink:
 
 
 class _LiveSink(CapabilitySink):
-    """Upsert a record into the live Capabilities tab by Record Key. Best-effort:
-    a write failure is logged, never raised onto the settlement/capture path."""
+    """Upsert a record into the live Capabilities tab by Record Key.
+
+    The quota wrapper already retries transient failures. A final failure is
+    raised so scheduled verifier jobs become visibly red instead of reporting a
+    transition that never reached the authoritative sheet.
+    """
 
     def upsert(self, record: CapabilityRecord) -> None:
         try:
@@ -445,3 +480,51 @@ class _LiveSink(CapabilitySink):
                     "update", tab.update, f"A{target_row}:{end_col}{target_row}", [row_values])
         except Exception as exc:  # pragma: no cover - live-only path
             print(f"[capability_profile] ⚠ upsert failed for {record.record_key}: {exc}")
+            raise
+
+
+class _BatchLiveSink(CapabilitySink):
+    """Coalesce a verifier pass to one Capabilities batch update.
+
+    A rolling-window pass may touch the same three grains dozens of times. The
+    immediate sink is correct for one-off discovery decisions, but using it for
+    verification would turn each observation into another full-tab read/write.
+    """
+
+    def __init__(self):
+        self._pending: dict[str, CapabilityRecord] = {}
+
+    def upsert(self, record: CapabilityRecord) -> None:
+        self._pending[record.record_key] = record
+
+    def flush(self) -> int:
+        if not self._pending:
+            return 0
+        from sheets_reader import _get_spreadsheet
+        from sheets_quota import call_with_sheets_retry
+
+        tab = call_with_sheets_retry(
+            f"worksheet({CAPABILITIES_TAB})", _get_spreadsheet().worksheet, CAPABILITIES_TAB)
+        values = call_with_sheets_retry(
+            f"{CAPABILITIES_TAB} get_all_values", tab.get_all_values)
+        headers = values[0] if values else CAPABILITY_COLUMNS
+        key_col = headers.index("Record Key")
+        positions = {row[key_col]: idx for idx, row in enumerate(values[1:], start=2)
+                     if len(row) > key_col and row[key_col]}
+        next_row = len(values) + 1 if values else 2
+        end_col = chr(ord("A") + len(headers) - 1)
+        updates = []
+        for key, record in self._pending.items():
+            row_idx = positions.get(key)
+            if row_idx is None:
+                row_idx = next_row
+                next_row += 1
+            row_values = [record.to_row().get(header, "") for header in headers]
+            updates.append({"range": f"A{row_idx}:{end_col}{row_idx}",
+                            "values": [row_values]})
+        call_with_sheets_retry(
+            f"{CAPABILITIES_TAB} batch_update", tab.batch_update,
+            updates, value_input_option="RAW")
+        count = len(self._pending)
+        self._pending.clear()
+        return count

@@ -6,7 +6,7 @@ can never drift from what the code actually does:
 
   - actual_start.ESPN_ROUTES / TENNIS_ROUTES / COMBAT_ROUTES → start_authoritative
   - closing_provenance.TRUSTED_FLIP_SPORTS                    → start_live
-  - resolver.AUTOMATED_BET_TYPES (market classes)            → settlement
+  - config.AUTOMATED_BET_TYPES (market classes)              → settlement
   - pinnacle_closing.FEATURED_MARKETS                        → benchmark
   - odds-tool scannerConfig.supportedSports + marketsBySportClass → discovery, capture
 
@@ -268,7 +268,7 @@ def build_seed_rows(scanner_config_path: Path = ODDS_TOOL_SCANNER_CONFIG) -> lis
                               "pinnacle_closing.FEATURED_MARKETS", aliases=sport_key))
         for market_class in ("moneyline", "spread", "total"):
             add(_seed_row(cid, policy.CAP_SETTLEMENT, f"{market_class}|toa_scores",
-                          "resolver.AUTOMATED_BET_TYPES", aliases=sport_key))
+                          "config.AUTOMATED_BET_TYPES", aliases=sport_key))
 
     return list(rows.values())
 

@@ -58,6 +58,19 @@ def test_two_quarantines_in_window_stay_fresh():
     assert profile.get_record(key).health == policy.FRESH
 
 
+def test_quarantine_decays_after_thirty_clean_days():
+    key = record_key("soccer/x", policy.CAP_IDENTITY, "toa")
+    profile = CapabilityProfile([verified("soccer/x", policy.CAP_IDENTITY, "toa")])
+    rec = profile.get_record(key)
+    verifier._apply_negative(profile, rec, policy.FAILURE_AMBIGUOUS_MATCH,
+                             NOW - timedelta(days=31))
+    obs = Observation(context_id="soccer/x", event_id="clean-later",
+                      observed_at=NOW, identity_matched=True)
+    verifier.accumulate(profile, obs, now=NOW)
+    assert rec.evidence["quarantined"] == 0
+    assert rec.evidence["quarantine_events"] == []
+
+
 def test_missing_market_never_demotes():
     key = record_key("soccer/x", policy.CAP_CAPTURE, "fanduel|featured")
     rec = CapabilityRecord(record_key=key, context_id="soccer/x", capability=policy.CAP_CAPTURE,

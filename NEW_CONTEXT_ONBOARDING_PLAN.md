@@ -1,11 +1,10 @@
 # New Context Onboarding — Implementation Plan
 
-**Created:** 2026-07-16 · **Status:** Phases 0–2 implemented & verified against
-the live sheet (Fable greenlit continuation). Enforcement is code-complete
-behind `ONBOARDING_ENFORCE` (default off); a live simulation over real Bets
-shows **0 of 79 VERIFIED_CLOSE rows would downgrade** — safe to flip. See
-**§Implementation status** at the end. P0.2 policy numbers are frozen in
-`onboarding_policy.py` but **await Fable's ratification** (Josh deferred it).
+**Created:** 2026-07-16 · **Status:** Phases 0–6 implemented and audited;
+Phase 7 remains intentionally outstanding. Closing-quality enforcement and
+post-event promotion are enabled by default (both retain environment kill
+switches). P0.2 policy numbers are ratified and frozen in
+`onboarding_policy.py`. See **§Implementation status** and the final audit below.
 **Concept:** `NEW_LEAGUE_ONBOARDING_CONCEPT.md` (ratified). This plan turns it
 into phases with files, schemas, gates, and tests.
 **Scope:** Bet-Result-Checker (profile owner, verification, repair) AND
@@ -571,7 +570,7 @@ unrouted one-offs correctly stay provisional.
 ### Phase 2 — enforcement + discovery (implemented 2026-07-16, Fable greenlit)
 
 Config flags `ONBOARDING_SHADOW_MODE` (default **on**) / `ONBOARDING_ENFORCE`
-(default **off**) added to `config.py`, same shadow-then-enforce shape as
+(default **on**) added to `config.py`, same shadow-then-enforce shape as
 `PROPS_SHADOW_MODE`. A single façade, `onboarding_gate.py`, carries the logic so
 hot-path diffs are one line each:
 
@@ -644,10 +643,11 @@ Bets sheet, so the at-log badge is best eyeballed on a real log, not a junk one)
   = coverage, never demotes), `rows_in_causal_window`, and `run_verification`
   (apply vs shadow `proposed:` markers). `observation_from_bet` derives an
   Observation from a settled row's provenance columns.
-- **`config.py`** — `ONBOARDING_PROMOTE_SHADOW` (default on): promotions are
-  proposed-only until flipped; **demotions never shadow** (concept §8).
-- **`scripts/run_onboarding_verifier.py`** — cron/worker entrypoint, dry-run
-  default; wire into the worker's recovery cadence slot once reviewed.
+- **`config.py`** — `ONBOARDING_PROMOTE_SHADOW` is an opt-in kill switch
+  (default off): promotions apply when the evidence bar is met; **demotions
+  never shadow** (concept §8).
+- **`scripts/run_onboarding_verifier.py`** — scheduled from `trigger.py` and
+  retained as a manual entrypoint (dry-run default, `--apply` for writes).
 
 Tests: `test_family_priors` (6), `test_onboarding_verifier` (8), `test_demotion`
 (6). Full checker suite **501 passed**.
@@ -660,8 +660,9 @@ throwaway new-league context (`other/zzz_demo_new_league`) walked
 Discovered→Verified live (discovery minted 3 records; the verifier promoted all
 three after 3 clean events), then was fully deleted — tabs restored to 191/22.
 
-**Gate P4:** run with `ONBOARDING_PROMOTE_SHADOW=True` for a stretch, review the
-`proposed:` markers, then flip to False to let promotions land.
+**Gate P4:** superseded by the full audit below: event-level evidence dedupe,
+authoritative-start hydration, fail-visible/batched writes, and full regression
+tests were added before promotion enforcement became the default.
 
 ### Phase 5 — repair pipeline (implemented 2026-07-16)
 
@@ -780,3 +781,142 @@ behind P4**, or stale-triggered provisional rows will have no upgrade path.
 
 **VERDICT: READY to advance to Phase 2**, incorporating the five fixes and
 condition (3) above. No shadow week required.
+
+---
+
+## Full implementation audit and remediation (2026-07-16, Codex)
+
+### Scope and verdict
+
+Audited the implemented Phase 0–6 paths across both repositories: registry and
+profile storage, the closing-quality gate, settlement discovery, at-log status,
+post-event verification, promotion/demotion, repair, cases, decisions,
+notifications, parlay handling, and cross-repo parity. Phase 7 (scanner-first
+discovery, ephemeral contexts, and benchmark availability) is still a named
+future phase and was not treated as an implementation defect.
+
+The architecture was sound: the checker remains the only writer of registry and
+capability state; identity ambiguity and unreadable tabs fail closed; capability
+grain is explicit; settlement remains independent of CLV trust; row provenance
+feeds the existing CLV safety contract; and the Python/JavaScript parity fixture
+plus frontend CLV boundary tests provide unusually good regression protection.
+
+The audit did find several material gaps between the plan text and the running
+behavior. All findings below were fixed in code during this audit.
+
+### Findings and fixes
+
+1. **The verifier existed but was not scheduled.** It was only a manual script,
+   so evidence, promotions, demotions, freshness, and queued user decisions
+   could not progress automatically. `trigger.py` now runs the verifier on every
+   scheduled checker pass. Promotion shadow is opt-in (`ONBOARDING_PROMOTE_SHADOW=1`);
+   the default applies qualified transitions.
+
+2. **Rolling scans could count the same event repeatedly.** Evidence could be
+   inflated every time the 14-day window was reread, and several bets on one
+   event counted as several events. Evidence now keeps a bounded, hashed
+   per-grain event/state ledger. Identical observations are idempotent; a later
+   materially changed source result may be observed once more. Capability writes
+   are coalesced into one batch per verifier pass to avoid Sheets quota churn.
+
+3. **New contexts had a circular capture-promotion failure.** The gate correctly
+   changed a would-be `VERIFIED_CLOSE` to `PROVISIONAL`, but the verifier then
+   treated that stored value as failed capture evidence. An `onboarding:` marker
+   is now recognized as proof that the pre-gate result met `VERIFIED_CLOSE`, so a
+   genuinely new capture grain can earn promotion.
+
+4. **Authoritative-start verification was not actually performed by the
+   verifier.** It relied only on already-stamped Bets fields, which made ordinary
+   live-capture rows look unresolved and could quarantine healthy start routes.
+   The scheduled pass now resolves missing authoritative starts through
+   `actual_start.py`, caches by event, batch-stamps successful facts, and treats a
+   routed provider miss as transient rather than proof that no source exists.
+
+5. **Unknown markets could inherit moneyline trust.** A novel nonempty market key
+   fell through to `h2h`, including when Bet Type said Moneyline. Python and
+   JavaScript now map unmatched keys to a seedless `unknown` family. The stale
+   `CLV_REQUIRED_CAPABILITIES` tuple was replaced with the ratified
+   identity + (live OR authoritative start) + capture groups.
+
+6. **The grandfathered `any|family` bridge did not narrow safely.** A specific
+   Discovered book grain could still fall through to the verified `any` seed.
+   Exact records now shadow the fallback while they earn evidence. Discovery
+   mints the exact book/market grain even when the first bet used bridge trust;
+   once an exact grain verifies, the `any` bridge is made Stale while its history
+   is preserved. Superseded bridge records do not create false cases or alerts.
+
+7. **Freshness and demotion policy was mostly inert.** Policy-version and
+   120-day idle aging now fail closed on the hot trust path and are persisted by
+   the verifier. Quarantine events use their observation time, decay after the
+   ratified clean interval, and no longer masquerade as permanent contradictions.
+   A causal demotion atomically re-flags only dependent `VERIFIED_CLOSE` rows at
+   or after the last known-good check; the causal search is not truncated to the
+   14-day evidence window.
+
+8. **Always-on capture workers retained stale profile/registry caches.** The
+   Railway capture loop now refreshes lazy onboarding caches once per cycle, so a
+   registry edit or verifier transition takes effect without restarting the
+   worker. Final capability write failures now raise after quota retries, making
+   the scheduled job fail visibly rather than claiming a transition succeeded.
+
+9. **Case action buttons queued decisions that nothing consumed.** A checker-side
+   decision consumer now validates and applies Manual, Retire, and Reopen with
+   user transition authority, then marks each Discovery Queue row applied or
+   failed. The endpoint no longer accepts the not-yet-implemented Phase 7
+   `ephemeral` action and therefore cannot return fake success.
+
+10. **Onboarding notifications were not enabled by default and could miss state.**
+    Existing notification rules did not subscribe to onboarding event types.
+    The notification database now seeds a dedicated onboarding rule, uses
+    lifetime state-key dedupe, establishes an explicit initial snapshot even when
+    it is empty, polls immediately on startup, and detects `rows_repaired` from
+    Bets provenance. New-context, promotion, demotion, and repair events now have
+    an actual delivery route (subject to the user's global notification switch
+    and an active push subscription).
+
+11. **Cases could lose affected bets or close before repair.** Bets whose Context
+    ID was blank are now associated through the current registry. A context whose
+    capabilities are verified but whose gate-capped rows still need repair stays
+    open as `repair pending`; classified Manual/Retired/Blocked outcomes remain
+    terminal as intended.
+
+12. **Repair was not atomic.** The old flow cleared the close first and attempted
+    restoration after failure. Repair now verifies BetID and the exact original
+    values, then writes the new close, provenance, permanent `pre-repair:` marker,
+    and onboarding-marker removal in one Sheets batch. A failed request leaves
+    the original row untouched.
+
+13. **Some closing paths dropped onboarding markers, and parlays were incomplete.**
+    Historical trigger, retry, and repull paths now persist returned markers.
+    Parlays aggregate per-leg gate markers, discover per-leg grains, show a
+    composite at-log status, and use the parlay derivation during repair. This
+    keeps a single unverified leg from silently disappearing inside a combined
+    price.
+
+14. **Documentation drift remained from the pre-P2 review.** The top-level status,
+    enforcement defaults, policy ratification, inventory source label, and this
+    audit record now reflect the implemented system rather than the earlier
+    proposal state.
+
+### Verification
+
+- Bet-Result-Checker: **522 passed** (`python -m pytest -q`).
+- odds-tool: **607 passed** (`npm test`).
+- odds-tool client: production Vite build completed successfully. The existing
+  large-chunk advisory remains a non-blocking performance warning.
+- `git diff --check` found no whitespace errors in the checker changes.
+- No live Sheets rows, Railway services, or notification subscriptions were
+  mutated during this audit; verification used unit/integration tests and build
+  checks only.
+
+### Remaining planned work / operational follow-up
+
+- Phase 7 remains: scanner-first discovery, event-scoped ephemeral contexts, and
+  benchmark-availability records/UI.
+- After deployment, inspect the next scheduled checker run. The first pass may
+  hydrate authoritative starts and write more capability evidence than steady
+  state; subsequent passes are deduplicated and batched.
+- When a case reaches `repair pending`, run
+  `py scripts/repair_onboarded_rows.py` to preview and then
+  `py scripts/repair_onboarded_rows.py --apply` when the preview is acceptable.
+  This manual approval remains the deliberate Phase 5 gate.

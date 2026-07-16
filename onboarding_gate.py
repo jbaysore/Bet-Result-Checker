@@ -177,7 +177,16 @@ def discover_for_bet(bet: dict) -> dict:
     try:
         result = evaluate_capture(bet)
         if result.trusted:
-            return {"action": "trusted", "context_id": result.context_id}
+            # Grandfathered any|family trust is only a bridge. Mint the exact
+            # per-book grain on first encounter; it shadows the fallback from
+            # the next evaluation onward while it earns its own evidence.
+            created = []
+            if config.ONBOARDING_ENFORCE and result.context_id:
+                qualifier = f"{_field(bet, 'Book', 'book').lower()}|{result.market_family}"
+                if _create_discovered(result.context_id, policy.CAP_CAPTURE, qualifier,
+                                      "first bet on exact book/market grain"):
+                    created.append(f"{policy.CAP_CAPTURE}|{qualifier}")
+            return {"action": "trusted", "context_id": result.context_id, "created": created}
 
         # Shadow mode never mutates the sheet — log what discovery WOULD create
         # and stop. Record/alias creation happens only under enforce.
@@ -235,7 +244,8 @@ def _create_discovered(context_id: str, capability: str, qualifier: str, reason:
 
 
 def _discover_new_context(context_id: str, sport_key: str, book: str, market_family: str) -> list[str]:
-    _append_registry_alias(context_id, sport_key)
+    if not _append_registry_alias(context_id, sport_key):
+        raise RuntimeError(f"could not persist registry alias for {sport_key}")
     created = []
     for capability, qualifier in _grains_for(context_id, book, market_family):
         if _create_discovered(context_id, capability, qualifier, f"first bet: new context {sport_key}"):
@@ -264,7 +274,7 @@ def _propose_context_id(sport_key: str) -> str:
     return context_id_for_sport_key(sport_key)
 
 
-def _append_registry_alias(context_id: str, sport_key: str) -> None:
+def _append_registry_alias(context_id: str, sport_key: str) -> bool:
     """Append a Discovered sport_key alias to Context Registry (checker owns it).
     Idempotent-ish: the seed set never contains a NEW context, so this only fires
     for genuinely unseen keys; a duplicate is harmless (resolve dedups by
@@ -284,8 +294,10 @@ def _append_registry_alias(context_id: str, sport_key: str) -> None:
         call_with_sheets_retry("Context Registry append", tab.append_row,
                                [row.get(col, "") for col in REGISTRY_COLUMNS])
         get_registry(refresh=True)  # so a later bet this run resolves the new context
+        return True
     except Exception as exc:
         log_shadow("registry_append_error", {"context_id": context_id, "error": str(exc)})
+        return False
 
 
 # ── Shadow logging ───────────────────────────────────────────────────────────

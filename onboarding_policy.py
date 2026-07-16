@@ -77,11 +77,14 @@ CAPABILITIES = frozenset({
     CAP_CAPTURE, CAP_SETTLEMENT, CAP_RECOVERY, CAP_BENCHMARK,
 })
 
-# Capabilities a bet's CLV trust depends on at finalize time (plan §0.5,
-# Phase 2): a capture cannot finalize VERIFIED_CLOSE unless these resolve to
-# (Verified|in-Limited-bounds) + Fresh. Settlement is deliberately absent —
-# settlement runs independently of closing-price trust (concept non-goal #3).
-CLV_REQUIRED_CAPABILITIES = (CAP_IDENTITY, CAP_START_LIVE, CAP_CAPTURE)
+# Capability groups a bet's CLV trust depends on at finalize time (plan §0.5,
+# Phase 2). Every group is required; any member of a multi-member group may
+# satisfy that requirement. Settlement is deliberately absent.
+CLV_REQUIRED_CAPABILITY_GROUPS = (
+    (CAP_IDENTITY,),
+    (CAP_START_LIVE, CAP_START_AUTHORITATIVE),
+    (CAP_CAPTURE,),
+)
 
 
 # ── Market families v1 (plan §0.3, §P0.2 #2) ─────────────────────────────────
@@ -90,15 +93,18 @@ MF_FEATURED = "featured"        # spread / total mainlines + their alternates
 MF_TEAM_TOTAL = "team_total"
 MF_PROP = "prop"
 MF_OUTRIGHT = "outright"
-MARKET_FAMILIES = frozenset({MF_H2H, MF_FEATURED, MF_TEAM_TOTAL, MF_PROP, MF_OUTRIGHT})
+MF_UNKNOWN = "unknown"              # intentionally has no grandfathered seeds
+MARKET_FAMILIES = frozenset({
+    MF_H2H, MF_FEATURED, MF_TEAM_TOTAL, MF_PROP, MF_OUTRIGHT, MF_UNKNOWN,
+})
 
 
 def market_family_for(market_key: str | None = None, bet_type: str | None = None) -> str:
     """Collapse an Odds-API market key (or a sheet Bet Type) to a market family.
 
     Market key wins when present (it is more specific); Bet Type is the fallback
-    for legacy rows that predate the Market Key column. Unknown inputs default to
-    the moneyline family, the narrowest safe assumption for capture grain.
+    for legacy rows that predate the Market Key column. Unknown inputs map to a
+    seedless family so a novel market can never inherit moneyline trust.
     """
     key = str(market_key or "").strip().lower()
     if key:
@@ -114,6 +120,7 @@ def market_family_for(market_key: str | None = None, bet_type: str | None = None
         if key.startswith("player_") or key.startswith("batter_") \
                 or key.startswith("pitcher_") or "_props" in key:
             return MF_PROP
+        return MF_UNKNOWN
     bt = str(bet_type or "").strip().lower()
     if bt in ("moneyline", "draw"):
         return MF_H2H
@@ -121,7 +128,7 @@ def market_family_for(market_key: str | None = None, bet_type: str | None = None
         return MF_FEATURED
     if bt == "prop":
         return MF_PROP
-    return MF_H2H
+    return MF_UNKNOWN
 
 
 # ── Market class for settlement grain (plan §0.3 `settlement`) ───────────────
@@ -140,7 +147,7 @@ def market_class_for(bet_type: str | None = None, market_key: str | None = None)
         return "prop"
     family = market_family_for(market_key, bet_type)
     return {MF_H2H: "moneyline", MF_FEATURED: "spread",
-            MF_TEAM_TOTAL: "total", MF_PROP: "prop", MF_OUTRIGHT: "outright"}.get(family, "moneyline")
+            MF_TEAM_TOTAL: "total", MF_PROP: "prop", MF_OUTRIGHT: "outright"}.get(family, "unknown")
 
 
 # ── Evidence bar (concept §7, plan §P0.2 #1) ─────────────────────────────────

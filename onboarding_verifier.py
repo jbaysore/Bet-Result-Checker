@@ -20,6 +20,7 @@ the live wrapper reads the tabs and flags.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -40,6 +41,7 @@ class Observation:
     """The facts of one completed event as they bear on a context's grains."""
     context_id: str
     event_id: str = ""
+    observation_id: str = ""           # BetID fallback when provider event id is absent
     observed_at: datetime | None = None
     identity_matched: bool = True        # exactly one unambiguous event matched
     start_source: str = "toa_scores"     # qualifier of the start capability exercised
@@ -108,6 +110,100 @@ def _ensure(profile: CapabilityProfile, context_id: str, capability: str,
     return rec
 
 
+def _claim(record: CapabilityRecord, obs: Observation, signature: str) -> bool:
+    """Claim one durable event/state observation for one grain.
+
+    The verifier scans a rolling window on every scheduled run. Without this
+    ledger, the same game (or several bets on that game) would inflate evidence
+    every 30 minutes. A changed state may be claimed once more so a later
+    authoritative resolution can supersede an earlier unresolved observation.
+    """
+    raw_id = obs.event_id or obs.observation_id
+    if not raw_id and obs.observed_at is not None:
+        raw_id = obs.observed_at.isoformat()
+    if not raw_id:
+        return False
+    token = hashlib.sha256(str(raw_id).encode("utf-8")).hexdigest()[:16]
+    state = hashlib.sha256(signature.encode("utf-8")).hexdigest()[:12]
+    seen = record.evidence.setdefault("seen", {})
+    if not isinstance(seen, dict):
+        seen = {}
+        record.evidence["seen"] = seen
+    if seen.get(token) == state:
+        return False
+    seen[token] = state
+    # Keep Evidence Summary comfortably below Sheets' per-cell limit.
+    while len(seen) > 500:
+        seen.pop(next(iter(seen)))
+    return True
+
+
+def _decay_quarantine(record: CapabilityRecord, at: datetime) -> None:
+    events = [policy.parse_utc_datetime(d)
+              for d in record.evidence.get("quarantine_events", [])]
+    events = [d for d in events if d is not None]
+    last = max(events, default=None)
+    if policy.quarantine_decayed(last, at):
+        record.evidence["quarantine_events"] = []
+        record.evidence["quarantined"] = 0
+
+
+def _record_clean(profile: CapabilityProfile, record: CapabilityRecord,
+                  observed_at: datetime) -> None:
+    _decay_quarantine(record, observed_at)
+    _bump(record, "clean")
+    _add_day(record, "days", observed_at)
+    if record.classification in (policy.VERIFIED, policy.LIMITED):
+        recent_quarantine = any(policy.parse_utc_datetime(d) is not None
+                                for d in record.evidence.get("quarantine_events", []))
+        if record.health == policy.STALE and not recent_quarantine:
+            record.health = policy.FRESH
+            record.notes = (record.notes + "\n" if record.notes else "") + \
+                f"{observed_at.date().isoformat()} re-confirmed by clean evidence"
+        if record.health == policy.FRESH:
+            record.last_verified = max(filter(None, [record.last_verified, observed_at]))
+            record.policy_version = policy.POLICY_VERSION
+
+
+def age_stale_records(profile: CapabilityProfile, *, now: datetime) -> list[CapabilityRecord]:
+    """Persist policy-version/idle freshness aging before evaluating trust."""
+    aged = []
+    for rec in profile.records():
+        if (rec.classification in (policy.VERIFIED, policy.LIMITED)
+                and rec.health == policy.FRESH
+                and rec.effective_health(now) == policy.STALE):
+            profile.set_health(rec.record_key, policy.STALE,
+                               "stale: policy version or idle freshness window")
+            aged.append(rec)
+    return aged
+
+
+def narrow_grandfathered_bridges(profile: CapabilityProfile) -> list[CapabilityRecord]:
+    """Disable any|family trust once one exact book grain has verified.
+
+    We preserve the seed record/history and stale its health rather than using a
+    user-only Retired classification transition. Existing trusted rows remain
+    historical; future unseen books fail closed from their first bet.
+    """
+    verified = set()
+    for rec in profile.records():
+        if (rec.capability == policy.CAP_CAPTURE and not rec.qualifier.startswith("any|")
+                and rec.classification in (policy.VERIFIED, policy.LIMITED)
+                and rec.effective_health() == policy.FRESH):
+            _, _, family = rec.qualifier.partition("|")
+            verified.add((rec.context_id, family))
+    narrowed = []
+    for rec in profile.records():
+        if (rec.capability != policy.CAP_CAPTURE or not rec.qualifier.startswith("any|")):
+            continue
+        family = rec.qualifier.split("|", 1)[1]
+        if ((rec.context_id, family) in verified and rec.health == policy.FRESH):
+            profile.set_health(rec.record_key, policy.STALE,
+                               "stale: grandfathered bridge superseded by exact book grain")
+            narrowed.append(rec)
+    return narrowed
+
+
 def accumulate(profile: CapabilityProfile, obs: Observation, *, now: datetime) -> list[CapabilityRecord]:
     """Fold one observation into the evidence counters of its grain records,
     creating Discovered records as needed. Returns the records touched.
@@ -119,41 +215,45 @@ def accumulate(profile: CapabilityProfile, obs: Observation, *, now: datetime) -
 
     # identity
     ident = _ensure(profile, obs.context_id, policy.CAP_IDENTITY, "toa", now)
-    if obs.identity_matched:
-        _bump(ident, "clean"); _add_day(ident, "days", obs.observed_at)
-        if obs.irregular:
-            _bump(ident, "irregular_ok")
-    else:
-        _apply_negative(profile, ident, policy.FAILURE_IDENTITY_MISMATCH, now)
-    touched.append(ident)
+    event_time = obs.observed_at or now
+    if _claim(ident, obs, f"identity:{obs.identity_matched}:{obs.irregular}"):
+        if obs.identity_matched:
+            _record_clean(profile, ident, event_time)
+            if obs.irregular:
+                _bump(ident, "irregular_ok")
+        else:
+            _apply_negative(profile, ident, policy.FAILURE_IDENTITY_MISMATCH, event_time)
+        touched.append(ident)
 
     # start
     cap, qual = start_grain(obs.start_source or "toa_scores")
     start_rec = _ensure(profile, obs.context_id, cap, qual, now)
-    if obs.start_outcome in (START_AGREEMENT, START_RECOVERABLE):
-        _bump(start_rec, "clean"); _add_day(start_rec, "days", obs.observed_at)
-        if obs.irregular:
-            _bump(start_rec, "irregular_ok")
-    elif obs.start_outcome == START_CONTRADICTION:
-        _apply_negative(profile, start_rec, policy.FAILURE_START_CONTRADICTION, now)
-    elif obs.start_outcome == START_UNRESOLVED:
-        _apply_negative(profile, start_rec, policy.FAILURE_TRANSIENT_EMPTY, now)
-    elif obs.start_outcome == START_MISSING:
-        _bump(start_rec, "no_source")
-    touched.append(start_rec)
+    if _claim(start_rec, obs, f"start:{obs.start_source}:{obs.start_outcome}:{obs.irregular}"):
+        if obs.start_outcome in (START_AGREEMENT, START_RECOVERABLE):
+            _record_clean(profile, start_rec, event_time)
+            if obs.irregular:
+                _bump(start_rec, "irregular_ok")
+        elif obs.start_outcome == START_CONTRADICTION:
+            _apply_negative(profile, start_rec, policy.FAILURE_START_CONTRADICTION, event_time)
+        elif obs.start_outcome == START_UNRESOLVED:
+            _apply_negative(profile, start_rec, policy.FAILURE_TRANSIENT_EMPTY, event_time)
+        elif obs.start_outcome == START_MISSING:
+            _bump(start_rec, "no_source")
+        touched.append(start_rec)
 
     # capture
     if obs.capture_family:
         book = (obs.capture_book or "any").strip().lower() or "any"
         crec = _ensure(profile, obs.context_id, policy.CAP_CAPTURE,
                        f"{book}|{obs.capture_family}", now)
-        if obs.missing_market:
-            pass  # coverage limitation — no evidence for or against (concept §5)
-        elif obs.capture_clean:
-            _bump(crec, "clean"); _add_day(crec, "days", obs.observed_at)
-        else:
-            _apply_negative(profile, crec, policy.FAILURE_STALE_QUOTE, now)
-        touched.append(crec)
+        if _claim(crec, obs, f"capture:{obs.capture_clean}:{obs.missing_market}"):
+            if obs.missing_market:
+                pass  # coverage limitation — no evidence for or against (concept §5)
+            elif obs.capture_clean:
+                _record_clean(profile, crec, event_time)
+            else:
+                _apply_negative(profile, crec, policy.FAILURE_STALE_QUOTE, event_time)
+            touched.append(crec)
 
     for rec in touched:
         profile._store(rec)  # persist counters (sink write in live mode; in-memory in tests)
@@ -169,6 +269,7 @@ def _apply_negative(profile: CapabilityProfile, record: CapabilityRecord,
         return
     _bump(record, "neg")
     if severity == policy.SEV_IMMEDIATE:
+        _bump(record, "contradictions")
         if record.classification in (policy.VERIFIED, policy.LIMITED):
             profile.set_health(record.record_key, policy.CONTRADICTED,
                                f"contradicted: {failure_kind}")
@@ -197,7 +298,8 @@ def evaluate_promotion(profile: CapabilityProfile, record: CapabilityRecord, *,
         return None
     prior = prior_fn(profile, record.context_id, record.qualifier, record.capability)
     distinct_days = len(set(record.evidence.get("days", []) or []))
-    has_contradiction = int(record.evidence.get("neg", 0) or 0) > 0
+    has_contradiction = (int(record.evidence.get("contradictions", 0) or 0) > 0
+                         or record.health == policy.CONTRADICTED)
     if policy.meets_evidence_bar(clean_events=clean, distinct_days=distinct_days,
                                  prior=prior, has_contradiction=has_contradiction):
         return Proposal(record.record_key, record.classification, policy.VERIFIED,
@@ -254,6 +356,12 @@ def observation_from_bet(bet: dict, resolution) -> Observation | None:
     detected = policy.parse_utc_datetime(bet.get("Start Detected At"))
     actual = policy.parse_utc_datetime(bet.get("Actual Start"))
     outcome = classify_start(detected, actual)
+    if (actual is None and bet.get("__actual_start_attempted")
+            and not bet.get("__actual_start_route_missing")):
+        # A routed provider miss is transient/unresolved, not proof that no
+        # source exists. Never auto-Block a context because ESPN/MLB had a bad
+        # response during one verifier pass.
+        outcome = START_UNRESOLVED
     if detected is not None:
         start_source = "toa_scores"
     else:
@@ -261,14 +369,20 @@ def observation_from_bet(bet: dict, resolution) -> Observation | None:
         start_source = _ACTUAL_SOURCE_TO_QUALIFIER.get(raw, raw or "toa_scores")
     family = policy.market_family_for(bet.get("Market Key"), bet.get("Bet Type"))
     quality = str(bet.get("Closing Quality") or "").strip().upper()
+    notes = str(bet.get("Notes") or "").lower()
+    gate_capped_clean = "onboarding:" in notes and "onboarding: demoted" not in notes
     return Observation(
         context_id=resolution.context_id,
         event_id=str(bet.get("Event ID") or ""),
+        observation_id=str(bet.get("BetID") or ""),
         observed_at=policy.parse_utc_datetime(bet.get("Closing Observed At")) or policy.now_utc(),
         identity_matched=bool(str(bet.get("Event ID") or "").strip()),
         start_source=start_source, start_outcome=outcome,
         capture_book=str(bet.get("Book") or ""), capture_family=family,
-        capture_clean=(quality == "VERIFIED_CLOSE"),
+        # An onboarding marker is written only when the pre-gate quality was
+        # VERIFIED_CLOSE. Treat it as clean evidence or a new context's capture
+        # grain could never earn promotion (the gate itself made it provisional).
+        capture_clean=(quality == "VERIFIED_CLOSE" or gate_capped_clean),
     )
 
 
@@ -280,13 +394,21 @@ def run_verification(profile: CapabilityProfile, observations: list[Observation]
     and blocks. Demotions already happened during accumulation. `apply` False =
     shadow: proposals are written as `proposed:` Notes markers, not applied."""
     now = now or policy.now_utc()
+    age_stale_records(profile, now=now)
     touched: dict[str, CapabilityRecord] = {}
     for obs in observations:
         for rec in accumulate(profile, obs, now=now):
             touched[rec.record_key] = rec
 
     proposals: list[Proposal] = []
-    for rec in touched.values():
+    # Re-evaluate every Discovered record with durable evidence, not only grains
+    # changed in this pass. Otherwise turning promotion shadow off later would
+    # never apply already-proposed transitions because their observations were
+    # correctly deduplicated.
+    candidates = {rec.record_key: rec for rec in profile.records()
+                  if rec.classification == policy.DISCOVERED and rec.evidence}
+    candidates.update(touched)
+    for rec in candidates.values():
         proposal = evaluate_promotion(profile, rec, now=now, prior_fn=prior_fn) \
             or evaluate_block(rec)
         if proposal is None:
@@ -304,4 +426,6 @@ def run_verification(profile: CapabilityProfile, observations: list[Observation]
                 "record_key": proposal.record_key, "to": proposal.to_classification,
                 "reason": proposal.reason, "applied": proposal.applied})
         proposals.append(proposal)
+    if apply:
+        narrow_grandfathered_bridges(profile)
     return proposals

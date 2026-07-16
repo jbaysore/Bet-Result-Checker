@@ -449,6 +449,10 @@ def _resolve_event_id(record: dict, games: list, commence: datetime,
 
 
 def process_queue(tab, now: datetime | None = None):
+    # This is an always-on Railway process. Refresh lazy onboarding reads once
+    # per capture cycle so registry edits and verifier transitions take effect
+    # without a worker restart.
+    onboarding_gate.reset_caches()
     now = now or utc_now()
     rows = tab.get_all_values()
     if not rows:

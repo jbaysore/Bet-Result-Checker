@@ -63,6 +63,10 @@ def classify_repair_row(bet: dict, is_trusted: bool) -> dict:
 
 
 def _is_trusted(profile: CapabilityProfile, registry: ContextRegistry, bet: dict) -> bool:
+    if bet.get("is_parlay"):
+        return bool(bet.get("legs")) and all(_is_trusted(
+            profile, registry, {**leg, "book": bet.get("book", "")})
+            for leg in bet["legs"])
     resolution = registry.resolve(bet.get("sport", ""), game_date=bet.get("game_date"))
     if not resolution.is_known:
         return False
@@ -72,7 +76,8 @@ def _is_trusted(profile: CapabilityProfile, registry: ContextRegistry, bet: dict
 
 # ── Loading ──────────────────────────────────────────────────────────────────
 def load_onboarding_rows(bet_id: str | None = None) -> list[dict]:
-    from config import SHEET_TAB
+    from config import SHEET_TAB, BET_TYPE_PARLAY
+    from parlay import parse_legs
     from sheets_reader import _get_bets_rows, _resolve_bet_col_indices, _pad_bet_row, _bet_cell
 
     rows = _get_bets_rows(SHEET_TAB)
@@ -90,12 +95,15 @@ def load_onboarding_rows(bet_id: str | None = None) -> list[dict]:
         # Cheap pre-filter: only rows the gate marked (or, for --bet-id, any row).
         if target is None and "onboarding:" not in notes and "pre-repair:" not in notes:
             continue
+        bet_type = _bet_cell(row, col, "bet_type")
+        legs = parse_legs(_bet_cell(row, col, "legs")) if bet_type == BET_TYPE_PARLAY else []
         out.append({
             "row_idx": row_idx, "bet_id": this_id,
             "sport": _bet_cell(row, col, "sport"), "book": _bet_cell(row, col, "book"),
             "team1": _bet_cell(row, col, "team1"), "team2": _bet_cell(row, col, "team2"),
             "game_date": _bet_cell(row, col, "game_date"), "game_start": _bet_cell(row, col, "game_start"),
-            "selection": _bet_cell(row, col, "selection"), "bet_type": _bet_cell(row, col, "bet_type"),
+            "selection": _bet_cell(row, col, "selection"), "bet_type": bet_type,
+            "is_parlay": bet_type == BET_TYPE_PARLAY, "legs": legs,
             "odds_taken": _bet_cell(row, col, "odds_taken"), "result": _bet_cell(row, col, "result"),
             "market_key": _bet_cell(row, col, "market_key"), "event_id": _bet_cell(row, col, "event_id"),
             "kalshi_ticker": _bet_cell(row, col, "kalshi_ticker"), "notes": notes,
@@ -132,8 +140,8 @@ def _parse_num(raw):
 
 # ── Repair one row ───────────────────────────────────────────────────────────
 def repair_bet(bet: dict) -> dict:
-    from closing_odds import fetch_closing_odds
-    from sheets_writer import clear_closing_odds_cells, repair_onboarded_close, write_closing_odds
+    from closing_odds import fetch_closing_odds, fetch_parlay_closing_odds
+    from sheets_writer import repair_onboarded_close
     try:
         from scripts.retry_closing_odds import _retry_provenance
     except ImportError:
@@ -142,13 +150,15 @@ def repair_bet(bet: dict) -> dict:
     row_idx, bet_id = bet["row_idx"], bet["bet_id"]
     outcome = {"bet_id": bet_id, "status": "failed", "detail": "",
                "old_closing": bet.get("closing_odds", "")}
-    original = {"close": bet.get("closing_odds", ""), "clv": bet.get("clv", ""),
+    original = {"close": bet.get("closing_odds", ""),
+                "decimal": bet.get("decimal_closing", ""), "clv": bet.get("clv", ""),
                 "quality": bet.get("closing_quality", "")}
 
     # Derive BEFORE clearing so a transient failure leaves the row untouched.
     fetch_bet = {**bet, "_resolve_actual_start": True}
     try:
-        result = fetch_closing_odds(fetch_bet)
+        result = (fetch_parlay_closing_odds(fetch_bet)
+                  if bet.get("is_parlay") else fetch_closing_odds(fetch_bet))
     except Exception as exc:  # noqa: BLE001
         outcome["detail"] = f"fetch raised: {exc} (row untouched)"
         return outcome
@@ -159,17 +169,11 @@ def repair_bet(bet: dict) -> dict:
                              " — row left provisional")
         return outcome
 
-    if not clear_closing_odds_cells(row_idx, bet_id):
-        outcome["detail"] = "could not clear closing cells (row untouched)"
-        return outcome
-
     repaired = repair_onboarded_close(
         row_idx, bet_id, result["closing_odds"], result.get("decimal_closing"), result.get("clv"),
         original=original, provenance=_retry_provenance(result))
     if not repaired:
-        write_closing_odds(row_idx, bet_id, original["close"], _parse_num(bet.get("decimal_closing")),
-                           _parse_num(bet.get("clv")), provenance=_restore_provenance(bet))
-        outcome["detail"] = "repair write refused/failed — original restored"
+        outcome["detail"] = "atomic repair refused/failed — original row remained untouched"
         return outcome
 
     outcome["status"] = "repaired"

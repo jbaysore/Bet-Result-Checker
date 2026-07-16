@@ -206,6 +206,7 @@ def repull_bet(bet: dict) -> dict:
     from closing_odds import fetch_closing_odds, fetch_parlay_closing_odds
     from sheets_writer import (
         clear_closing_odds_cells, write_closing_odds, write_closing_capture_audit,
+        upsert_notes_line,
     )
     try:
         from scripts.retry_closing_odds import _retry_provenance
@@ -263,6 +264,10 @@ def repull_bet(bet: dict) -> dict:
     ))
     if not wrote:
         return restore("final write kept failing")
+    if result.get("onboarding_marker") and not _with_retries(lambda: upsert_notes_line(
+            row_idx, bet_id, "onboarding:", result["onboarding_marker"])):
+        outcome["detail"] = "close written PROVISIONAL, but onboarding marker write failed"
+        return outcome
     if result.get("per_leg_audit"):
         write_closing_capture_audit(bet_id, {"legs": result["per_leg_audit"]})
 

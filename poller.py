@@ -106,7 +106,11 @@ def poll_bet(bet: dict) -> bool:
     # New-context onboarding: start observation for an unfamiliar context's grain
     # (or note it in shadow mode). Best-effort — never affects settlement below
     # (concept safety #6: onboarding failure must not interfere with settlement).
-    onboarding_gate.discover_for_bet(bet)
+    if bet.get("is_parlay") and bet.get("legs"):
+        for leg in bet["legs"]:
+            onboarding_gate.discover_for_bet({**leg, "book": bet.get("book", "")})
+    else:
+        onboarding_gate.discover_for_bet(bet)
 
     now_utc = datetime.now(timezone.utc)
     game_dt_utc = game_dt.astimezone(timezone.utc).replace(tzinfo=timezone.utc)

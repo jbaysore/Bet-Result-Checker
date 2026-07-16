@@ -5,6 +5,7 @@ capture fallback (parity bridge), Limited bounds, and transition legality.
 """
 
 import json
+from datetime import timedelta
 
 import pytest
 
@@ -162,15 +163,37 @@ def test_set_health_keeps_classification():
     assert rec.health == policy.CONTRADICTED
 
 
+def test_idle_verified_record_fails_closed_even_before_scheduled_aging_write():
+    rows = clv_seed("baseball/mlb", "draftkings", "featured")
+    old = (policy.now_utc() - timedelta(days=121)).isoformat()
+    for row in rows:
+        row["Last Verified"] = old
+    decision = CapabilityProfile(rows).require_clv(
+        "baseball/mlb", "draftkings", "featured")
+    assert decision.provisional
+    assert all(cell["health"] == policy.STALE for cell in decision.matrix.values())
+
+
 def test_clv_requirements_shape():
     reqs = clv_requirements("baseball/mlb", "DraftKings", "featured")
     caps = {r.capability for r in reqs}
     assert caps == {policy.CAP_IDENTITY, CLV_START, policy.CAP_CAPTURE}
     capture = next(r for r in reqs if r.capability == policy.CAP_CAPTURE)
-    # specific book first, grandfathered fallback second
+    # An exact record shadows the grandfathered bridge while it earns evidence.
     assert capture.candidate_keys[0].endswith("draftkings|featured")
-    assert capture.candidate_keys[1].endswith("any|featured")
+    assert capture.fallback_keys[0].endswith("any|featured")
     # start is a disjunction over live-flip and authoritative start
     start = next(r for r in reqs if r.capability == CLV_START)
     assert start.any_of == (("baseball/mlb", policy.CAP_START_LIVE),
                             ("baseball/mlb", policy.CAP_START_AUTHORITATIVE))
+
+
+def test_discovered_exact_capture_shadows_verified_grandfathered_fallback():
+    rows = clv_seed("baseball/mlb", "draftkings", "featured")
+    rows.append(seed_row("baseball/mlb", policy.CAP_CAPTURE,
+                         "draftkings|featured", policy.DISCOVERED,
+                         health=policy.NOT_EVALUATED))
+    decision = CapabilityProfile(rows).require_clv(
+        "baseball/mlb", "draftkings", "featured")
+    assert decision.provisional
+    assert policy.CAP_CAPTURE in decision.unresolved

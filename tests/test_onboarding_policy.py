@@ -23,11 +23,13 @@ def test_market_family_for_market_keys():
     assert policy.market_family_for("totals_team_total") == policy.MF_TEAM_TOTAL
 
 
-def test_market_family_falls_back_to_bet_type_then_h2h():
+def test_market_family_falls_back_to_bet_type_then_unknown():
     assert policy.market_family_for(None, "Spread") == policy.MF_FEATURED
     assert policy.market_family_for(None, "Moneyline") == policy.MF_H2H
     assert policy.market_family_for(None, "Prop") == policy.MF_PROP
-    assert policy.market_family_for("", "") == policy.MF_H2H  # narrowest safe default
+    assert policy.market_family_for("", "") == policy.MF_UNKNOWN  # seedless, fail closed
+    assert policy.market_family_for("brand_new_market", "Custom") == policy.MF_UNKNOWN
+    assert policy.market_family_for("brand_new_market", "Moneyline") == policy.MF_UNKNOWN
 
 
 def test_market_class_for_settlement_grain():

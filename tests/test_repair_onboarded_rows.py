@@ -55,12 +55,8 @@ def test_void_skipped():
 
 # ── repair_bet orchestration (mocked — no live writes) ───────────────────────
 def _patch_writes(monkeypatch, calls):
-    monkeypatch.setattr(sheets_writer, "clear_closing_odds_cells",
-                        lambda *a, **k: calls.append("clear") or True)
     monkeypatch.setattr(sheets_writer, "repair_onboarded_close",
                         lambda *a, **k: calls.append("repair") or True)
-    monkeypatch.setattr(sheets_writer, "write_closing_odds",
-                        lambda *a, **k: calls.append("write") or True)
     import scripts.retry_closing_odds as rc
     monkeypatch.setattr(rc, "_retry_provenance", lambda r: {})
 
@@ -73,8 +69,7 @@ def test_repair_applies_only_on_verified_close(monkeypatch):
                                    "clv": 0.03, "closing_quality": "VERIFIED_CLOSE"})
     out = repair.repair_bet(bet())
     assert out["status"] == "repaired"
-    assert "clear" in calls and "repair" in calls          # cleared then wrote the repair
-    assert calls.index("clear") < calls.index("repair")    # clear precedes write
+    assert calls == ["repair"]                              # one guarded atomic write
 
 
 def test_non_verified_derivation_leaves_row_untouched(monkeypatch):
@@ -98,15 +93,15 @@ def test_fetch_failure_leaves_row_untouched(monkeypatch):
     assert calls == []
 
 
-def test_repair_refused_restores_original(monkeypatch):
+def test_repair_refused_leaves_original_untouched(monkeypatch):
     calls = []
     _patch_writes(monkeypatch, calls)
-    # repair_onboarded_close refuses (e.g. already repaired) → original restored.
+    # Atomic repair refuses (e.g. row changed) → no preliminary clear occurred.
     monkeypatch.setattr(sheets_writer, "repair_onboarded_close", lambda *a, **k: False)
     monkeypatch.setattr(closing_odds, "fetch_closing_odds",
                         lambda b: {"closing_odds": "-108", "decimal_closing": 1.93,
                                    "clv": 0.03, "closing_quality": "VERIFIED_CLOSE"})
     out = repair.repair_bet(bet())
     assert out["status"] == "failed"
-    assert "restored" in out["detail"]
-    assert "write" in calls                                # restore write happened
+    assert "untouched" in out["detail"]
+    assert calls == []

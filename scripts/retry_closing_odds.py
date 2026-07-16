@@ -35,6 +35,7 @@ from sheets_writer import (
     write_closing_odds,
     write_market_key_if_blank,
     clear_closing_odds_fail_streak,
+    upsert_notes_line,
 )
 
 
@@ -149,6 +150,10 @@ def _process_bet(
             result.get("clv"),
             provenance=_retry_provenance(result),
         )
+        if ok:
+            if result.get("onboarding_marker"):
+                ok = upsert_notes_line(
+                    row_idx, bet_id, "onboarding:", result["onboarding_marker"])
         if ok:
             if backfill_market_key:
                 inferred = classification.get("inferred_market_key") or ""

@@ -1044,6 +1044,7 @@ def fetch_parlay_closing_odds(bet: dict) -> dict:
     per_leg_audit = []
     qualities = []
     start_statuses = []
+    onboarding_markers = []
     for i, leg in enumerate(legs, start=1):
         resolved_leg = dict(leg)
         resolution = resolve_actual_start(resolved_leg) if bet.get("_resolve_actual_start") else ActualStartResult(None)
@@ -1060,8 +1061,10 @@ def fetch_parlay_closing_odds(bet: dict) -> dict:
         leg_decimals.append(to_decimal_odds(res["price"]))
         # Gate each leg independently; the combined quality below is VERIFIED only
         # if every leg is, so an untrusted leg grain provisionalizes the parlay.
-        quality, _ = onboarding_gate.gate_finalize_quality(
+        quality, onboarding_marker = onboarding_gate.gate_finalize_quality(
             resolved_leg, res.get("closing_quality", QUALITY_PROVISIONAL))
+        if onboarding_marker:
+            onboarding_markers.append(onboarding_marker)
         qualities.append(quality)
         start_status = (
             "VERIFIED" if resolution.actual_start and resolution.confidence == "CONFIDENT"
@@ -1113,4 +1116,10 @@ def fetch_parlay_closing_odds(bet: dict) -> dict:
         "closing_observed_at": max((item.get("snapshot_at") or "" for item in per_leg_audit), default=""),
         "actual_start_resolution": ActualStartResult(None, source="per-leg", confidence="PER_LEG"),
         "per_leg_audit": per_leg_audit,
+        "onboarding_marker": (
+            "onboarding: parlay legs " + " | ".join(
+                marker.removeprefix("onboarding:").strip()
+                for marker in onboarding_markers)
+            if onboarding_markers else None
+        ),
     }

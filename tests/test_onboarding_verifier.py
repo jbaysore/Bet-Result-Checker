@@ -123,3 +123,39 @@ def test_no_start_source_blocks():
     assert any(p.kind == "block" for p in proposals)
     key = record_key("darts/pdc", policy.CAP_START_LIVE, "toa_scores")
     assert profile.get_record(key).classification == policy.BLOCKED
+
+
+def test_rolling_window_rerun_does_not_double_count_same_event():
+    profile = CapabilityProfile([])
+    obs = Observation(context_id="soccer/new", event_id="event-1",
+                      start_source="toa_scores", start_outcome=verifier.START_AGREEMENT,
+                      observed_at=NOW, capture_book="draftkings",
+                      capture_family="h2h", capture_clean=True)
+    verifier.run_verification(profile, [obs], apply=False, now=NOW)
+    verifier.run_verification(profile, [obs], apply=False, now=NOW + timedelta(hours=1))
+    key = record_key("soccer/new", policy.CAP_CAPTURE, "draftkings|h2h")
+    assert profile.get_record(key).evidence["clean"] == 1
+
+
+def test_gate_capped_provisional_is_clean_capture_evidence():
+    class Resolution:
+        is_known = True
+        context_id = "soccer/new"
+
+    obs = verifier.observation_from_bet({
+        "BetID": "9", "Event ID": "event-9", "Book": "DraftKings",
+        "Market Key": "h2h", "Bet Type": "Moneyline",
+        "Closing Quality": "PROVISIONAL",
+        "Notes": "onboarding: soccer/new|h2h capture=Discovered",
+        "Closing Observed At": NOW.isoformat(), "Actual Start": NOW.isoformat(),
+    }, Resolution())
+    assert obs.capture_clean
+
+
+def test_verified_exact_capture_disables_grandfathered_bridge():
+    fallback = verified("soccer/x", policy.CAP_CAPTURE, "any|h2h")
+    exact = verified("soccer/x", policy.CAP_CAPTURE, "draftkings|h2h")
+    profile = CapabilityProfile([fallback, exact])
+    narrowed = verifier.narrow_grandfathered_bridges(profile)
+    assert [record.record_key for record in narrowed] == [fallback.record_key]
+    assert fallback.health == policy.STALE

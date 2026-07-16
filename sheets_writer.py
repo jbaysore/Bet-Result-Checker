@@ -880,29 +880,85 @@ def repair_onboarded_close(row_idx: int, bet_id: str, price, decimal_closing, cl
                            *, original: dict, provenance: dict) -> bool:
     """Write a repaired, trusted close for an onboarding-provisional row.
 
-    The caller must have CLEARED the closing cells first (so the new value can be
-    written) and only call this when the derivation met the full quality contract
-    (VERIFIED_CLOSE). Order: write the new close (tagged Closing Source =
-    recovery-onboarding) FIRST, then — only if that succeeded — preserve the
-    `original` values in a permanent `pre-repair:` marker and clear the
-    `onboarding:` marker. A failed write leaves no partial markers, so the caller
-    can restore cleanly. Refuses to double-repair.
+    The derivation must already have met VERIFIED_CLOSE. The current row is read
+    and compared with `original`, then the new close, all provenance, the
+    permanent `pre-repair:` marker, and removal of the `onboarding:` marker are
+    sent in ONE Sheets batch update. The row is never cleared first, so a failed
+    request cannot strand it blank or partially marked.
     """
-    if row_already_repaired(row_idx, bet_id):
-        print(f"[sheets_writer] row {row_idx} (BetID {bet_id}) already repaired — skipping.")
+    idx = _bets_col_letter_lookup()
+    required = ["bet_id", "closing_odds", "decimal_closing", "clv", "notes",
+                "closing_quality", "closing_source", "start_status",
+                "closing_observed_at", "start_detected_at", "actual_start",
+                "actual_start_source", "actual_start_confidence"]
+    if any(idx.get(key) is None for key in required):
+        return False
+    try:
+        sheet = _get_sheet()
+        row = _read_bet_row(sheet, row_idx)
+        if not _bet_id_matches(row, idx["bet_id"], bet_id):
+            return False
+        notes = _cell_at(row, idx["notes"])
+        if any(line.strip().startswith(PRE_REPAIR_PREFIX) for line in notes.splitlines()):
+            return False
+        expected = {
+            "closing_odds": original.get("close", ""),
+            "decimal_closing": original.get("decimal", ""),
+            "clv": original.get("clv", ""),
+            "closing_quality": original.get("quality", ""),
+        }
+        if any(_cell_at(row, idx[key]) != str(value or "").strip()
+               for key, value in expected.items()):
+            print(f"[sheets_writer] row {row_idx} changed since repair preview; refusing overwrite.")
+            return False
+
+        marker = (f"{PRE_REPAIR_PREFIX} close={original.get('close', '') or '(blank)'} "
+                  f"clv={original.get('clv', '') or '(blank)'} "
+                  f"quality={original.get('quality', '') or '(blank)'}")
+        kept_notes = [line for line in notes.splitlines()
+                      if line.strip() and not line.strip().startswith(ONBOARDING_MARKER_PREFIX)]
+        new_notes = "\n".join(kept_notes + [marker])
+        prov = {**provenance, "closing_source": REPAIR_CLOSING_SOURCE,
+                "closing_quality": "VERIFIED_CLOSE"}
+        values = {
+            "closing_odds": price, "decimal_closing": decimal_closing,
+            "clv": clv, "notes": new_notes, **prov,
+        }
+        cells = [gspread.Cell(row_idx, idx[key], value if value is not None else "")
+                 for key, value in values.items() if idx.get(key) is not None]
+        call_with_sheets_retry(
+            f"atomic onboarding repair row {row_idx}", sheet.update_cells, cells)
+        return True
+    except Exception as exc:
+        print(f"[sheets_writer] onboarding repair failed for row {row_idx}: {exc}")
         return False
 
-    prov = {**provenance, "closing_source": REPAIR_CLOSING_SOURCE}
-    if not write_closing_odds(row_idx, bet_id, price, decimal_closing, clv,
-                              overwrite_errors=True, provenance=prov):
-        return False
 
-    upsert_notes_line(row_idx, bet_id, PRE_REPAIR_PREFIX,
-                      f"{PRE_REPAIR_PREFIX} close={original.get('close', '') or '(blank)'} "
-                      f"clv={original.get('clv', '') or '(blank)'} "
-                      f"quality={original.get('quality', '') or '(blank)'}")
-    upsert_notes_line(row_idx, bet_id, ONBOARDING_MARKER_PREFIX, None)  # no longer provisional
-    return True
+def reflag_demoted_clv_row(row_idx: int, bet_id: str, record_keys: list[str]) -> bool:
+    """Atomically cap a formerly trusted row after a causal capability demotion."""
+    idx = _bets_col_letter_lookup()
+    if any(idx.get(key) is None for key in ("bet_id", "closing_quality", "notes")):
+        return False
+    try:
+        sheet = _get_sheet()
+        row = _read_bet_row(sheet, row_idx)
+        if not _bet_id_matches(row, idx["bet_id"], bet_id):
+            return False
+        if _cell_at(row, idx["closing_quality"]).upper() != "VERIFIED_CLOSE":
+            return True
+        notes = _cell_at(row, idx["notes"])
+        kept = [line for line in notes.splitlines()
+                if line.strip() and not line.strip().startswith(ONBOARDING_MARKER_PREFIX)]
+        marker = f"{ONBOARDING_MARKER_PREFIX} demoted " + ",".join(sorted(set(record_keys)))
+        cells = [
+            gspread.Cell(row_idx, idx["closing_quality"], "PROVISIONAL"),
+            gspread.Cell(row_idx, idx["notes"], "\n".join(kept + [marker])),
+        ]
+        call_with_sheets_retry(f"causal CLV reflag row {row_idx}", sheet.update_cells, cells)
+        return True
+    except Exception as exc:
+        print(f"[sheets_writer] causal CLV reflag failed for row {row_idx}: {exc}")
+        return False
 
 
 def flag_pl_blocked(row_idx: int, bet_id: str, reason: str) -> bool:

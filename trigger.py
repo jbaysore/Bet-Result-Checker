@@ -283,6 +283,12 @@ def main():
                             },
                         )
                         if success:
+                            if result.get("onboarding_marker"):
+                                from sheets_writer import upsert_notes_line
+                                if not upsert_notes_line(
+                                        bet["row_idx"], bet["bet_id"], "onboarding:",
+                                        result["onboarding_marker"]):
+                                    write_failures += 1
                             if result.get("per_leg_audit"):
                                 from sheets_writer import write_closing_capture_audit
                                 write_closing_capture_audit(
@@ -348,6 +354,20 @@ def main():
     else:
         print("[trigger] ✅ No bets need closing odds.\n")
 
+    # ── New-context verifier: evidence, decisions, promotion/demotion ──
+    onboarding_result = None
+    try:
+        from scripts.run_onboarding_verifier import run_once as run_onboarding_verifier
+        onboarding_result = run_onboarding_verifier(apply=True, limit_days=14)
+        print(f"[trigger] Onboarding verifier: {onboarding_result['observations']} observations, "
+              f"{len(onboarding_result['proposals'])} transition proposal(s), "
+              f"{onboarding_result['decisions']['applied']} decision(s) applied.")
+        if onboarding_result["decisions"]["failed"]:
+            write_failures += onboarding_result["decisions"]["failed"]
+    except Exception as e:
+        print(f"[trigger] ❌ Onboarding verifier failed: {e}")
+        write_failures += 1
+
     # ── Summary ──────────────────────────────────────────────────
     print("=" * 60)
     print(f"  Run complete: "
@@ -361,6 +381,9 @@ def main():
     print(f"  Manual Payout→P/L Skipped:  {manual_pl_results['skipped']}")
     print(f"  Closing Odds Captured: {closing_results['captured']}")
     print(f"  Closing Odds Skipped:  {closing_results['skipped']} (game not in snapshot, or unsupported bet type)")
+    if onboarding_result is not None:
+        print(f"  Onboarding Observations: {onboarding_result['observations']}")
+        print(f"  Onboarding Proposals:    {len(onboarding_result['proposals'])}")
     print("=" * 60)
 
     if write_failures:
