@@ -15,3 +15,9 @@ venv/
 # OS noise
 .DS_Store
 Thumbs.db
+
+# One-off script run outputs (repull reports, taxonomy dumps, audit snapshots)
+local-run-outputs/
+repull_suspect_report*.json
+closing_gap_taxonomy*.json
+clv_start_audit_report.txt

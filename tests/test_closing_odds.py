@@ -29,6 +29,7 @@ from config import (
     CLOSING_ODDS_MANUAL_REQUIRED,
     CLOSING_ODDS_SPORT_NOT_ON_API,
     CLOSING_ODDS_SELECTION_NOT_FOUND,
+    CLOSING_ODDS_GAME_NOT_FOUND,
 )
 
 
@@ -240,40 +241,37 @@ def test_fetch_closing_odds_queries_novig(mock_snapshot, _mock_feed):
 
 
 @patch("closing_odds.sport_has_odds_feed", return_value=True)
+@patch("closing_odds._fetch_historical_event_snapshot")
 @patch("closing_odds._fetch_historical_snapshot")
-def test_fetch_closing_odds_cascades_to_alternate_spread(mock_snapshot, _mock_feed):
-    def side_effect(sport, date_iso, book, market):
-        if market == "spreads":
-            return [{
-                "home_team": "Chicago Cubs",
-                "away_team": "St. Louis Cardinals",
-                "bookmakers": [{
-                    "key": "draftkings",
-                    "markets": [{
-                        "key": "spreads",
-                        "outcomes": [
-                            {"name": "Chicago Cubs", "point": -1.5, "price": -110},
-                        ],
-                    }],
-                }],
-            }]
-        if market == "alternate_spreads":
-            return [{
-                "home_team": "Chicago Cubs",
-                "away_team": "St. Louis Cardinals",
-                "bookmakers": [{
-                    "key": "draftkings",
-                    "markets": [{
-                        "key": "alternate_spreads",
-                        "outcomes": [
-                            {"name": "Chicago Cubs", "point": -7.5, "price": +150},
-                        ],
-                    }],
-                }],
-            }]
-        return []
-
-    mock_snapshot.side_effect = side_effect
+def test_fetch_closing_odds_cascades_to_alternate_spread(mock_snapshot, mock_event_snapshot, _mock_feed):
+    # Mainline miss on the sport-level endpoint …
+    mock_snapshot.return_value = [{
+        "home_team": "Chicago Cubs",
+        "away_team": "St. Louis Cardinals",
+        "bookmakers": [{
+            "key": "draftkings",
+            "markets": [{
+                "key": "spreads",
+                "outcomes": [
+                    {"name": "Chicago Cubs", "point": -1.5, "price": -110},
+                ],
+            }],
+        }],
+    }]
+    # … cascades to alternate_spreads via the event-scoped endpoint.
+    mock_event_snapshot.return_value = [{
+        "home_team": "Chicago Cubs",
+        "away_team": "St. Louis Cardinals",
+        "bookmakers": [{
+            "key": "draftkings",
+            "markets": [{
+                "key": "alternate_spreads",
+                "outcomes": [
+                    {"name": "Chicago Cubs", "point": -7.5, "price": +150},
+                ],
+            }],
+        }],
+    }]
     result = fetch_closing_odds({
         "bet_id": "301",
         "sport": "baseball_mlb",
@@ -286,15 +284,18 @@ def test_fetch_closing_odds_cascades_to_alternate_spread(mock_snapshot, _mock_fe
         "selection": "Cubs -7.5",
         "odds_taken": "+140",
     })
-    assert mock_snapshot.call_count == 2
+    assert mock_snapshot.call_count == 1
+    assert mock_event_snapshot.call_count == 1
+    assert mock_event_snapshot.call_args[0][3] == "alternate_spreads"
     assert result["error"] is None
     assert result["closing_odds"] == "+150"
 
 
 @patch("closing_odds.sport_has_odds_feed", return_value=True)
+@patch("closing_odds._fetch_historical_event_snapshot")
 @patch("closing_odds._fetch_historical_snapshot")
-def test_fetch_closing_odds_uses_explicit_market_key(mock_snapshot, _mock_feed):
-    mock_snapshot.return_value = [{
+def test_fetch_closing_odds_uses_explicit_market_key(mock_snapshot, mock_event_snapshot, _mock_feed):
+    mock_event_snapshot.return_value = [{
         "home_team": "Chicago Cubs",
         "away_team": "St. Louis Cardinals",
         "bookmakers": [{
@@ -320,8 +321,9 @@ def test_fetch_closing_odds_uses_explicit_market_key(mock_snapshot, _mock_feed):
         "odds_taken": "+140",
         "market_key": "alternate_spreads",
     })
-    mock_snapshot.assert_called_once()
-    assert mock_snapshot.call_args[0][3] == "alternate_spreads"
+    mock_event_snapshot.assert_called_once()
+    assert mock_event_snapshot.call_args[0][3] == "alternate_spreads"
+    assert not mock_snapshot.called  # alternates would 422 on the sport-level endpoint
     assert result["closing_odds"] == "+145"
 
 
@@ -360,10 +362,58 @@ def test_fetch_closing_odds_skips_inactive_sport(_mock_feed):
     assert result["error"] == CLOSING_ODDS_SPORT_NOT_ON_API
 
 
-@patch("closing_odds.sport_has_odds_feed", return_value=True)
+@patch("closing_odds.sport_has_odds_feed", return_value=False)
+@patch("closing_odds._fetch_historical_snapshot", return_value=[])
+def test_confident_historical_recovery_bypasses_current_active_sport_gate(
+    mock_snapshot, _mock_feed,
+):
+    result = _fetch_closing_price({
+        "sport": "tennis_atp_wimbledon",
+        "book": "fanatics",
+        "team1": "Stefanos Tsitsipas",
+        "team2": "Hugo Gaston",
+        "game_date": "6/29/2026",
+        "game_start": "10:00 AM",
+        "bet_type": "Moneyline",
+        "selection": "Stefanos Tsitsipas",
+        "actual_start": "2026-06-29T14:30:00Z",
+        "actual_start_confidence": "CONFIDENT",
+    }, "BetID 106")
+    mock_snapshot.assert_called_once()
+    assert result["error"] == CLOSING_ODDS_GAME_NOT_FOUND
+
+
 @patch("closing_odds._fetch_historical_snapshot")
-def test_fetch_closing_price_all_markets_miss_selection(mock_snapshot, _mock_feed):
-    mock_snapshot.return_value = [{
+def test_manual_sport_alias_never_calls_historical_endpoint(mock_snapshot):
+    result = _fetch_closing_price({
+        "sport": "manual_wta_libema",
+        "book": "draftkings",
+        "team1": "Anastasia Potapova",
+        "team2": "Suzan Lamens",
+        "game_date": "6/10/2026",
+        "game_start": "4:10 AM",
+        "bet_type": "Moneyline",
+        "selection": "Anastasia Potapova",
+        "actual_start": "2026-06-10T09:05:00Z",
+        "actual_start_confidence": "CONFIDENT",
+    }, "BetID 8")
+    mock_snapshot.assert_not_called()
+    assert result["error"] == CLOSING_ODDS_SPORT_NOT_ON_API
+
+
+def test_request_error_redacts_api_key():
+    rendered = closing_odds_module._redact_request_error(RuntimeError(
+        "404 for https://api.example.test/odds?apiKey=top-secret&markets=h2h",
+    ))
+    assert "top-secret" not in rendered
+    assert "apiKey=[REDACTED]" in rendered
+
+
+@patch("closing_odds.sport_has_odds_feed", return_value=True)
+@patch("closing_odds._fetch_historical_event_snapshot")
+@patch("closing_odds._fetch_historical_snapshot")
+def test_fetch_closing_price_all_markets_miss_selection(mock_snapshot, mock_event_snapshot, _mock_feed):
+    snapshot = [{
         "home_team": "Chicago Cubs",
         "away_team": "St. Louis Cardinals",
         "bookmakers": [{
@@ -374,6 +424,8 @@ def test_fetch_closing_price_all_markets_miss_selection(mock_snapshot, _mock_fee
             ],
         }],
     }]
+    mock_snapshot.return_value = snapshot
+    mock_event_snapshot.return_value = snapshot
     res = _fetch_closing_price({
         "sport": "baseball_mlb",
         "book": "draftkings",
@@ -559,3 +611,115 @@ def test_parlay_summary_uses_worst_leg_quality_and_per_leg_start_status(monkeypa
     assert result["closing_quality"] == "STALE"
     assert result["start_status"] == "VERIFIED"
     assert [leg["start_status"] for leg in result["per_leg_audit"]] == ["VERIFIED", "VERIFIED"]
+
+
+# ── Event-scoped historical markets (alternate_*/team_totals) ────────────────
+# The sport-level historical endpoint 422s on additional markets; they must
+# route through /historical/sports/{sport}/events/{id}/odds.
+
+TEAM_TOTAL_BET = {
+    "bet_id": "371",
+    "sport": "basketball_wnba",
+    "book": "betrivers",
+    "team1": "Los Angeles Sparks",
+    "team2": "Minnesota Lynx",
+    "game_date": "7/9/2026",
+    "game_start": "7:00 PM",
+    "bet_type": "Total",
+    "selection": "Minnesota Lynx Team Total Over 42.5",
+    "odds_taken": "+102",
+}
+
+
+def _clear_historical_caches():
+    closing_odds_module._snapshot_cache.clear()
+    closing_odds_module._historical_events_cache.clear()
+
+
+@patch("closing_odds.sport_has_odds_feed", return_value=True)
+@patch("closing_odds._fetch_historical_event_snapshot")
+@patch("closing_odds._fetch_historical_snapshot")
+def test_additional_market_routes_to_event_snapshot(mock_sport_level, mock_event_level, _mock_feed):
+    mock_event_level.return_value = [{
+        "id": "wnba-evt-1",
+        "home_team": "Minnesota Lynx",
+        "away_team": "Los Angeles Sparks",
+        "bookmakers": [{
+            "key": "betrivers",
+            "markets": [{
+                "key": "team_totals",
+                "outcomes": [
+                    {"name": "Over", "description": "Minnesota Lynx", "point": 42.5, "price": -105},
+                    {"name": "Under", "description": "Minnesota Lynx", "point": 42.5, "price": -115},
+                ],
+            }],
+        }],
+    }]
+    result = fetch_closing_odds(TEAM_TOTAL_BET)
+    assert result["error"] is None
+    assert result["closing_odds"] == "-105"
+    assert mock_event_level.called
+    # team_totals must never hit the sport-level endpoint (it would 422).
+    assert not mock_sport_level.called
+
+
+@patch("closing_odds.requests.get")
+def test_event_snapshot_fetches_roster_then_event_odds(mock_get):
+    _clear_historical_caches()
+    roster_resp = Mock(status_code=200, headers={})
+    roster_resp.json.return_value = {"data": [{
+        "id": "wnba-evt-1",
+        "home_team": "Minnesota Lynx",
+        "away_team": "Los Angeles Sparks",
+        "commence_time": "2026-07-10T00:00:00Z",
+    }]}
+    odds_resp = Mock(status_code=200, headers={})
+    odds_resp.json.return_value = {
+        "timestamp": "2026-07-09T23:56:12Z",
+        "data": {
+            "id": "wnba-evt-1",
+            "home_team": "Minnesota Lynx",
+            "away_team": "Los Angeles Sparks",
+            "bookmakers": [{"key": "betrivers", "markets": [{"key": "team_totals", "outcomes": []}]}],
+        },
+    }
+    mock_get.side_effect = [roster_resp, odds_resp]
+
+    events = closing_odds_module._fetch_historical_event_snapshot(
+        "basketball_wnba", "2026-07-09T23:58:00Z", "betrivers", "team_totals",
+        "Los Angeles Sparks", "Minnesota Lynx",
+        datetime(2026, 7, 10, 0, 0, tzinfo=timezone.utc),
+    )
+    assert len(events) == 1
+    assert events[0]["_snapshot_at"] == "2026-07-09T23:56:12Z"
+    roster_url = mock_get.call_args_list[0][0][0]
+    odds_url = mock_get.call_args_list[1][0][0]
+    assert roster_url.endswith("/historical/sports/basketball_wnba/events")
+    assert odds_url.endswith("/historical/sports/basketball_wnba/events/wnba-evt-1/odds")
+    _clear_historical_caches()
+
+
+@patch("closing_odds.requests.get")
+def test_event_snapshot_roster_failure_is_transient(mock_get):
+    _clear_historical_caches()
+    mock_get.return_value = Mock(status_code=429, headers={})
+    events = closing_odds_module._fetch_historical_event_snapshot(
+        "basketball_wnba", "2026-07-09T23:58:00Z", "betrivers", "team_totals",
+        "Los Angeles Sparks", "Minnesota Lynx", None,
+    )
+    assert events is None  # transient — caller retries later
+    _clear_historical_caches()
+
+
+@patch("closing_odds.requests.get")
+def test_event_snapshot_missing_game_is_permanent(mock_get):
+    _clear_historical_caches()
+    roster_resp = Mock(status_code=200, headers={})
+    roster_resp.json.return_value = {"data": []}
+    mock_get.return_value = roster_resp
+    events = closing_odds_module._fetch_historical_event_snapshot(
+        "basketball_wnba", "2026-07-09T23:58:00Z", "betrivers", "team_totals",
+        "Los Angeles Sparks", "Minnesota Lynx", None,
+    )
+    assert events == []  # -> GAME NOT FOUND (permanent), not a retry loop
+    _clear_historical_caches()

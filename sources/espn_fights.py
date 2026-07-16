@@ -36,6 +36,7 @@ from date_utils import parse_sheet_date
 from name_match import normalize_name as _normalize_name
 
 ESPN_FIGHT_BASE = "https://site.api.espn.com/apis/site/v2/sports"
+ESPN_CORE_BASE = "https://sports.core.api.espn.com/v2/sports"
 
 # Odds API sport key → ESPN scoreboard league path.
 _LEAGUE_BY_SPORT = {
@@ -45,6 +46,7 @@ _LEAGUE_BY_SPORT = {
 
 # One scoreboard payload per (league, dates_key) per process.
 _scoreboard_cache: dict[tuple[str, str], list | None] = {}
+_plays_cache: dict[tuple[str, str, str], list | None] = {}
 
 def league_for_sport(sport_key: str) -> str | None:
     return _LEAGUE_BY_SPORT.get((sport_key or "").strip().lower())
@@ -55,9 +57,16 @@ def is_fight(sport_key: str) -> bool:
     return league_for_sport(sport_key) is not None
 
 
-# Back-compat alias — the fighter matcher now uses the shared normalizer
-# (name_match.normalize_name); kept so existing callers/tests keep working.
-normalize_fighter_name = _normalize_name
+# Explicit provider-name equivalences. Keep these narrow: exact normalized
+# matching remains the rule, with only individually verified aliases admitted.
+_FIGHTER_ALIASES = {
+    "zachary reese": "zach reese",
+}
+
+
+def normalize_fighter_name(value: str) -> str:
+    normalized = _normalize_name(value)
+    return _FIGHTER_ALIASES.get(normalized, normalized)
 
 
 def _dates_param(game_date: str | None) -> str:
@@ -98,11 +107,44 @@ def _fetch_scoreboard(league: str, dates_key: str) -> list | None:
 
 
 def _flatten_bouts(data: dict) -> list:
-    """events[].competitions[] → one flat list of bout dicts."""
+    """Flatten bouts while retaining the parent card's event id.
+
+    ESPN's per-bout play feed requires both the card event id and competition
+    id. The competition date is only the card start and must never be treated
+    as the opening bell for an individual bout.
+    """
     bouts = []
     for event in (data or {}).get("events", []):
-        bouts += event.get("competitions", [])
+        event_id = str(event.get("id") or "")
+        for competition in event.get("competitions", []):
+            bout = dict(competition)
+            bout["_event_id"] = event_id
+            bouts.append(bout)
     return bouts
+
+
+def _fetch_bout_plays(league: str, event_id: str, competition_id: str) -> list | None:
+    """Return ESPN's per-bout play records, or None on a transient failure."""
+    cache_key = (league, str(event_id), str(competition_id))
+    if cache_key in _plays_cache:
+        return _plays_cache[cache_key]
+    try:
+        sport, league_name = league.split("/", 1)
+    except ValueError:
+        return None
+    url = (
+        f"{ESPN_CORE_BASE}/{sport}/leagues/{league_name}/events/{event_id}"
+        f"/competitions/{competition_id}/plays"
+    )
+    try:
+        response = requests.get(url, params={"limit": 1000}, timeout=15)
+        response.raise_for_status()
+        plays = response.json().get("items") or []
+    except (requests.RequestException, ValueError) as exc:
+        print(f"[espn_fights] bout plays fetch failed: {exc}")
+        return None
+    _plays_cache[cache_key] = plays
+    return plays
 
 
 def _competitors(competition: dict) -> list[tuple[str, bool]]:

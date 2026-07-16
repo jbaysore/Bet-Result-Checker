@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 from collections import Counter
@@ -65,11 +66,16 @@ def summarize_clv_buckets(clv_by_bucket: dict[str, list[float]]) -> dict:
     }
 
 
-def run_audit(*, write=True) -> dict:
+def run_audit(*, write=True, bet_ids: set[str] | None = None,
+              include_details: bool = False) -> dict:
+    requested_ids = {str(value).strip() for value in (bet_ids or set()) if str(value).strip()}
     sheet = _get_spreadsheet().worksheet(SHEET_TAB)
     rows = sheet.get_all_values()
     if not rows:
-        return {"rows": 0, "buckets": {}}
+        return {
+            "rows": 0, "buckets": {}, "requested_bet_ids": sorted(requested_ids),
+            "matched_bet_ids": [], "unmatched_bet_ids": sorted(requested_ids),
+        }
     headers = rows[0]
     required = [
         BET_COL["start_status"],
@@ -84,12 +90,18 @@ def run_audit(*, write=True) -> dict:
     buckets = Counter()
     deltas = []
     clv_by_bucket: dict[str, list[float]] = {}
+    matched_ids = set()
+    details = []
     for row_idx, raw in enumerate(rows[1:], start=2):
         row = raw + [""] * max(0, len(headers) - len(raw))
-        if not str(row[idx.get(BET_COL["bet_id"], 0)] or "").strip():
+        row_bet_id = str(row[idx.get(BET_COL["bet_id"], 0)] or "").strip()
+        if not row_bet_id:
+            continue
+        if requested_ids and row_bet_id not in requested_ids:
             continue
         if str(row[idx[BET_COL["start_status"]]] or "").strip().upper() != "LEGACY_UNAUDITED":
             continue
+        matched_ids.add(row_bet_id)
         bet = {
             "sport": row[idx[BET_COL["sport"]]], "team1": row[idx[BET_COL["team1"]]],
             "team2": row[idx[BET_COL["team2"]]], "game_date": row[idx[BET_COL["game_date"]]],
@@ -103,6 +115,24 @@ def run_audit(*, write=True) -> dict:
         scheduled = _parse_game_datetime(bet["game_date"], bet["game_start"])
         actual = resolution.actual_start
         bucket = classify_start_audit(actual, scheduled)
+        if include_details:
+            details.append({
+                "bet_id": row_bet_id,
+                "sport": bet["sport"],
+                "team1": bet["team1"],
+                "team2": bet["team2"],
+                "scheduled_start": scheduled.isoformat() if scheduled else None,
+                "actual_start": actual.isoformat() if actual else None,
+                "source": resolution.source,
+                "confidence": resolution.confidence,
+                "event_id": resolution.event_id,
+                "error": resolution.error,
+                "bucket": bucket,
+                "delta_seconds": (
+                    (actual - scheduled.astimezone(timezone.utc)).total_seconds()
+                    if actual and scheduled else None
+                ),
+            })
         buckets[bucket] += 1
         if actual and scheduled:
             deltas.append((actual - scheduled.astimezone(timezone.utc)).total_seconds())
@@ -134,9 +164,41 @@ def run_audit(*, write=True) -> dict:
         "aggregate_clv": summarize_clv_buckets(clv_by_bucket),
         "clv_pooled_safe_only": ["SAFE"],
         "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "requested_bet_ids": sorted(requested_ids),
+        "matched_bet_ids": sorted(matched_ids),
+        "unmatched_bet_ids": sorted(requested_ids - matched_ids),
     }
+    if include_details:
+        report["details"] = details
     return report
 
 
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Audit legacy CLV start timing.")
+    parser.add_argument(
+        "--bet-id",
+        action="append",
+        help="Audit a BetID (repeat for an exact batch); default audits all legacy rows",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Resolve and report without writing audit cells",
+    )
+    parser.add_argument(
+        "--details",
+        action="store_true",
+        help="Include per-row resolution details in the JSON report",
+    )
+    args = parser.parse_args(argv)
+    report = run_audit(
+        write=not args.dry_run,
+        bet_ids=set(args.bet_id or []),
+        include_details=args.details,
+    )
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return 0 if not report["unmatched_bet_ids"] else 1
+
+
 if __name__ == "__main__":
-    print(json.dumps(run_audit(write=True), indent=2, sort_keys=True))
+    raise SystemExit(main())

@@ -71,6 +71,7 @@ def test_name_normalization_accents_and_suffixes():
     assert ef.normalize_fighter_name("Khabib Nurmagomedov") == "khabib nurmagomedov"
     # Different accents/suffixes on the same name normalize equal.
     assert ef.normalize_fighter_name("Acuña") == ef.normalize_fighter_name("Acuna")
+    assert ef.normalize_fighter_name("Zachary Reese") == ef.normalize_fighter_name("Zach Reese")
 
 
 # ── grading ──────────────────────────────────────────────────────────────────
@@ -153,3 +154,12 @@ def test_dates_param_builds_window():
     assert ef._dates_param("") == ""
     assert ef._dates_param(None) == ""
     assert ef._dates_param("garbage") == ""
+
+
+def test_flatten_bouts_preserves_parent_event_id():
+    bout = _bout("Fighter A", "Fighter B", winner="Fighter A")
+    bout["id"] = "competition-1"
+    flattened = ef._flatten_bouts({"events": [{"id": "event-1", "competitions": [bout]}]})
+    assert flattened[0]["id"] == "competition-1"
+    assert flattened[0]["_event_id"] == "event-1"
+    assert "_event_id" not in bout

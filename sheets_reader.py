@@ -676,6 +676,7 @@ def load_bets_for_closing_retry(
     include_errors: bool = False,
     include_blank: bool = False,
     bet_id: str | None = None,
+    bet_ids: set[str] | None = None,
 ) -> list[dict]:
     """
     Load bet rows eligible for the retry_closing_odds one-shot script.
@@ -709,7 +710,9 @@ def load_bets_for_closing_retry(
     if not allowed_closing:
         return []
 
-    target_id = str(bet_id).strip() if bet_id is not None else None
+    target_ids = {str(value).strip() for value in (bet_ids or set()) if str(value).strip()}
+    if bet_id is not None and str(bet_id).strip():
+        target_ids.add(str(bet_id).strip())
     duplicate_ids = _duplicate_bet_ids(rows, col)
     bets = []
 
@@ -718,7 +721,7 @@ def load_bets_for_closing_retry(
         row_bet_id = _bet_cell(row, col, "bet_id")
         if row_bet_id in duplicate_ids:
             continue
-        if target_id is not None and row_bet_id != target_id:
+        if target_ids and row_bet_id not in target_ids:
             continue
 
         closing_odds = _bet_cell(row, col, "closing_odds")
@@ -746,6 +749,8 @@ def load_bets_for_closing_retry(
             "result": _bet_cell(row, col, "result"),
             "notes": _bet_cell(row, col, "notes"),
             "closing_odds": closing_odds,
+            "decimal_closing": _bet_cell(row, col, "decimal_closing"),
+            "clv": _bet_cell(row, col, "clv"),
             "is_parlay": is_parlay,
             "legs": legs,
             "kalshi_ticker": _bet_cell(row, col, "kalshi_ticker"),
@@ -754,6 +759,13 @@ def load_bets_for_closing_retry(
             "actual_start": _bet_cell(row, col, "actual_start"),
             "actual_start_source": _bet_cell(row, col, "actual_start_source"),
             "actual_start_confidence": _bet_cell(row, col, "actual_start_confidence"),
+            "start_status": _bet_cell(row, col, "start_status"),
+            "closing_quality": _bet_cell(row, col, "closing_quality"),
+            "closing_source": _bet_cell(row, col, "closing_source"),
+            "closing_observed_at": _bet_cell(row, col, "closing_observed_at"),
+            "start_detected_at": _bet_cell(row, col, "start_detected_at"),
+            "pinnacle_close": _bet_cell(row, col, "pinnacle_close"),
+            "pinnacle_clv": _bet_cell(row, col, "pinnacle_clv"),
         })
 
     return bets

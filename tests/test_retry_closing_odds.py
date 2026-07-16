@@ -147,6 +147,22 @@ def test_loader_skips_exhausted_error_rows(monkeypatch):
     assert {b["bet_id"] for b in bets} == {"1"}
 
 
+def test_retry_loader_accepts_an_exact_bet_id_batch(monkeypatch):
+    import sheets_reader
+
+    rows = [
+        _HEADERS,
+        _loader_row("1", "N/A"),
+        _loader_row("2", "N/A"),
+        _loader_row("3", "N/A"),
+    ]
+    monkeypatch.setattr(sheets_reader, "_get_bets_rows", lambda tab: rows)
+    bets = sheets_reader.load_bets_for_closing_retry(
+        "Bets", bet_ids={"1", "3"},
+    )
+    assert {bet["bet_id"] for bet in bets} == {"1", "3"}
+
+
 # ── Dry-run does not call Sheets or API ───────────────────────────────────────
 
 def test_dry_run_does_not_write(monkeypatch):
@@ -168,14 +184,13 @@ def test_dry_run_does_not_write(monkeypatch):
     assert rc == 0
 
 
-def test_restore_na_on_failure_default(monkeypatch):
+def test_restore_original_on_failure_default(monkeypatch):
     import scripts.retry_closing_odds as retry_mod
 
-    bet = _past_game_bet(bet_id="42", row_idx=2)
+    bet = _past_game_bet(bet_id="42", row_idx=2, closing_odds="N/A")
     classification = classify_closing_retry_row(bet)
 
     monkeypatch.setattr(retry_mod, "clear_closing_odds_cells", lambda *a: True)
-    monkeypatch.setattr(retry_mod, "clear_market_key_cell", lambda *a: True)
     monkeypatch.setattr(
         retry_mod,
         "fetch_closing_odds",
@@ -205,7 +220,6 @@ def test_leave_error_writes_code(monkeypatch):
     classification = classify_closing_retry_row(bet)
 
     monkeypatch.setattr(retry_mod, "clear_closing_odds_cells", lambda *a: True)
-    monkeypatch.setattr(retry_mod, "clear_market_key_cell", lambda *a: True)
     monkeypatch.setattr(
         retry_mod,
         "fetch_closing_odds",
@@ -227,14 +241,13 @@ def test_leave_error_writes_code(monkeypatch):
     assert writes == [(2, "42", CLOSING_ODDS_SELECTION_NOT_FOUND, None, None)]
 
 
-def test_transient_failure_restores_na(monkeypatch):
+def test_transient_failure_restores_original(monkeypatch):
     import scripts.retry_closing_odds as retry_mod
 
-    bet = _past_game_bet(bet_id="42", row_idx=2)
+    bet = _past_game_bet(bet_id="42", row_idx=2, closing_odds="N/A")
     classification = classify_closing_retry_row(bet)
 
     monkeypatch.setattr(retry_mod, "clear_closing_odds_cells", lambda *a: True)
-    monkeypatch.setattr(retry_mod, "clear_market_key_cell", lambda *a: True)
     monkeypatch.setattr(
         retry_mod,
         "fetch_closing_odds",
@@ -265,7 +278,6 @@ def test_fetch_cascades_without_sheet_market_key(monkeypatch):
     seen = {}
 
     monkeypatch.setattr(retry_mod, "clear_closing_odds_cells", lambda *a: True)
-    monkeypatch.setattr(retry_mod, "clear_market_key_cell", lambda *a: True)
 
     def capture_fetch(b):
         seen["market_key"] = b.get("market_key")
@@ -296,7 +308,6 @@ def test_backfill_market_key_only_after_success(monkeypatch):
     mk_writes = []
 
     monkeypatch.setattr(retry_mod, "clear_closing_odds_cells", lambda *a: True)
-    monkeypatch.setattr(retry_mod, "clear_market_key_cell", lambda *a: True)
     monkeypatch.setattr(
         retry_mod,
         "fetch_closing_odds",

@@ -36,9 +36,12 @@ from closing_provenance import (
 )
 from actual_start import ActualStartResult, resolve_actual_start
 
-# One historical snapshot per (sport, timestamp, book, market) per process —
-# multiple bets on the same game/book reuse the same API response.
-_snapshot_cache: dict[tuple[str, str, str, str], list | None] = {}
+# One historical snapshot per (sport, timestamp, book, market[, event]) per
+# process — multiple bets on the same game/book reuse the same API response.
+_snapshot_cache: dict[tuple, list | None] = {}
+# Historical event rosters per (sport, timestamp) — id source for the
+# event-scoped historical markets (1 credit each, shared across bets).
+_historical_events_cache: dict[tuple[str, str], list] = {}
 # Proactive worker dedupe: bets sharing sport/book/market in one queue cycle
 # reuse a live response. The TTL stays below the worker's default 30s poll so a
 # later ladder step always receives a fresh quote.
@@ -46,6 +49,11 @@ _live_snapshot_cache: dict[tuple, tuple[float, list]] = {}
 _live_events_cache: dict[str, tuple[float, list]] = {}
 _LIVE_SNAPSHOT_TTL_SECONDS = 20
 _live_credit_total = 0
+
+
+def _redact_request_error(error: Exception) -> str:
+    """Prevent credentials embedded in requests' rendered URLs from reaching logs."""
+    return re.sub(r"(?i)(apiKey=)[^&\s]+", r"\1[REDACTED]", str(error))
 
 
 def _record_live_response_credits(response) -> None:
@@ -455,13 +463,121 @@ def _fetch_historical_snapshot(sport: str, date_iso: str, book_key: str,
 
         except requests.RequestException as e:
             if attempt < 2:
-                print(f"[closing_odds] Request failed (attempt {attempt + 1}/3): {e}. Retrying...")
+                print(f"[closing_odds] Request failed (attempt {attempt + 1}/3): "
+                      f"{_redact_request_error(e)}. Retrying...")
                 time.sleep(5)
             else:
-                print(f"[closing_odds] Request failed after 3 attempts: {e}")
+                print(f"[closing_odds] Request failed after 3 attempts: {_redact_request_error(e)}")
                 return None
 
     return None
+
+
+def _historical_get(url: str, params: dict, label: str) -> dict | None:
+    """Shared GET with the historical endpoints' retry/error conventions."""
+    for attempt in range(3):
+        try:
+            resp = requests.get(url, params=params, timeout=15)
+            if resp.status_code == 401:
+                print("[closing_odds] Invalid API key.")
+                return None
+            if resp.status_code == 422:
+                try:
+                    err = resp.json()
+                    detail = f" — {err.get('error_code') or ''}: {err.get('message') or resp.text[:200]}"
+                except ValueError:
+                    detail = f" — {resp.text[:200]}"
+                print(f"[closing_odds] {label} rejected (HTTP 422){detail}")
+                return None
+            if resp.status_code == 429:
+                print("[closing_odds] Odds API quota exceeded.")
+                return None
+            resp.raise_for_status()
+            remaining = resp.headers.get("x-requests-remaining", "unknown")
+            used = resp.headers.get("x-requests-used", "unknown")
+            print(f"[closing_odds] Credits used: {used} | Remaining: {remaining}")
+            return resp.json()
+        except (requests.RequestException, ValueError) as e:
+            if attempt < 2:
+                print(f"[closing_odds] {label} failed (attempt {attempt + 1}/3): "
+                      f"{_redact_request_error(e)}. Retrying...")
+                time.sleep(5)
+            else:
+                print(f"[closing_odds] {label} failed after 3 attempts: {_redact_request_error(e)}")
+                return None
+    return None
+
+
+def _fetch_historical_events(sport: str, date_iso: str) -> list | None:
+    """
+    Historical event roster (1 credit) — the id source for event-scoped
+    historical markets. None on error (transient); [] when no events existed.
+    """
+    cache_key = (sport, date_iso)
+    if cache_key in _historical_events_cache:
+        return _historical_events_cache[cache_key]
+    payload = _historical_get(
+        f"{ODDS_API_BASE}/historical/sports/{sport}/events",
+        {"apiKey": ODDS_API_KEY, "date": date_iso, "dateFormat": "iso"},
+        f"historical events roster ({sport})",
+    )
+    if payload is None:
+        return None
+    events = payload.get("data", []) or []
+    _historical_events_cache[cache_key] = events
+    return events
+
+
+def _fetch_historical_event_snapshot(sport: str, date_iso: str, book_key: str,
+                                     market: str, team1: str, team2: str,
+                                     expected_start) -> list | None:
+    """
+    Historical snapshot for an ADDITIONAL market (alternate_*, team_totals,
+    period markets). The sport-level /historical/sports/{sport}/odds endpoint
+    rejects these with HTTP 422 INVALID_MARKET — they are only served by the
+    event-scoped endpoint, mirroring the live path and odds-tool's recovery:
+      1. /historical/sports/{sport}/events?date=…       (1 credit, cached)
+      2. /historical/sports/{sport}/events/{id}/odds    (10 credits/market)
+
+    Returns the same [event] shape as _fetch_historical_snapshot so
+    _price_from_snapshot works unchanged: None → transient, [] → game not
+    found (permanent).
+    """
+    roster = _fetch_historical_events(sport, date_iso)
+    if roster is None:
+        return None
+    event = find_event(roster, team1, team2, expected_start)
+    event_id = (event or {}).get("id")
+    if not event_id:
+        return []
+
+    cache_key = (sport, date_iso, book_key.lower(), market, event_id)
+    if cache_key in _snapshot_cache:
+        return _snapshot_cache[cache_key]
+
+    payload = _historical_get(
+        f"{ODDS_API_BASE}/historical/sports/{sport}/events/{event_id}/odds",
+        {
+            "apiKey": ODDS_API_KEY,
+            "regions": region_for_book_key(book_key),
+            "markets": market,
+            "oddsFormat": "american",
+            "dateFormat": "iso",
+            "date": date_iso,
+            "bookmakers": book_key,
+        },
+        f"historical event odds ({sport}/{market})",
+    )
+    if payload is None:
+        return None
+    raw_event = payload.get("data")
+    if not isinstance(raw_event, dict):
+        return []
+    snapshot_event = dict(raw_event)
+    snapshot_event["_snapshot_at"] = payload.get("timestamp") or date_iso
+    events = [snapshot_event]
+    _snapshot_cache[cache_key] = events
+    return events
 
 
 def _fetch_live_events(sport: str) -> list:
@@ -482,7 +598,7 @@ def _fetch_live_events(sport: str) -> list:
         _live_events_cache[sport] = (time.monotonic(), events)
         return events
     except requests.RequestException as exc:
-        raise RuntimeError(f"live Odds API event request failed: {exc}") from exc
+        raise RuntimeError(f"live Odds API event request failed: {_redact_request_error(exc)}") from exc
 
 
 def _fetch_live_snapshot(sport: str, book_key: str, market: str,
@@ -529,7 +645,7 @@ def _fetch_live_snapshot(sport: str, book_key: str, market: str,
         _live_snapshot_cache[cache_key] = (time.monotonic(), events)
         return events
     except requests.RequestException as exc:
-        raise RuntimeError(f"live Odds API request failed: {exc}") from exc
+        raise RuntimeError(f"live Odds API request failed: {_redact_request_error(exc)}") from exc
 
 
 def fetch_live_closing_odds(bet: dict) -> dict:
@@ -546,7 +662,6 @@ def fetch_live_closing_odds(bet: dict) -> dict:
     team2 = bet.get("team2", "")
     bet_type = bet.get("bet_type", "")
     selection = bet.get("selection", "")
-
     if needs_manual_closing_odds(book):
         return {"closing_odds": None, "decimal_closing": None,
                 "error": CLOSING_ODDS_MANUAL_REQUIRED}
@@ -715,6 +830,8 @@ def _fetch_closing_price(bet: dict, label: str) -> dict:
     team2 = bet.get("team2", "")
     bet_type = bet.get("bet_type", "")
     selection = bet.get("selection", "")
+    actual_start = _parse_iso_utc(bet.get("actual_start"))
+    confident = str(bet.get("actual_start_confidence") or "").strip().upper() == "CONFIDENT"
 
     _transient = {"price": None, "error": None}
 
@@ -744,7 +861,12 @@ def _fetch_closing_price(bet: dict, label: str) -> dict:
               f"automatically — manual entry required.")
         return _permanent(CLOSING_ODDS_MANUAL_REQUIRED)
 
-    if not sport_has_odds_feed(sport):
+    if sport.lower().startswith("manual_"):
+        print(f"[closing_odds] {label}: manual sport alias '{sport}' has no "
+              "The Odds API historical route.")
+        return _permanent(CLOSING_ODDS_SPORT_NOT_ON_API)
+
+    if not sport_has_odds_feed(sport) and not (actual_start is not None and confident):
         print(f"[closing_odds] {label}: sport '{sport}' is not currently "
               f"active on The Odds API — manual entry required.")
         return _permanent(CLOSING_ODDS_SPORT_NOT_ON_API)
@@ -761,8 +883,6 @@ def _fetch_closing_price(bet: dict, label: str) -> dict:
         print(f"[closing_odds] {label}: could not parse game datetime — skipping.")
         return _transient
 
-    actual_start = _parse_iso_utc(bet.get("actual_start"))
-    confident = str(bet.get("actual_start_confidence") or "").strip().upper() == "CONFIDENT"
     if actual_start is not None and confident:
         snapshot_dt = actual_start - timedelta(seconds=SAFETY_MARGIN_SECONDS)
         closing_quality = QUALITY_VERIFIED
@@ -780,7 +900,14 @@ def _fetch_closing_price(bet: dict, label: str) -> dict:
         print(f"[closing_odds] {label}: fetching {market} snapshot "
               f"for {team1} vs {team2} at {date_iso} (book: {book})")
 
-        events = _fetch_historical_snapshot(sport, date_iso, book, market)
+        # Additional markets 422 on the sport-level historical endpoint; they
+        # are only served event-scoped (mirrors the live path).
+        if market in _ADDITIONAL_MARKETS:
+            events = _fetch_historical_event_snapshot(
+                sport, date_iso, book, market, team1, team2, game_dt,
+            )
+        else:
+            events = _fetch_historical_snapshot(sport, date_iso, book, market)
         if events is None:
             had_transient = True
             continue

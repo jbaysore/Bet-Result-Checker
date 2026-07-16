@@ -484,6 +484,69 @@ Audited commit `8134dc2` (Bet-Result-Checker) + current odds-tool tree against r
 
 ---
 
+# Suspect Re-Pull — 2026-07-15 (executed)
+
+`scripts/repull_suspect_closing.py` (new; tests in `tests/test_repull_suspect_closing.py`) re-pulled the 56 LIKELY_SUSPECT + INDETERMINATE rows using each row's audit-stamped `Actual Start` (snapshot at `actual − 90s` → `VERIFIED_CLOSE`, `Start Status = VERIFIED`, `Closing Source = recovery-historical`). Failures restore the original values + `LEGACY_UNAUDITED` provenance, so no row is ever left in an intermediate state.
+
+**Result: 52 of 56 repaired** (three runs; reports in `repull_suspect_report*.json`):
+- Avg CLV on the repaired rows: **+0.182% (poisoned) → −0.815% (true close)**. Largest corrections: BetID 373 +55.56%→+5.66%, 355 +13.70%→+0.41%, 284 0%→−8.71%.
+- **4 permanent leftovers**, originals restored and excluded from pooled CLV by the legacy contract: 368/364 (SELECTION NOT FOUND — the exact alternate line no longer existed at the true close), 314 (BOOK NOT FOUND — book had pulled the market), 52 (MANUAL ENTRY — Kalshi-style book without a ticker; hand-enter if desired).
+
+Two implementation notes from the run:
+1. **Sheets write quota**: 56 back-to-back clear+write cycles hit Google's 60-writes/min limit; the driver now paces (`--pace`, default 5s) and retries across quota windows. Failed rows were restored, none lost.
+2. **Historical additional markets** (root cause of 13 "transient" failures): the sport-level historical endpoint 422s on `alternate_*`/`team_totals`. Added `_fetch_historical_event_snapshot` to `closing_odds.py` — historical events roster (1 credit, cached) → `/historical/sports/{sport}/events/{id}/odds` (10 credits) — mirroring the live path and odds-tool's recovery. This also fixes the same latent gap for ALL future importer/retry fetches of additional-market bets, not just this backfill.
+
+**Remaining legacy work (the "rest")**: the 207 UNRESOLVABLE rows — either build fight-card/other-sport actual-start resolvers and repeat audit→re-pull, or accept their permanent exclusion from pooled CLV.
+
+---
+
+# Closing-Gap Taxonomy — 2026-07-15 (`scripts/closing_gap_taxonomy.py`)
+
+Read-only classifier over all 381 rows. **140 contribute a trusted CLV; 241 do not.** The "207 UNRESOLVABLE" figure was misleading — it merged a resolver *bug*, several *missing* resolvers, and plain re-fetch gaps. Almost none of it is permanent. The 241 split into two modes:
+
+### Mode A — HAS a closing price, start not verifiable (169)
+
+| Subset | Rows | Root cause | Fix |
+|---|---|---|---|
+| World Cup | 66 | **Soccer resolver bug** — `resolve_espn_actual_start` finds the game (event id resolves) but `first_play_wallclock` returns None: ESPN soccer summaries carry `plays: []`; timing is in `keyEvents`/`commentary` (+ `header.competitions[0].date` scheduled fallback). **Also silently breaks MLS** (same code path). | Fix soccer first-event extraction → re-audit → re-pull. No new resolver. |
+| Tennis (ATP/WTA Wimbledon + manual) | 65 | No tennis resolver | Build tennis resolver (ESPN covers tennis) |
+| MMA (19) + Boxing (3) | 22 | No combat resolver | Build combat resolver (ESPN covers MMA/boxing) |
+| NBA (6) + CFL (5) | 11 | Sport not in `ESPN_ROUTES` table | Add route entries — plumbing already exists (same as WNBA/MLS) |
+| already-resolved / parlay-per-leg edge | 5 | misc | case-by-case |
+
+### Mode B — NO closing price at all (72)
+
+| Subset | Rows | Fix |
+|---|---|---|
+| Auto-priceable, blank or N/A (mostly MLB/WNBA/MLS on normal books) | 53 | Re-fetch pass; the new `_fetch_historical_event_snapshot` recovers the alternate-market subset that previously 422'd |
+| Manual/book-specific (polymarket, betopenly, kalshi-no-ticker) | 7 | Hand-enter or build a book-specific source |
+| VOID (settled — no CLV by design) | 6 | none (correct as-is) |
+| Prop (1) / Parlay (5) — structural | 6 | Props need player-prop pricing; parlays auto-price once legs are priceable |
+
+**Bottom line:** ~66 recoverable by fixing one soccer bug, ~98 by building/extending resolvers for sports ESPN already covers, ~54 by a re-fetch pass, and only ~13 (VOID + props + exotic books) are genuinely not automatable — most of which *shouldn't* have a CLV anyway. Effectively zero rows are permanently lost.
+
+**Suggested order:** (1) soccer extraction fix → re-audit soccer → re-pull [66 + latent MLS]; (2) re-fetch pass over the 53–54 no-price auto rows; (3) add NBA/CFL routes [11]; (4) tennis resolver [65]; (5) combat resolver [22].
+
+## Soccer fix — DONE 2026-07-15 (subset 1 of the taxonomy)
+
+Root cause was exactly as diagnosed: `actual_start.first_play_wallclock` only scanned `plays[]`, which is empty for soccer; ESPN puts the kickoff wallclock in `keyEvents[]` (the `type:"kickoff"` entry). Fixed by scanning **both** `plays` and `keyEvents` and taking the earliest wallclock — one rule for every sport. Verified live: Spain v France → CONFIDENT `2026-07-14T19:00:07Z`. 394 tests green (added soccer keyEvents coverage).
+
+Then re-audited (329 remaining LEGACY_UNAUDITED rows; `resolve_actual_start` reuses already-stamped Actual Start, so only previously-unresolved rows were re-touched — no regression risk):
+- **UNRESOLVABLE 207 → 148**; **SAFE 118 → 173 (+55)**. As predicted, soccer kicks off on time, so the World Cup rows classify SAFE and are pooled **as-is with their existing pregame closing prices — zero credits, no re-pull**.
+- Remaining suspects (8) re-pulled: **3 recovered** (372/366/363, previously blank → VERIFIED_CLOSE); 5 genuinely unrecoverable (368/364/365 SELECTION NOT FOUND, 314 BOOK NOT FOUND, 52 MANUAL ENTRY), originals restored.
+
+**Net: Trusted/pooled CLV 140 → 197 (+57). Gap 241 → 184.** The single soccer bug fix (plus a handful of re-pulls) was the biggest lever, and it also permanently repairs MLS actual-start resolution going forward. Remaining gap is now tennis (65) + combat (22) + NBA/CFL (11) resolvers, the ~53 no-price re-fetch pass, and ~13 by-design (VOID/prop/exotic-book).
+
+## NBA resolver — DONE 2026-07-15 (subset 2)
+
+Added `basketball_nba: ("basketball", "nba")` to `ESPN_ROUTES` — NBA uses the proven `plays[].wallclock` path (verified live: Spurs–Knicks → CONFIDENT tip-off `2026-06-04T00:44:26Z`, 508 plays). 395 tests green. Re-audit: **UNRESOLVABLE 148 → 142; SAFE 173 → 179 (+6)** — like soccer, NBA starts on-time-or-late so all 6 NBA rows classified SAFE and are pooled with existing pregame prices, no re-pull. **Trusted CLV 197 → 203; gap 184 → 178.**
+
+**CFL rejected (no fallback policy):** ESPN `football/cfl` scoreboard returns zero events for past games — no clean actual-start source, so CFL stays excluded rather than take a scheduled-time guess. Combat (MMA/boxing) and tennis likewise parked: no *confirmed* per-fight / first-serve actual-start signal, and Josh's rule is verified-actual or excluded — no scheduled-date fallback.
+
+**Remaining gap (178):** tennis (65) + combat (22) — both need a confirmed non-scheduled start source before they qualify; ~51 no-price re-fetch pass on already-resolvable MLB/WNBA/MLS rows (no new code, event-snapshot fix helps); 12 World Cup remnants (ESPN returned no kickoff timing — excluded under no-fallback); CFL (5); ~13 by-design VOID/prop/exotic-book.
+
+---
+
 # Implementation Audit Resolution — 2026-07-15
 
 Every finding in the post-implementation audit above was addressed.
@@ -529,3 +592,134 @@ Validation after the audit fixes:
 - odds-tool production Vite build passed (existing large-chunk warning only).
 - Python/JavaScript syntax checks, UTF-8 JSON parse, and checker
   `git diff --check` passed.
+
+---
+
+# Historical recovery — Tennis and combat batches (executed 2026-07-15/16)
+
+## Tennis
+
+Added a strict ESPN tennis resolver for completed ATP/WTA singles matches. It
+matches both players inside the correct singles draw, requires `timeValid` and
+completed status, and uses the retained competition start rather than the
+tournament date. Ambiguous or missing matches remain unresolved. After the
+targeted audit/recovery, trusted CLV increased to **293 rows** and the gap fell
+to **93**.
+
+## Combat sports
+
+Implemented a UFC-only actual-start resolver using ESPN's per-bout play feed.
+The ordinary competition timestamp is the **card** start and is explicitly not
+used. A bout resolves only when strict normalized fighter matching finds one
+completed competition and its play feed contains exactly one period-1 `Round
+Start` wallclock. The parent card event id is retained to address that play
+feed, and the verified provider alias `Zachary Reese` ↔ `Zach Reese` is narrow
+and explicit. Boxing is intentionally excluded: the tested ESPN site/core
+boxing routes return 404/invalid-sport responses, so no scheduled/card-time
+fallback was introduced.
+
+Targeted live-sheet batch: **22 rows** (19 UFC, 3 boxing).
+
+- UFC: **19/19 actual starts resolved** from the opening bell.
+- Original audit geometry: **14 SAFE**, **4 INDETERMINATE**, **1
+  LIKELY_SUSPECT**.
+- Boxing: **3 UNRESOLVABLE** (BetIDs 28, 29, 79), retained unchanged and
+  excluded from pooled CLV.
+- The five non-SAFE UFC rows were re-pulled at actual start minus the safety
+  margin. **5/5 succeeded**, with guarded restoration never needed:
+  - 182: close `+105` → `+115`; CLV `9.76%` → `4.65%`
+  - 279: close `+550` → `+850`; CLV `100.00%` → `36.84%`
+  - 276: close `-122` → `-120`; CLV `4.91%` → `4.13%`
+  - 38: close `200` → `+200`; CLV stayed `-10.00%`
+  - 37: close `-222` → `-220`; CLV `4.48%` → `4.19%`
+- Those five re-pulls used **50 Odds API credits** total. The final read-back
+  found all five with `Start Status = VERIFIED`, `Closing Quality =
+  VERIFIED_CLOSE`, and the expected actual-start provenance.
+- Full checker test suite: **406 passed**.
+
+Net after combat: trusted/pooled CLV **293 → 312 (+19)**; gap **93 → 74**.
+The post-combat gap contains 18 priced rows: 5 CFL + 3 boxing without a start
+resolver, 6 already carrying actual starts but needing case-specific cleanup,
+2 tennis matches still unmatched, and 2 parlay/per-leg cases. There are also 42
+auto-priceable rows without a closing price.
+
+**Recommended next batch:** the three plausibly recoverable priced rows that
+already have actual starts (BetIDs **8, 9, 278**). They need no new sport
+resolver: 8/9 need actual-start re-pulls and 278 needs a better-than-STALE
+capture. The other three in that six-row category are already-known source
+dead ends (52 is manual/Kalshi without a usable ticker; 364/368 previously
+failed because the exact selection was unavailable), so retrying all six would
+mostly spend credits without improving the dataset.
+
+## Three-row follow-up — executed 2026-07-16
+
+The recommended batch was attempted with exact before/after snapshots and
+guarded restoration. **None of the three could be promoted into trusted CLV:**
+
+- **8 and 9:** both use the sheet-only `manual_wta_libema` sport alias. The Odds
+  API `all=true` directory (zero credits) confirms that it has no Libéma sport
+  key, so there is no historical endpoint from which to reconstruct the two
+  exact sportsbook closes. BetID 8's first attempt returned 404 and restored
+  its original `-476 / 0.88%`; 9 was not sent through the same known-invalid
+  route. Both remain `LEGACY_UNAUDITED / INDETERMINATE` and excluded.
+- **278:** the actual-start re-pull succeeded technically and returned the same
+  `-136 / 5.65%`, but FanDuel's retained quote timestamp was still outside the
+  freshness limit. It truthfully remains `VERIFIED / STALE` and excluded rather
+  than being mislabeled as a verified close.
+
+The run used **11 Odds API credits** (the event-scoped team-total lookup for
+278); the sport directory cost zero. The recovery utility now also (a) permits
+an explicitly targeted `VERIFIED / STALE` row while preserving its complete
+original provenance on failure, (b) fails fast for `manual_*` sport aliases,
+and (c) redacts API credentials from rendered request-error URLs. **410 tests
+passed.** Trusted/gap totals remain **312 / 74**.
+
+**Recommended next batch:** the ten completed N/A rows with working actual-start
+resolvers and no already-confirmed permanent source failure: BetIDs **39, 125,
+223, 277, 294, 296, 305, 309, 323, 345**. This is a higher-yield guarded
+historical re-fetch batch. BetID 314 is deliberately omitted because its prior
+attempt already proved the required book quote unavailable.
+
+## Missing-price 23-row batch — executed 2026-07-16
+
+The apparent 23-row historical recovery bucket contained three different
+states after an exact live-sheet freeze:
+
+- **11 upcoming bets** (237, 238, 252, 287, 292, 331, 340, 362, 384, 385,
+  387), dated July 16–22. Their blank closing cells are expected; they remain
+  owned by the normal capture worker and were deliberately not touched.
+- **1 misclassified fight** (39): Brad Pauls–Bradley Goldsmith is boxing data
+  stored under the MMA sport key. The UFC resolver correctly found no matching
+  competition, so no scheduled-time/provisional closing price was written.
+- **11 completed retryable rows** (125, 223, 277, 294, 296, 305, 309, 314,
+  323, 345, 365). Each was cleared and fetched through guarded recovery; every
+  unavailable market was restored to its exact original value and provenance.
+
+**Result: 0 of 11 recovered.** The historical snapshots did not retain the
+required book/total selection at the verified cutoff. The most common failure
+was `BOOK NOT FOUND` after both the main totals and event-scoped alternate-total
+paths; BetID 365 again returned `SELECTION NOT FOUND`. Final read-back confirmed
+the ten N/A rows are still N/A, 365 retains its original error/provenance, and
+no interrupted clear/write state exists. The run used **118 Odds API credits**.
+
+Post-run census is unchanged: **312 trusted / 74 excluded**. These completed
+rows should not be bulk-retried again without a new historical book source or
+new evidence that the provider's archived markets changed.
+
+## EFL Cup resolver — implemented 2026-07-16
+
+Added `soccer_england_efl_cup -> soccer/eng.league_cup` to the authoritative
+ESPN actual-start routes and to the gap taxonomy. ESPN's live scoreboard was
+verified against all three exact upcoming rows: Rochdale–Tranmere (event
+401877066), Crawley Town–York City (401877065), and Wrexham–Middlesbrough
+(401881129). The resolver uses the existing strict two-team match plus earliest
+`keyEvents` kickoff wallclock; it also correctly matches the sheet's `Wrexham
+AFC` against ESPN's `Wrexham` without introducing a broad fuzzy alias.
+
+All three bets (358, 359, 360) are still upcoming on August 1/3/7, so their
+sheet cells were deliberately left untouched for the live worker. After each
+match completes, the route can provide a confident actual kickoff for normal
+capture fallback or targeted re-audit/recovery. Resolver coverage moves these
+three rows out of the `no_resolver` cause, although the current trusted/gap
+total does not change until the events occur and prices are captured. Full
+checker suite: **411 passed**.

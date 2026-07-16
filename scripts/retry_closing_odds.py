@@ -3,8 +3,8 @@
 One-shot retry for ClosingOdds rows marked N/A (or error codes with --include-errors).
 
 Preview buckets each row (skip / manual / retry), then optionally clears and
-re-fetches once. Failures restore N/A by default so the cron checker does not
-spin forever on hopeless lines.
+re-fetches once. Failures restore the row's exact prior closing/provenance state
+so a one-shot recovery cannot make an unsuccessful row worse.
 
 Usage (from Bet-Result-Checker-github/):
   python scripts/retry_closing_odds.py --dry-run --all-na
@@ -18,6 +18,10 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+for stream in (sys.stdout, sys.stderr):
+    if hasattr(stream, "reconfigure"):
+        stream.reconfigure(encoding="utf-8", errors="replace")
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -28,7 +32,6 @@ from retry_bucketing import classify_closing_retry_row
 from sheets_reader import load_bets_for_closing_retry
 from sheets_writer import (
     clear_closing_odds_cells,
-    clear_market_key_cell,
     write_closing_odds,
     write_market_key_if_blank,
     clear_closing_odds_fail_streak,
@@ -47,10 +50,35 @@ def _format_preview_row(bet: dict, classification: dict) -> str:
     )
 
 
-def _restore_na(bet: dict) -> bool:
+def _parse_sheet_number(raw) -> float | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    percent = text.endswith("%")
+    if percent:
+        text = text[:-1].strip()
+    try:
+        value = float(text.replace(",", ""))
+    except ValueError:
+        return None
+    return value / 100 if percent else value
+
+
+def _restore_original(bet: dict) -> bool:
+    provenance = {
+        key: bet.get(key, "")
+        for key in (
+            "start_status", "closing_quality", "closing_source",
+            "closing_observed_at", "start_detected_at", "actual_start",
+            "actual_start_source", "actual_start_confidence",
+            "pinnacle_close", "pinnacle_clv",
+        )
+    }
     return write_closing_odds(
-        bet["row_idx"], bet["bet_id"], "N/A", None, None,
-        provenance=_retry_provenance(),
+        bet["row_idx"], bet["bet_id"], bet.get("closing_odds", ""),
+        _parse_sheet_number(bet.get("decimal_closing")),
+        _parse_sheet_number(bet.get("clv")),
+        provenance=provenance,
     )
 
 
@@ -83,7 +111,7 @@ def _process_bet(
     backfill_market_key: bool,
     leave_error: bool,
 ) -> dict:
-    """Clear, fetch once with market cascade, write result or restore N/A."""
+    """Clear, fetch once with market cascade, write result or restore original."""
     bet_id = bet["bet_id"]
     row_idx = bet["row_idx"]
     outcome = {"bet_id": bet_id, "status": "failed", "detail": ""}
@@ -91,8 +119,6 @@ def _process_bet(
     if not clear_closing_odds_cells(row_idx, bet_id):
         outcome["detail"] = "could not clear closing columns"
         return outcome
-
-    clear_market_key_cell(row_idx, bet_id)
 
     # Always cascade main → alternate markets; ignore any prior Market Key stamp.
     fetch_bet = {**bet, "market_key": "", "_resolve_actual_start": True}
@@ -110,7 +136,7 @@ def _process_bet(
                 provenance=_retry_provenance(),
             )
         else:
-            _restore_na(bet)
+            _restore_original(bet)
         outcome["detail"] = str(e)
         return outcome
 
@@ -144,11 +170,11 @@ def _process_bet(
             )
             outcome["detail"] = error_code
         else:
-            _restore_na(bet)
-            outcome["detail"] = f"restored N/A ({error_code})"
+            _restore_original(bet)
+            outcome["detail"] = f"restored original ({error_code})"
         return outcome
 
-    # Transient (API timeout, 422 on a market, etc.) — restore N/A, not blank.
+    # Transient API failure: restore the exact prior closing/provenance state.
     if leave_error:
         write_closing_odds(
             row_idx, bet_id, "SELECTION NOT FOUND", None, None,
@@ -156,8 +182,8 @@ def _process_bet(
         )
         outcome["detail"] = "transient failure — wrote SELECTION NOT FOUND"
     else:
-        _restore_na(bet)
-        outcome["detail"] = "restored N/A (transient failure)"
+        _restore_original(bet)
+        outcome["detail"] = "restored original (transient failure)"
     return outcome
 
 
@@ -185,7 +211,16 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Also include rows left blank by a prior failed retry",
     )
-    parser.add_argument("--bet-id", help="Process a single BetID")
+    parser.add_argument(
+        "--bet-id",
+        action="append",
+        help="Process a BetID (repeat for an exact batch)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Explicit preview alias; preview is already the default",
+    )
     parser.add_argument(
         "--backfill-market-key",
         action="store_true",
@@ -206,13 +241,14 @@ def main(argv: list[str] | None = None) -> int:
     if not args.all_na and not args.bet_id:
         parser.error("Specify --all-na and/or --bet-id")
 
-    include_na = args.all_na or bool(args.bet_id)
+    target_ids = {value.strip() for value in (args.bet_id or []) if value.strip()}
+    include_na = args.all_na or bool(target_ids)
     bets = load_bets_for_closing_retry(
         SHEET_TAB,
         include_na=include_na,
         include_errors=args.include_errors,
         include_blank=args.include_blank,
-        bet_id=args.bet_id,
+        bet_ids=target_ids,
     )
 
     if not bets:
