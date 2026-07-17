@@ -362,6 +362,11 @@ def main():
         print(f"[trigger] Onboarding verifier: {onboarding_result['observations']} observations, "
               f"{len(onboarding_result['proposals'])} transition proposal(s), "
               f"{onboarding_result['decisions']['applied']} decision(s) applied.")
+        pending_intents = onboarding_result.get("pending_intents", {})
+        print(f"[trigger] Onboarding bet intents: "
+              f"{pending_intents.get('examined', 0)} examined, "
+              f"{pending_intents.get('needed', 0)} needed, "
+              f"{pending_intents.get('created', 0)} record(s) created.")
         if onboarding_result["decisions"]["failed"]:
             write_failures += onboarding_result["decisions"]["failed"]
     except Exception as e:

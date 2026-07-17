@@ -71,3 +71,18 @@ def test_durable_scanner_discovery_starts_collecting_before_bet(monkeypatch):
         policy.CAP_CAPTURE, policy.CAP_BENCHMARK,
     }
     assert all(r.activity == policy.COLLECTING for r in profile.records())
+
+
+def test_logged_bet_is_durable_without_two_scanner_sightings(monkeypatch):
+    profile = CapabilityProfile([])
+    monkeypatch.setattr(onboarding_decisions, "_ensure_registry_alias", lambda *_: True)
+    row = {"Context ID": "soccer/new", "Sport Key": "soccer_new",
+           "Book": "DraftKings", "Market Family": "h2h"}
+    payload = {
+        "intent": "bet", "betId": "42", "loggedAt": "2026-07-16T10:00:00Z",
+        "scannerHistory": {"firstSeenAt": "2026-07-16T09:30:00Z"},
+    }
+    assert apply_discovery(profile, row, payload,
+                           now=datetime(2026, 7, 16, 11, tzinfo=timezone.utc)) == 4
+    assert all(r.first_seen.isoformat() == "2026-07-16T09:30:00+00:00"
+               for r in profile.records())

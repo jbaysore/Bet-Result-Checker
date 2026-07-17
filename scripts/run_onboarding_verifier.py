@@ -233,6 +233,60 @@ def _verify_ephemeral_rows(rows: list[dict], registry: ContextRegistry, *, apply
     return len(eligible)
 
 
+def _reconcile_pending_bet_intents(profile: CapabilityProfile,
+                                   registry: ContextRegistry, *, apply: bool) -> dict:
+    """Bets itself is the durable fallback if the at-log queue append failed.
+
+    The onboarding-specific reader includes future games and manually settled
+    bet types, so this runs on the next normal checker invocation rather than
+    waiting until trigger.py's start-time filter calls poll_bet. The odds-tool
+    queue remains the lower-latency path.
+    """
+    summary = {"examined": 0, "needed": 0, "created": 0, "failed": 0}
+    if not apply or not config.ONBOARDING_ENFORCE:
+        return summary
+    from onboarding_decisions import apply_discovery
+    from scripts.onboarding_inventory import context_id_for_sport_key
+    from sheets_reader import load_onboarding_bet_intents
+
+    for parent in load_onboarding_bet_intents(config.SHEET_TAB):
+        units = parent.get("legs") if parent.get("legs") else [parent]
+        for unit in units:
+            summary["examined"] += 1
+            sport = str(unit.get("sport") or "").strip()
+            book = str(unit.get("book") or parent.get("book") or "").strip().lower()
+            family = policy.market_family_for(unit.get("market_key"), unit.get("bet_type"))
+            if not sport or not book or family == policy.MF_UNKNOWN:
+                continue
+            resolution = registry.resolve(
+                sport, unit.get("team1", ""), unit.get("team2", ""),
+                unit.get("game_date"), unit.get("event_id", ""))
+            context_id = (resolution.context_id if resolution.is_known
+                          else context_id_for_sport_key(sport))
+            if resolution.is_known and profile.require_clv(context_id, book, family).trusted:
+                continue
+            summary["needed"] += 1
+            try:
+                summary["created"] += apply_discovery(profile, {
+                    "Context ID": context_id, "Sport Key": sport,
+                    "Book": book, "Market Family": family,
+                }, {
+                    "intent": "bet", "betId": str(parent.get("bet_id") or ""),
+                    "eventId": str(unit.get("event_id") or ""),
+                    "loggedAt": policy.now_utc().isoformat(),
+                })
+            except Exception as exc:
+                summary["failed"] += 1
+                print(f"[onboarding] pending-bet reconciliation failed for "
+                      f"BetID {parent.get('bet_id')}: {exc}")
+    if summary["failed"]:
+        raise RuntimeError(
+            f"{summary['failed']} pending-bet onboarding intent(s) failed; "
+            "scheduled run must not report success"
+        )
+    return summary
+
+
 def run_once(*, apply: bool, limit_days: int = 14) -> dict:
     """Reusable scheduled pass. Raises on an authoritative write failure."""
     decisions = {"applied": 0, "failed": 0}
@@ -243,6 +297,9 @@ def run_once(*, apply: bool, limit_days: int = 14) -> dict:
     if not profile.readable:
         raise RuntimeError("Capabilities tab unreadable (fail closed)")
     registry = ContextRegistry.load()
+    pending_intents = _reconcile_pending_bet_intents(profile, registry, apply=apply)
+    if pending_intents["created"]:
+        registry = ContextRegistry.load()
     causal_rows = _recent_completed_rows(None)
     cutoff = policy.now_utc() - __import__("datetime").timedelta(days=limit_days)
     rows = [row for row in causal_rows
@@ -273,6 +330,7 @@ def run_once(*, apply: bool, limit_days: int = 14) -> dict:
             "capability_writes": capability_writes,
             "starts_hydrated": starts_hydrated,
             "ephemeral_verified": ephemeral_verified,
+            "pending_intents": pending_intents,
             "apply": apply, "promote_shadow": config.ONBOARDING_PROMOTE_SHADOW}
 
 

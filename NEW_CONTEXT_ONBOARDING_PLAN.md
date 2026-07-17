@@ -1015,23 +1015,55 @@ be manufactured safely by a unit test and is not a code blocker.
 
 ### Verification
 
-- Bet-Result-Checker: **528 passed** (`python -m pytest -q`).
-- odds-tool: **614 passed** (`npm test`).
+- Bet-Result-Checker: **532 passed** (`python -m pytest -q`).
+- odds-tool: **617 passed** (`npm test`).
 - Focused Phase 7 coverage includes scanner two-sighting dedupe, atomic daily
   budget, seven-day expiry/reset, same-cycle dedupe, context-ID parity,
   pre-bet Collecting records, event-ID resolution precedence, permanently
   non-reusable ephemeral records, row safety-margin verification, recurrence,
-  benchmark Blocked/reopen evidence, and harmless capture preservation.
+  benchmark Blocked/reopen evidence, harmless capture preservation, logged-bet
+  intent without scanner uptime, and reconciliation of future/manual-grade bets.
 - odds-tool client production build completed successfully. The pre-existing
   large-chunk advisory remains non-blocking.
 - No live Sheets rows, Railway processes, or external APIs were mutated during
   implementation verification.
 
-### Deployment follow-up
+### Operational correction: scanner uptime is optional
 
-After both repositories are deployed, leave the scanner enabled normally and
-inspect the first genuinely NEW opportunity that receives two scan-cycle
-sightings. The expected chain is: one pending `discovery` queue row, checker
-consumption on its next scheduled pass, four Collecting grains before bet time,
-and retained scanner history beginning before any later bet. That real fixture
-is the final Gate P7 cold-start demonstration.
+The implementation no longer depends on the opportunity scanner running when a
+new-context bet is placed. A successfully logged bet is now the primary durable
+onboarding trigger:
+
+1. odds-tool immediately appends one `intent: bet` Discovery Queue row for each
+   provisional context/book/market-family grain. A real bet does not require two
+   scanner sightings and does not expire.
+2. When scanner history exists for the event/book/family, its earlier
+   `firstSeenAt`, quote timestamps, and retained price are attached to the bet
+   intent. Missing scanner history does not block or delay onboarding.
+3. If that immediate queue write fails, the log-bet completion screen reports
+   the failure instead of silently claiming success.
+4. Independently, every scheduled checker verifier pass reads all unresolved
+   Bets rows—including future bets and bet types that require manual result
+   grading—and idempotently reconstructs any missing bet intent. This is the
+   authoritative fallback and does not wait for the game's scheduled start or
+   for `poll_bet` to run.
+   A failed authoritative reconstruction makes the scheduled checker job fail
+   visibly; it cannot be counted as a successful run.
+5. Scanner-first discovery remains an optimization: two sightings may start
+   Collecting before any wager exists and provide a longer observation window.
+   Turning the scanner off forfeits only that early evidence; it does not block
+   closing capture, bet resolution, onboarding, or surface a silent dependency.
+
+The direct queue path lives in the local odds-tool application; it does not
+require a second Railway service. The independent reconciliation path lives in
+Bet-Result-Checker and takes effect on the next ordinary scheduled checker run.
+
+### Revised deployment follow-up
+
+Deploy the checker changes and update the local odds-tool code. Then log one
+future test bet in a context that is NEW or provisional while the scanner is
+off. The expected chain is: the bet logs successfully, odds-tool queues durable
+bet intent immediately (or visibly reports a queue-write failure), and the next
+scheduled checker pass shows the grain in Collecting. A later real fixture with
+scanner history is still useful for measuring the cold-start improvement, but
+it is no longer a correctness or deployment gate.

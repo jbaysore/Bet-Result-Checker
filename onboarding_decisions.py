@@ -184,11 +184,13 @@ def apply_discovery(profile: CapabilityProfile, row: dict, payload: dict,
     sport_key = str(row.get("Sport Key") or "").strip()
     book = str(row.get("Book") or "").strip().lower()
     family = str(row.get("Market Family") or "").strip().lower()
+    intent = str(payload.get("intent") or "").lower()
     expires = _parse_utc(payload.get("expiresAt"))
     if expires is not None and expires < now:
         raise TimeoutError("scanner discovery expired before consumption")
-    if str(payload.get("intent") or "").lower() != "durable" \
-            or int(payload.get("sightings") or 0) < 2:
+    if intent not in {"bet", "durable"}:
+        raise ValueError("unknown discovery intent")
+    if intent == "durable" and int(payload.get("sightings") or 0) < 2:
         raise ValueError("scanner discovery lacks durable repeated intent")
     if not all((context_id, sport_key, book, family)) or family == policy.MF_UNKNOWN:
         raise ValueError("scanner discovery grain is incomplete")
@@ -201,13 +203,19 @@ def apply_discovery(profile: CapabilityProfile, row: dict, payload: dict,
         (policy.CAP_BENCHMARK, f"{policy.BENCHMARK_SOURCE}|{family}"),
     ]
     changed = 0
-    first_seen = _parse_utc(payload.get("firstSeenAt")) or now
+    scanner_history = payload.get("scannerHistory") \
+        if isinstance(payload.get("scannerHistory"), dict) else {}
+    first_seen = (_parse_utc(scanner_history.get("firstSeenAt"))
+                  or _parse_utc(payload.get("firstSeenAt"))
+                  or _parse_utc(payload.get("loggedAt")) or now)
     for capability, qualifier in grains:
         key = record_key(context_id, capability, qualifier)
         record = profile.get_record(key)
         if record is None:
             record = profile.transition(
-                key, policy.DISCOVERED, "scanner durable intent (pre-bet)",
+                key, policy.DISCOVERED,
+                ("logged bet intent (pre-start)" if intent == "bet"
+                 else "scanner durable intent (pre-bet)"),
                 context_id=context_id, capability=capability, qualifier=qualifier)
             changed += 1
         if record.classification == policy.DISCOVERED:
@@ -217,7 +225,7 @@ def apply_discovery(profile: CapabilityProfile, row: dict, payload: dict,
             profile._store(record)
     try:
         from onboarding_gate import log_shadow
-        log_shadow("scanner_durable_intent", {
+        log_shadow("bet_log_intent" if intent == "bet" else "scanner_durable_intent", {
             "context_id": context_id, "sport": sport_key, "book": book,
             "market_family": family, "event_id": payload.get("eventId"),
             "first_seen_at": payload.get("firstSeenAt"),

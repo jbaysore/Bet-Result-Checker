@@ -365,6 +365,7 @@ def load_pending_bets(tab_name: str) -> list[dict]:
             "selection":   selection,
             "bet_type":    bet_type,
             "market_key":  _bet_cell(row, col, "market_key"),
+            "event_id":    _bet_cell(row, col, "event_id"),
             "odds_taken":  _bet_cell(row, col, "odds_taken"),
             "stake":       _bet_cell(row, col, "stake"),
             "fee":         _bet_cell(row, col, "fee"),
@@ -384,6 +385,57 @@ def load_pending_bets(tab_name: str) -> list[dict]:
         })
 
     return pending
+
+
+def load_onboarding_bet_intents(tab_name: str) -> list[dict]:
+    """Return every unresolved logged bet that can express onboarding intent.
+
+    This deliberately does not share ``load_pending_bets``' settlement-routing
+    filters. A bet can require a new CLV context even when its result must be
+    graded manually (for example a non-MLB prop). Bets remains the durable
+    reconciliation source until the row receives a terminal result.
+    """
+    from config import BET_TYPE_PARLAY, RESULT_NEEDS_REVIEW
+    from parlay import parse_legs
+
+    rows = _get_bets_rows(tab_name)
+    if not rows:
+        return []
+    headers = rows[0]
+    col = _resolve_bet_col_indices(headers)
+    if col.get("result") is None or col.get("bet_id") is None:
+        raise RuntimeError(
+            "[sheets_reader] Bets tab is missing 'BetID' or 'Result' "
+            "column entirely -- cannot reconcile onboarding."
+        )
+    duplicate_ids = _duplicate_bet_ids(rows, col)
+    intents = []
+    for row_idx, row in enumerate(rows[1:], start=2):
+        row = _pad_bet_row(row, col)
+        bet_id = _bet_cell(row, col, "bet_id")
+        if not bet_id or bet_id in duplicate_ids:
+            continue
+        result = _bet_cell(row, col, "result")
+        if result and result != RESULT_NEEDS_REVIEW:
+            continue
+        bet_type = _bet_cell(row, col, "bet_type")
+        intents.append({
+            "row_idx": row_idx,
+            "bet_id": bet_id,
+            "sport": _bet_cell(row, col, "sport"),
+            "book": _bet_cell(row, col, "book"),
+            "team1": _bet_cell(row, col, "team1"),
+            "team2": _bet_cell(row, col, "team2"),
+            "game_date": _bet_cell(row, col, "game_date"),
+            "game_start": _bet_cell(row, col, "game_start"),
+            "selection": _bet_cell(row, col, "selection"),
+            "bet_type": bet_type,
+            "market_key": _bet_cell(row, col, "market_key"),
+            "event_id": _bet_cell(row, col, "event_id"),
+            "legs": (parse_legs(_bet_cell(row, col, "legs"))
+                     if bet_type == BET_TYPE_PARLAY else []),
+        })
+    return intents
 
 
 def load_unresolved_pl_bets(tab_name: str) -> list[dict]:
