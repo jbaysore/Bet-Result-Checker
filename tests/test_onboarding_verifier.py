@@ -152,6 +152,37 @@ def test_gate_capped_provisional_is_clean_capture_evidence():
     assert obs.capture_clean
 
 
+def test_missing_benchmark_blocks_only_benchmark_and_preserves_capture_trust():
+    capture = verified("soccer/new", policy.CAP_CAPTURE, "draftkings|h2h")
+    profile = CapabilityProfile([capture])
+    obs = Observation(
+        context_id="soccer/new", event_id="benchmark-miss", observed_at=NOW,
+        start_outcome=verifier.START_AGREEMENT, capture_book="draftkings",
+        capture_family="h2h", capture_clean=True, benchmark_available=False,
+    )
+    proposals = verifier.run_verification(profile, [obs], apply=True, now=NOW)
+    benchmark = profile.get_record(record_key(
+        "soccer/new", policy.CAP_BENCHMARK, "pinnacle|h2h"))
+    assert benchmark.classification == policy.BLOCKED
+    assert any(p.record_key == benchmark.record_key and p.kind == "block" for p in proposals)
+    assert capture.classification == policy.VERIFIED
+    assert capture.health == policy.FRESH
+
+
+def test_exact_benchmark_is_positive_independent_evidence():
+    profile = CapabilityProfile([])
+    obs = Observation(
+        context_id="soccer/new", event_id="benchmark-hit", observed_at=NOW,
+        start_outcome=verifier.START_AGREEMENT, capture_book="draftkings",
+        capture_family="h2h", capture_clean=True, benchmark_available=True,
+    )
+    verifier.run_verification(profile, [obs], apply=False, now=NOW)
+    benchmark = profile.get_record(record_key(
+        "soccer/new", policy.CAP_BENCHMARK, "pinnacle|h2h"))
+    assert benchmark.evidence["clean"] == 1
+    assert benchmark.classification == policy.DISCOVERED
+
+
 def test_verified_exact_capture_disables_grandfathered_bridge():
     fallback = verified("soccer/x", policy.CAP_CAPTURE, "any|h2h")
     exact = verified("soccer/x", policy.CAP_CAPTURE, "draftkings|h2h")

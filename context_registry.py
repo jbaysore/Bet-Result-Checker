@@ -33,6 +33,7 @@ REGISTRY_COLUMNS = [
 ALIAS_SPORT_KEY = "sport_key"
 ALIAS_DISPLAY_NAME = "display_name"
 ALIAS_ESPN_ROUTE = "espn_route"
+ALIAS_EVENT_ID = "event_id"
 
 STATUS_ACTIVE = "active"
 STATUS_RETIRED = "retired"
@@ -49,6 +50,7 @@ class ContextResolution:
     confidence: str            # CONF_KNOWN | CONF_NEW
     via_alias: str = ""        # the alias value that matched (for provenance)
     reason: str = ""           # why NEW, when NEW
+    event_scoped: bool = False  # event-id alias; never reusable context trust
 
     @property
     def is_known(self) -> bool:
@@ -133,7 +135,8 @@ class ContextRegistry:
         return self._readable
 
     def resolve(self, sport_key: str, team1: str = "", team2: str = "",
-                game_date=None, *, alias_type: str = ALIAS_SPORT_KEY) -> ContextResolution:
+                game_date=None, event_id: str = "", *,
+                alias_type: str = ALIAS_SPORT_KEY) -> ContextResolution:
         """Resolve an alias (default: the TOA sport key) to a canonical context.
 
         Returns CONF_KNOWN only when exactly one active context matches; any
@@ -143,6 +146,20 @@ class ContextRegistry:
         """
         if not self._readable:
             return ContextResolution(None, CONF_NEW, reason="registry unreadable (fail closed)")
+
+        event_key = _norm(event_id)
+        if event_key:
+            event_matches = [a for a in self._aliases
+                             if a.alias_type == ALIAS_EVENT_ID
+                             and _norm(a.alias_value) == event_key
+                             and a.active_on(_coerce_game_date(game_date))]
+            distinct_events = {a.context_id for a in event_matches}
+            if len(distinct_events) == 1:
+                return ContextResolution(event_matches[0].context_id, CONF_KNOWN,
+                                         via_alias=event_id, event_scoped=True)
+            if len(distinct_events) > 1:
+                return ContextResolution(None, CONF_NEW, via_alias=event_id,
+                                         reason=f"ambiguous event: {len(distinct_events)} contexts match")
 
         key = _norm(sport_key)
         if not key:
@@ -211,6 +228,7 @@ def get_registry(refresh: bool = False) -> ContextRegistry:
     return _cached
 
 
-def resolve(sport_key: str, team1: str = "", team2: str = "", game_date=None) -> ContextResolution:
+def resolve(sport_key: str, team1: str = "", team2: str = "", game_date=None,
+            event_id: str = "") -> ContextResolution:
     """Convenience over the cached live registry."""
-    return get_registry().resolve(sport_key, team1, team2, game_date)
+    return get_registry().resolve(sport_key, team1, team2, game_date, event_id)

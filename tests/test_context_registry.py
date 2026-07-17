@@ -7,7 +7,7 @@ never toward a known context (concept safety #3).
 from datetime import date
 
 from context_registry import (
-    ALIAS_SPORT_KEY, CONF_KNOWN, CONF_NEW, STATUS_ACTIVE, STATUS_RETIRED,
+    ALIAS_EVENT_ID, ALIAS_SPORT_KEY, CONF_KNOWN, CONF_NEW, STATUS_ACTIVE, STATUS_RETIRED,
     ContextRegistry,
 )
 
@@ -45,6 +45,19 @@ def test_ambiguous_two_contexts_is_new():
     res = reg.resolve("soccer_x")
     assert res.confidence == CONF_NEW
     assert "ambiguous" in res.reason
+
+
+def test_event_id_alias_takes_precedence_without_reusable_sport_trust():
+    reg = ContextRegistry([
+        alias("soccer/special", "soccer_special"),
+        alias("soccer/special/event-1", "evt-1", atype=ALIAS_EVENT_ID),
+    ])
+    scoped = reg.resolve("soccer_special", event_id="evt-1")
+    assert scoped.context_id == "soccer/special/event-1"
+    assert scoped.event_scoped
+    recurring = reg.resolve("soccer_special", event_id="evt-2")
+    assert recurring.context_id == "soccer/special"
+    assert not recurring.event_scoped
 
 
 def test_empty_alias_is_new():

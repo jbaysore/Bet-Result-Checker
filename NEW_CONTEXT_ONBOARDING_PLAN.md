@@ -920,3 +920,118 @@ behavior. All findings below were fixed in code during this audit.
   `py scripts/repair_onboarded_rows.py` to preview and then
   `py scripts/repair_onboarded_rows.py --apply` when the preview is acceptable.
   This manual approval remains the deliberate Phase 5 gate.
+
+---
+
+## Phase 7 implementation and audit (2026-07-16, Codex)
+
+### Verdict
+
+Phase 7 is implemented across odds-tool and the checker. Scanner-first discovery,
+durable dedupe/budget/expiry, pre-bet Collecting state, event-scoped one-off
+handling, and independent Pinnacle benchmark availability are now wired. The
+remaining Gate P7 item is an operational observation after deployment: proving
+the cold-start payoff on a real newly surfaced context. That observation cannot
+be manufactured safely by a unit test and is not a code blocker.
+
+### Scanner-first discovery
+
+- `scanner.js` batches qualifying opportunity rows once per completed sport
+  cycle and passes them to the onboarding discovery handler. It uses only the
+  scan response already fetched; there are no additional Odds API calls.
+- `onboardingDiscovery.js` resolves each grain against the authoritative cached
+  Registry/Profile tabs. Unreadable tabs suppress queue writes (trust still
+  fails closed elsewhere), preventing an outage from being mistaken for dozens
+  of new leagues. Duplicate outcomes in one cycle count as one sighting.
+- `scannerDb.js` persists `onboarding_discoveries` in the existing SQLite DB.
+  A queue row requires two separate cycle sightings, is deduplicated by
+  `context_id|book|market_family`, expires after seven days, and claims the
+  20-appends-per-UTC-day budget atomically. Failed Sheets appends release their
+  claim so a later cycle retries.
+- Queue payloads retain event, matchup, market, selection/point, quote timing,
+  offered price, first-seen time, and expiry. This makes the already-retained
+  scanner price history identifiable as a pre-bet observation window.
+- The checker's queue consumer validates durable intent, rejects/compacts
+  expired rows, writes the sport-key alias, and creates identity, live-start,
+  exact capture, and Pinnacle benchmark grains in `Collecting` before a bet.
+  If a bet arrives first, the existing bet-discovery path remains the durable
+  intent path; duplicate queue work is idempotent.
+
+### One-off / ephemeral contexts
+
+- Context resolution in Python and JavaScript now checks an exact `event_id`
+  alias before a reusable `sport_key` alias. The result is explicitly marked
+  event-scoped.
+- The case panel offers `One-off` only when the case identifies exactly one
+  affected event and sport key. The action is a real checker-consumed decision,
+  not a UI-only acknowledgement.
+- Applying the action retires the reusable candidate mapping and its records
+  under user authority, creates an event-ID alias, and mirrors the evidence
+  grains under an event context constrained to that event. Those event records
+  are Retired by design: evidence may be collected against them, but they can
+  never become reusable Verified trust.
+- After authoritative actual-start hydration, an event-scoped row can be
+  certified directly only when its own quote predates actual start by the safety
+  margin. The checker then restores `VERIFIED_CLOSE`, removes the onboarding
+  marker, and leaves an `ephemeral-verified:` provenance marker. No context
+  promotion is involved.
+- If a one-off sport key later appears on a different event, the case reopens as
+  `one-off recurred` and offers `Reopen as league`; ordinary trust must then be
+  earned rather than inherited from the special event.
+
+### Benchmark availability and frontend behavior
+
+- Completed observations now feed an independent
+  `benchmark|pinnacle|market_family` capability grain from the exact-match
+  `Pinnacle Close` produced by `pinnacle_closing.py`.
+- A missing exact benchmark classifies only that benchmark grain as Blocked.
+  It never changes capture classification/health or the row's Closing Quality.
+  A later exact benchmark automatically reopens the benchmark grain to collect
+  positive evidence.
+- At the frontend serialization boundary, a trusted close without an exact
+  Pinnacle comparison is now `EXCLUDED / unbenchmarkable`: the stored CLV is
+  withheld from Bets, Stats, and Coach aggregates, while the trusted closing
+  price and `VERIFIED_CLOSE` provenance remain intact. Bets UI labels the reason
+  `No exact Pinnacle benchmark was available`.
+
+### Audit corrections made while implementing
+
+1. Same-cycle alternate outcomes initially risked counting as repeated scanner
+   intent; batching now deduplicates the capability grain before SQLite sees it.
+2. A queue claim could have been stranded by a failed Sheets append; claims are
+   now explicitly released on failure.
+3. A transient unreadable Registry could have flooded Discovery Queue as NEW;
+   scanner discovery now suppresses writes until both authoritative tabs read.
+4. An event-scoped decision needed row-level verification, not a hidden reusable
+   promotion. The implementation uses exact event aliases plus per-row start
+   evidence and permanently non-reusable records.
+5. A one-off that later recurred had no recovery route in the original Phase 7
+   bullets. Recurrence now reopens a visible case and requires an explicit
+   ordinary-context decision.
+6. Benchmark absence was previously represented only as a missing Pinnacle
+   value, allowing same-book CLV to remain in aggregates. The API presentation
+   boundary now exposes the distinct unbenchmarkable state and withholds it
+   everywhere without demoting capture.
+
+### Verification
+
+- Bet-Result-Checker: **528 passed** (`python -m pytest -q`).
+- odds-tool: **614 passed** (`npm test`).
+- Focused Phase 7 coverage includes scanner two-sighting dedupe, atomic daily
+  budget, seven-day expiry/reset, same-cycle dedupe, context-ID parity,
+  pre-bet Collecting records, event-ID resolution precedence, permanently
+  non-reusable ephemeral records, row safety-margin verification, recurrence,
+  benchmark Blocked/reopen evidence, and harmless capture preservation.
+- odds-tool client production build completed successfully. The pre-existing
+  large-chunk advisory remains non-blocking.
+- No live Sheets rows, Railway processes, or external APIs were mutated during
+  implementation verification.
+
+### Deployment follow-up
+
+After both repositories are deployed, leave the scanner enabled normally and
+inspect the first genuinely NEW opportunity that receives two scan-cycle
+sightings. The expected chain is: one pending `discovery` queue row, checker
+consumption on its next scheduled pass, four Collecting grains before bet time,
+and retained scanner history beginning before any later bet. That real fixture
+is the final Gate P7 cold-start demonstration.

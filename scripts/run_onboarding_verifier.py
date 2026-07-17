@@ -34,6 +34,7 @@ import onboarding_policy as policy
 import onboarding_verifier as verifier
 from capability_profile import CapabilityProfile
 from context_registry import ContextRegistry
+from closing_provenance import SAFETY_MARGIN_SECONDS
 
 
 def _load_profile(dry_run: bool) -> tuple[CapabilityProfile, object | None]:
@@ -71,7 +72,8 @@ def _recent_completed_rows(limit_days: int | None) -> list[dict]:
 def _record_matches_row(record, row: dict, registry: ContextRegistry) -> bool:
     context_id = str(row.get("Context ID") or "").strip()
     if not context_id:
-        resolution = registry.resolve(row.get("Sport", ""), game_date=row.get("Game Date"))
+        resolution = registry.resolve(row.get("Sport", ""), game_date=row.get("Game Date"),
+                                      event_id=row.get("Event ID", ""))
         context_id = resolution.context_id if resolution.is_known else ""
     if context_id != record.context_id:
         return False
@@ -180,6 +182,57 @@ def _reflag_causal_rows(rows: list[dict], registry: ContextRegistry,
     return len(affected)
 
 
+def ephemeral_row_is_verifiable(row: dict, registry: ContextRegistry) -> bool:
+    """A one-off row may be certified directly, but only from its own facts."""
+    event_id = str(row.get("Event ID") or "").strip()
+    if not event_id or str(row.get("Closing Quality") or "").strip().upper() != "PROVISIONAL":
+        return False
+    notes = str(row.get("Notes") or "")
+    if "onboarding:" not in notes or "onboarding: demoted" in notes:
+        return False
+    resolution = registry.resolve(row.get("Sport", ""), game_date=row.get("Game Date"),
+                                  event_id=event_id)
+    if not resolution.is_known or not resolution.event_scoped:
+        return False
+    observed = policy.parse_utc_datetime(row.get("Closing Observed At"))
+    actual = policy.parse_utc_datetime(row.get("Actual Start"))
+    if str(row.get("Actual Start Confidence") or "").strip().upper() != "CONFIDENT":
+        return False
+    return bool(observed and actual
+                and (actual - observed).total_seconds() >= SAFETY_MARGIN_SECONDS
+                and str(row.get("ClosingOdds") or row.get("Closing Odds") or "").strip())
+
+
+def _verify_ephemeral_rows(rows: list[dict], registry: ContextRegistry, *, apply: bool) -> int:
+    eligible = [row for row in rows if ephemeral_row_is_verifiable(row, registry)]
+    if not apply or not eligible:
+        return len(eligible)
+    from config import SHEET_TAB
+    from gspread.utils import rowcol_to_a1
+    from sheets_quota import call_with_sheets_retry
+    from sheets_reader import _get_spreadsheet
+
+    tab = _get_spreadsheet().worksheet(SHEET_TAB)
+    values = tab.get_all_values()
+    headers = values[0]
+    quality_col = headers.index("Closing Quality") + 1
+    notes_col = headers.index("Notes") + 1
+    updates = []
+    for row in eligible:
+        kept = [line for line in str(row.get("Notes") or "").splitlines()
+                if line.strip() and not line.strip().startswith("onboarding:")]
+        kept.append(f"ephemeral-verified: event={row.get('Event ID')} row evidence only")
+        updates.extend([
+            {"range": rowcol_to_a1(row["__row_idx"], quality_col),
+             "values": [["VERIFIED_CLOSE"]]},
+            {"range": rowcol_to_a1(row["__row_idx"], notes_col),
+             "values": [["\n".join(kept)]]},
+        ])
+    call_with_sheets_retry("Bets ephemeral verification", tab.batch_update,
+                           updates, value_input_option="RAW")
+    return len(eligible)
+
+
 def run_once(*, apply: bool, limit_days: int = 14) -> dict:
     """Reusable scheduled pass. Raises on an authoritative write failure."""
     decisions = {"applied": 0, "failed": 0}
@@ -193,15 +246,17 @@ def run_once(*, apply: bool, limit_days: int = 14) -> dict:
     causal_rows = _recent_completed_rows(None)
     cutoff = policy.now_utc() - __import__("datetime").timedelta(days=limit_days)
     rows = [row for row in causal_rows
-            if (policy.parse_utc_datetime(row.get("Closing Observed At")) is not None
+            if policy.parse_utc_datetime(row.get("Closing Observed At")) is not None
             and policy.parse_utc_datetime(row.get("Closing Observed At")) >= cutoff]
     starts_hydrated = _hydrate_actual_starts(rows, apply=apply)
+    ephemeral_verified = _verify_ephemeral_rows(rows, registry, apply=apply)
     before = {record.record_key: (record.health, record.last_checked)
               for record in profile.records()}
 
     observations = []
     for row in rows:
-        resolution = registry.resolve(row.get("Sport", ""), game_date=row.get("Game Date"))
+        resolution = registry.resolve(row.get("Sport", ""), game_date=row.get("Game Date"),
+                                      event_id=row.get("Event ID", ""))
         obs = verifier.observation_from_bet(row, resolution)
         if obs is not None:
             observations.append(obs)
@@ -217,6 +272,7 @@ def run_once(*, apply: bool, limit_days: int = 14) -> dict:
             "reflagged": reflagged,
             "capability_writes": capability_writes,
             "starts_hydrated": starts_hydrated,
+            "ephemeral_verified": ephemeral_verified,
             "apply": apply, "promote_shadow": config.ONBOARDING_PROMOTE_SHADOW}
 
 

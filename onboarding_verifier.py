@@ -51,6 +51,7 @@ class Observation:
     capture_clean: bool = False          # a fresh pre-start close existed
     irregular: bool = False              # event went sideways and was handled correctly
     missing_market: bool = False         # book did not offer the market (coverage, not a failure)
+    benchmark_available: bool | None = None  # exact Pinnacle market/period/point match
 
 
 @dataclass
@@ -255,6 +256,21 @@ def accumulate(profile: CapabilityProfile, obs: Observation, *, now: datetime) -
                 _apply_negative(profile, crec, policy.FAILURE_STALE_QUOTE, event_time)
             touched.append(crec)
 
+        # Benchmark availability is an independent grain. A miss is a visible
+        # CLV-computability limitation; it never feeds capture evidence or
+        # demotes a trustworthy closing price (concept safety #12).
+        bqual = f"{policy.BENCHMARK_SOURCE}|{obs.capture_family}"
+        brec = _ensure(profile, obs.context_id, policy.CAP_BENCHMARK, bqual, now)
+        if brec.classification == policy.BLOCKED and obs.benchmark_available:
+            brec = profile.transition(brec.record_key, policy.DISCOVERED,
+                                      "benchmark appeared on a later qualifying event")
+        if _claim(brec, obs, f"benchmark:{obs.benchmark_available}"):
+            if obs.benchmark_available:
+                _record_clean(profile, brec, event_time)
+            elif obs.benchmark_available is False:
+                _bump(brec, "no_source")
+            touched.append(brec)
+
     for rec in touched:
         profile._store(rec)  # persist counters (sink write in live mode; in-memory in tests)
     return touched
@@ -313,11 +329,15 @@ def evaluate_block(record: CapabilityRecord) -> Proposal | None:
     event is a stable dead end → Blocked (reopenable)."""
     if record.classification != policy.DISCOVERED:
         return None
-    if record.capability not in (policy.CAP_START_LIVE, policy.CAP_START_AUTHORITATIVE):
+    if record.capability not in (policy.CAP_START_LIVE, policy.CAP_START_AUTHORITATIVE,
+                                 policy.CAP_BENCHMARK):
         return None
     clean = int(record.evidence.get("clean", 0) or 0)
     no_source = int(record.evidence.get("no_source", 0) or 0)
     if clean == 0 and no_source >= 1:
+        if record.capability == policy.CAP_BENCHMARK:
+            return Proposal(record.record_key, record.classification, policy.BLOCKED,
+                            "no exact Pinnacle benchmark for this market family", kind="block")
         return Proposal(record.record_key, record.classification, policy.BLOCKED,
                         "no authoritative start source and no live signal", kind="block")
     return None
@@ -383,6 +403,7 @@ def observation_from_bet(bet: dict, resolution) -> Observation | None:
         # VERIFIED_CLOSE. Treat it as clean evidence or a new context's capture
         # grain could never earn promotion (the gate itself made it provisional).
         capture_clean=(quality == "VERIFIED_CLOSE" or gate_capped_clean),
+        benchmark_available=bool(str(bet.get("Pinnacle Close") or "").strip()),
     )
 
 

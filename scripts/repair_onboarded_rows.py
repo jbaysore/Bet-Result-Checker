@@ -67,7 +67,8 @@ def _is_trusted(profile: CapabilityProfile, registry: ContextRegistry, bet: dict
         return bool(bet.get("legs")) and all(_is_trusted(
             profile, registry, {**leg, "book": bet.get("book", "")})
             for leg in bet["legs"])
-    resolution = registry.resolve(bet.get("sport", ""), game_date=bet.get("game_date"))
+    resolution = registry.resolve(bet.get("sport", ""), game_date=bet.get("game_date"),
+                                  event_id=bet.get("event_id", ""))
     if not resolution.is_known:
         return False
     family = policy.market_family_for(bet.get("market_key"), bet.get("bet_type"))

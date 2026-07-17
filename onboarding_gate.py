@@ -116,7 +116,7 @@ def evaluate_capture(record: dict) -> GateResult:
         record.get("Bet Type") or record.get("bet_type"))
     resolution = get_registry().resolve(
         sport, _field(record, "Team 1", "team1"), _field(record, "Team 2", "team2"),
-        _game_date(record))
+        _game_date(record), _field(record, "Event ID", "event_id"))
     if not resolution.is_known:
         return GateResult(False, None, family,
                           (policy.CAP_IDENTITY, CLV_START, policy.CAP_CAPTURE),
