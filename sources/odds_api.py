@@ -1,6 +1,7 @@
 import requests
 from datetime import datetime, timezone
 from config import ODDS_API_KEY, ODDS_API_BASE
+from redact import redact_request_error
 
 # One /scores response per sport per process — poll_bet() calls get_game_result()
 # once per pending bet; on a busy NFL Sunday that's many identical API calls
@@ -137,7 +138,7 @@ def fetch_active_sport_keys() -> set[str] | None:
         response.raise_for_status()
         data = response.json()
     except (requests.RequestException, ValueError) as e:
-        print(f"[odds_api] Could not fetch active sports list: {e}")
+        print(f"[odds_api] Could not fetch active sports list: {redact_request_error(e)}")
         return None
 
     if not isinstance(data, list):
@@ -210,7 +211,7 @@ def _fetch_scores(sport_key: str) -> list | None:
         response.raise_for_status()
 
     except requests.RequestException as e:
-        print(f"[odds_api] Request failed for {sport_key}: {e}")
+        print(f"[odds_api] Request failed for {sport_key}: {redact_request_error(e)}")
         return None
 
     try:

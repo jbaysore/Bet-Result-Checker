@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 import requests
 
 from config import ODDS_API_KEY, ODDS_API_BASE
+from redact import redact_request_error
 
 # Per-event start-safety states derived from a *successful* /scores payload.
 PREGAME = "PREGAME"      # completed False, no live signal (scores/last_update null)
@@ -76,7 +77,10 @@ def fetch_scores_live(sport_key: str, timeout: int = 10) -> ScoresResult:
     try:
         resp = requests.get(url, params=params, timeout=timeout)
     except requests.RequestException as exc:
-        return ScoresResult(sport_key, status="ERROR", error=f"request failed: {exc}")
+        return ScoresResult(
+            sport_key, status="ERROR",
+            error=f"request failed: {redact_request_error(exc)}",
+        )
 
     credits = parse_credit_headers(resp.headers)
     if resp.status_code != 200:

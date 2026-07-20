@@ -34,6 +34,7 @@ from datetime import datetime, timedelta, timezone
 import requests
 
 from config import ODDS_API_KEY, ODDS_API_BASE
+from redact import redact_request_error
 from sources import mlb_statsapi, odds_api
 from sources.odds_api import fetch_active_sport_keys
 from sources.scores_live import (
@@ -225,7 +226,7 @@ def probe_book_freshness(log: ShadowLog, tracker: EventTracker) -> None:
         resp.raise_for_status()
         payload = resp.json()
     except (requests.RequestException, ValueError) as exc:
-        log.emit("book_freshness_error", {"event_id": tracker.event_id, "error": str(exc)})
+        log.emit("book_freshness_error", {"event_id": tracker.event_id, "error": redact_request_error(exc)})
         return
     books = (payload or {}).get("bookmakers", []) if isinstance(payload, dict) else []
     if not books:
@@ -260,7 +261,7 @@ def probe_event_stability(log: ShadowLog, sport: str, trackers: dict[str, EventT
         resp.raise_for_status()
         events = resp.json()
     except (requests.RequestException, ValueError) as exc:
-        log.emit("events_stability_error", {"sport": sport, "error": str(exc)})
+        log.emit("events_stability_error", {"sport": sport, "error": redact_request_error(exc)})
         return
     by_pair = {}
     for ev in events if isinstance(events, list) else []:
@@ -291,7 +292,7 @@ def probe_pinnacle_coverage(log: ShadowLog, sport: str) -> None:
             resp.raise_for_status()
             events = resp.json()
         except (requests.RequestException, ValueError) as exc:
-            log.emit("pinnacle_coverage_error", {"sport": sport, "region": region, "error": str(exc)})
+            log.emit("pinnacle_coverage_error", {"sport": sport, "region": region, "error": redact_request_error(exc)})
             continue
         events = events if isinstance(events, list) else []
         markets_seen: set[str] = set()
@@ -327,7 +328,7 @@ def probe_historical_granularity(log: ShadowLog, sport: str) -> None:
             resp.raise_for_status()
             payload = resp.json()
         except (requests.RequestException, ValueError) as exc:
-            log.emit("historical_granularity_error", {"sport": sport, "requested": stamp, "error": str(exc)})
+            log.emit("historical_granularity_error", {"sport": sport, "requested": stamp, "error": redact_request_error(exc)})
             continue
         served.append({"requested": stamp,
                        "served_timestamp": payload.get("timestamp") if isinstance(payload, dict) else None,
@@ -508,7 +509,7 @@ def main():
                 run_daily_probes(log)
                 next_daily = time.monotonic() + DAILY_PROBE_SECONDS
         except Exception as exc:  # never let one bad poll kill the monitor
-            log.emit("loop_error", {"error": str(exc)})
+            log.emit("loop_error", {"error": redact_request_error(exc)})
         time.sleep(POLL_SECONDS)
 
 

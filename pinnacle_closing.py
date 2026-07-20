@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import requests
 
 from config import ODDS_API_BASE, ODDS_API_KEY
+from redact import redact_request_error
 from closing_odds import parse_selection, to_decimal_odds
 
 
@@ -81,7 +82,7 @@ def fetch_pinnacle_featured(sport_key: str) -> dict:
             },
         }
     except (requests.RequestException, ValueError) as exc:
-        return {"ok": False, "events": [], "error": str(exc), "credits": {}}
+        return {"ok": False, "events": [], "error": redact_request_error(exc), "credits": {}}
 
 
 def _matches_selected(outcome: dict, selection: dict, mode: str) -> bool:

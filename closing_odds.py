@@ -36,6 +36,7 @@ from closing_provenance import (
 )
 from actual_start import ActualStartResult, resolve_actual_start
 import onboarding_gate
+from redact import redact_request_error as _redact_request_error
 
 # One historical snapshot per (sport, timestamp, book, market[, event]) per
 # process — multiple bets on the same game/book reuse the same API response.
@@ -50,11 +51,6 @@ _live_snapshot_cache: dict[tuple, tuple[float, list]] = {}
 _live_events_cache: dict[str, tuple[float, list]] = {}
 _LIVE_SNAPSHOT_TTL_SECONDS = 20
 _live_credit_total = 0
-
-
-def _redact_request_error(error: Exception) -> str:
-    """Prevent credentials embedded in requests' rendered URLs from reaching logs."""
-    return re.sub(r"(?i)(apiKey=)[^&\s]+", r"\1[REDACTED]", str(error))
 
 
 def _record_live_response_credits(response) -> None:
