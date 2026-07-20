@@ -402,6 +402,7 @@ def test_manual_sport_alias_never_calls_historical_endpoint(mock_snapshot):
 
 
 def test_request_error_redacts_api_key():
+    # closing_odds re-exports the shared helper; full coverage lives in test_redact.py
     rendered = closing_odds_module._redact_request_error(RuntimeError(
         "404 for https://api.example.test/odds?apiKey=top-secret&markets=h2h",
     ))
