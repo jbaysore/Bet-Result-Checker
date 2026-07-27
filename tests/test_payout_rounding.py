@@ -51,6 +51,16 @@ def test_real_lowvig_settlement_rounds_to_nearest_cent():
     assert pl == 4.72
 
 
+def test_real_espnbet_bet_600_rounds_to_nearest_cent():
+    # Confirmed payout: $50 @ -190 pays $76.32, not truncated $76.31.
+    pl, payout = calculate_pl_and_payout(
+        RESULT_WIN, 50.0, -190, BET_CATEGORY_STANDARD,
+        fee=0.0,
+        round_to_nearest="espnbet" in PAYOUT_ROUND_NEAREST_BOOKS)
+    assert payout == 76.32
+    assert pl == 26.32
+
+
 def test_real_hard_rock_settlement_rounds_up():
     # Confirmed real settlement: stake $26 @ -350 -> $33.43 (profit $7.4285...).
     pl, payout = calculate_pl_and_payout(

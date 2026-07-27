@@ -246,10 +246,12 @@ MANUAL_PAYOUT_REQUIRED_BOOKS = {"kalshi", "rebet"}
 # the truncated $97.61; Bets 55 and 180 independently match nearest-cent math.
 # LowVig also rounds nearest: confirmed 2026-07-16, stake $5 @ -106,
 # profit 4.7169... paid as $4.72 (payout $9.72), not truncated to $9.71.
+# ESPN BET rounds nearest too: confirmed by Bet 600, stake $50 @ -190,
+# profit 26.3157... paid as $26.32 (payout $76.32), not truncated to $76.31.
 # All TOA regional keys are included so the rule follows the registered book.
 # Keyed by lowercased book key, same convention as MANUAL_PAYOUT_REQUIRED_BOOKS.
 PAYOUT_ROUND_NEAREST_BOOKS = {
-    "fanduel", "prophetx", "fanatics", "williamhill_us", "lowvig",
+    "fanduel", "prophetx", "fanatics", "williamhill_us", "lowvig", "espnbet",
     "hardrockbet", "hardrockbet_az", "hardrockbet_fl", "hardrockbet_oh",
 }
 
