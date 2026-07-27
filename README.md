@@ -24,7 +24,10 @@ Each run (`trigger.py`) does four work passes over the `Bets` tab, then prints a
    that already has a value in either column.
 
 3. **Manual Payout → P/L** — for books in `MANUAL_PAYOUT_REQUIRED_BOOKS`
-   (e.g. Kalshi), derive P/L from a manually-entered `Payout` column.
+   (Kalshi, Rebet, and Novig), derive P/L from a manually-entered `Payout`
+   column. Novig requires this because its whole-contract, potentially
+   multi-fill settlement cannot be recovered from rounded displayed American
+   odds.
 
 4. **Capture closing odds** — for started games with a blank `ClosingOdds`
    column, fetch a historical Odds API snapshot at 1 minute before recorded

@@ -508,7 +508,7 @@ def _shift_seconds(dt: datetime, seconds: int) -> datetime:
 def complete_manual_payout_pl(bet: dict) -> str:
     """
     Derives and writes P/L for a single bet where Payout has been
-    manually entered (config.MANUAL_PAYOUT_REQUIRED_BOOKS, e.g. Kalshi --
+    manually entered (config.MANUAL_PAYOUT_REQUIRED_BOOKS, e.g. Kalshi or Novig --
     see that constant's docstring and resolver.derive_pl_from_payout) but
     P/L is still blank -- see sheets_reader.load_manual_payout_pending_pl_bets()
     for how these rows are found.
@@ -705,7 +705,7 @@ def _safe_calculate_pl_payout(bet: dict, result: str,
 
     # Books whose real-money WIN payout can't be reliably computed from
     # American odds at all (config.MANUAL_PAYOUT_REQUIRED_BOOKS, e.g.
-    # Kalshi's contracts-based settlement -- see that constant's
+    # Kalshi/Novig contracts-based settlement -- see that constant's
     # docstring) -- route to manual Payout entry instead of writing a
     # confidently wrong number. Only WIN is uncertain; LOSS always costs
     # the full stake regardless of settlement mechanics, so it's left to
@@ -725,6 +725,10 @@ def _safe_calculate_pl_payout(bet: dict, result: str,
         elif book_lower == "rebet":
             why = ("odds-based payout disagrees with truncate, nearest-cent, and "
                    "ceil on confirmed real settlements, 2026-07-10")
+        elif book_lower == "novig":
+            why = ("whole-contract settlement can include multiple fills at "
+                   "three-decimal prices, while displayed American odds are rounded; "
+                   "confirmed against real payouts, 2026-07-27")
         else:
             why = "payout can't be reliably computed from American odds for this book"
         reason = (f"{book} payout can't be reliably computed from American odds ({why}). "

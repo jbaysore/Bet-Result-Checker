@@ -12,6 +12,7 @@ from resolver import (
 )
 from config import (
     BET_CATEGORY_STANDARD,
+    RESULT_LOSS,
     RESULT_WIN,
     PAYOUT_ROUND_NEAREST_BOOKS,
     MANUAL_PAYOUT_REQUIRED_BOOKS,
@@ -118,6 +119,85 @@ def test_rebet_requires_manual_payout_not_nearest():
     # Rebet WIN payouts disagree with truncate/nearest/ceil — see config docstring.
     assert "rebet" in MANUAL_PAYOUT_REQUIRED_BOOKS
     assert "rebet" not in PAYOUT_ROUND_NEAREST_BOOKS
+
+
+def test_novig_requires_manual_payout_not_rounding():
+    assert "novig" in MANUAL_PAYOUT_REQUIRED_BOOKS
+    assert "novig" not in PAYOUT_ROUND_NEAREST_BOOKS
+
+
+@pytest.mark.parametrize("stake,odds,actual_payout", [
+    (36.25, 120, 79.59),
+    (15.00, 108, 31.25),
+    (36.00, 111, 75.78),
+    (10.00, 111, 21.05),
+    (54.00, 100, 108.00),
+])
+def test_real_novig_contract_payouts_are_not_a_cent_rounding_policy(
+        stake, odds, actual_payout):
+    """Guard against routing Novig back through sportsbook odds math."""
+    trunc_profit = _american_odds_profit(stake, odds, round_to_nearest=False)
+    nearest_profit = _american_odds_profit(stake, odds, round_to_nearest=True)
+    automatic_payouts = {stake + trunc_profit, stake + nearest_profit}
+
+    # Bet 538 happens to match both modes at exact even money. Across all five
+    # confirmed settlements, however, no automatic mode can reproduce the
+    # venue's contract/fill payouts; the config assertion above is the routing
+    # guarantee and these examples preserve the evidence behind it.
+    if (stake, odds) != (54.00, 100):
+        assert actual_payout not in automatic_payouts
+
+
+def test_novig_win_routes_to_exact_manual_payout(monkeypatch):
+    import poller
+
+    flags = []
+    monkeypatch.setattr(
+        poller, "flag_pl_blocked",
+        lambda row_idx, bet_id, reason: flags.append((row_idx, bet_id, reason)) or True,
+    )
+
+    result = poller._safe_calculate_pl_payout({
+        "row_idx": 384,
+        "bet_id": "384",
+        "book": "Novig",
+        "stake": "36.25",
+        "odds_taken": "+120",
+        "bet_category": BET_CATEGORY_STANDARD,
+        "fee": "0.00",
+    }, RESULT_WIN)
+
+    assert result == (None, None)
+    assert flags[0][0:2] == (384, "384")
+    assert "whole-contract settlement" in flags[0][2]
+    assert "Enter the exact Payout" in flags[0][2]
+
+
+def test_novig_loss_still_uses_normal_loss_math(monkeypatch):
+    import poller
+
+    monkeypatch.setattr(
+        poller, "get_book_fee_config",
+        lambda _book: {"fee_type": "", "fee_percent": None},
+    )
+    monkeypatch.setattr(poller, "get_book_fee_before_odds", lambda _book: False)
+    monkeypatch.setattr(
+        poller, "flag_pl_blocked",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("loss should not be blocked")),
+    )
+
+    result = poller._safe_calculate_pl_payout({
+        "row_idx": 999,
+        "bet_id": "999",
+        "book": "Novig",
+        "stake": "36.25",
+        "odds_taken": "+120",
+        "bet_category": BET_CATEGORY_STANDARD,
+        "fee": "0.00",
+        "bet_type": "Spread",
+    }, RESULT_LOSS)
+
+    assert result == (-36.25, None)
 
 
 def test_rebet_confirmed_settlements_match_no_rounding_mode():

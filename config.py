@@ -226,7 +226,19 @@ BOOK_FEE_TYPE_PERCENT_OF_STAKE_ON_WIN = "Percent Of Stake On Win"
 #   $36.28 @ -167 -> actual payout $58.01 (truncate/nearest $58.00; ceil $58.01)
 #   $28.61 @ -141 -> actual payout $48.92 (truncate/nearest $48.90; ceil $48.91)
 # Do NOT add rebet to PAYOUT_ROUND_NEAREST_BOOKS -- nearest still misses both.
-MANUAL_PAYOUT_REQUIRED_BOOKS = {"kalshi", "rebet"}
+#
+# novig: whole-contract exchange settlement. Novig's published Market Rules
+# say each winning contract settles to $0.01, contract prices have three-digit
+# precision, orders may receive multiple fills, and the American odds shown to
+# the user may be rounded. Stake + displayed American odds therefore cannot
+# recover the exact number of contracts. Confirmed 2026-07-27 against real
+# payouts (stake @ displayed odds -> actual payout):
+#   $36.25 @ +120 -> $79.59; $15 @ +108 -> $31.25
+#   $36 @ +111 -> $75.78; $10 @ +111 -> $21.05
+#   $54 @ +100 -> $108.00
+# Do NOT add novig to PAYOUT_ROUND_NEAREST_BOOKS -- this is contract/fill math,
+# not fractional-cent sportsbook rounding.
+MANUAL_PAYOUT_REQUIRED_BOOKS = {"kalshi", "rebet", "novig"}
 
 # Books that settle a winning payout by ROUNDING the fractional cent to the
 # NEAREST cent, rather than truncating it in the house's favor. The default
