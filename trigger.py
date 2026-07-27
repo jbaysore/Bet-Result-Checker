@@ -367,6 +367,14 @@ def main():
               f"{pending_intents.get('examined', 0)} examined, "
               f"{pending_intents.get('needed', 0)} needed, "
               f"{pending_intents.get('created', 0)} record(s) created.")
+        repairs = onboarding_result.get("repairs", {})
+        print(f"[trigger] Onboarding historical repairs: "
+              f"{repairs.get('repaired', 0)} repaired, "
+              f"{repairs.get('attempted', 0)} attempted, "
+              f"{repairs.get('refetch_attempted', 0)} API refetches, "
+              f"{repairs.get('remaining', 0)} still queued.")
+        if onboarding_result.get("evidence_rebuilt"):
+            print("[trigger] Onboarding evidence migrated to distinct-event ledger.")
         if onboarding_result["decisions"]["failed"]:
             write_failures += onboarding_result["decisions"]["failed"]
     except Exception as e:

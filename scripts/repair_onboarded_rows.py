@@ -2,11 +2,10 @@
 """Repair onboarding-provisional rows once their grain is promoted (plan Phase 5).
 
 A row capped PROVISIONAL by the onboarding gate carries an `onboarding:` Notes
-marker. When its capability grain later reaches Verified (Phase 4 promotion), the
-close can be re-derived and, if it now satisfies the full quality contract
-(pre-start by authoritative start + margin, fresh book quote → VERIFIED_CLOSE),
-the row is upgraded — the ORIGINAL values preserved permanently in a `pre-repair:`
-marker and the new close tagged Closing Source = recovery-onboarding.
+marker. When its capability grain later reaches Verified (Phase 4 promotion),
+the gate-attested close can be promoted in place. Incomplete legacy rows fall
+back to re-derivation. The ORIGINAL values are preserved permanently in a
+`pre-repair:` marker and the close is tagged Closing Source = recovery-onboarding.
 
 "Affected" = the row's own grain is now trusted AND it is not already repaired.
 Failure leaves the row exactly as it was (concept safety #8). Idempotent: a
@@ -59,7 +58,7 @@ def classify_repair_row(bet: dict, is_trusted: bool) -> dict:
         return {"bucket": "skip", "reason": "VOID — no CLV to repair"}
     if not is_trusted:
         return {"bucket": "skip", "reason": "grain not yet promoted — still provisional"}
-    return {"bucket": "retry", "reason": "grain promoted — re-derive trusted close"}
+    return {"bucket": "retry", "reason": "grain promoted — finalize trusted close"}
 
 
 def _is_trusted(profile: CapabilityProfile, registry: ContextRegistry, bet: dict) -> bool:
@@ -116,6 +115,8 @@ def load_onboarding_rows(bet_id: str | None = None) -> list[dict]:
             "actual_start": _bet_cell(row, col, "actual_start"),
             "actual_start_source": _bet_cell(row, col, "actual_start_source"),
             "actual_start_confidence": _bet_cell(row, col, "actual_start_confidence"),
+            "closing_observed_at": _bet_cell(row, col, "closing_observed_at"),
+            "start_detected_at": _bet_cell(row, col, "start_detected_at"),
             "start_status": _bet_cell(row, col, "start_status"),
         })
     return out
@@ -124,19 +125,38 @@ def load_onboarding_rows(bet_id: str | None = None) -> list[dict]:
 def _restore_provenance(bet: dict) -> dict:
     return {
         "start_status": bet.get("start_status", ""), "closing_quality": bet.get("closing_quality", ""),
-        "closing_source": bet.get("closing_source", ""), "closing_observed_at": "",
-        "start_detected_at": "", "actual_start": bet.get("actual_start", ""),
+        "closing_source": bet.get("closing_source", ""),
+        "closing_observed_at": bet.get("closing_observed_at", ""),
+        "start_detected_at": bet.get("start_detected_at", ""),
+        "actual_start": bet.get("actual_start", ""),
         "actual_start_source": bet.get("actual_start_source", ""),
         "actual_start_confidence": bet.get("actual_start_confidence", ""),
     }
 
 
 def _parse_num(raw):
-    text = str(raw or "").strip().rstrip("%")
+    text = str(raw or "").strip()
+    percent = text.endswith("%")
+    if percent:
+        text = text[:-1].strip()
     try:
-        return float(text.replace(",", ""))
+        value = float(text.replace(",", ""))
+        return value / 100 if percent else value
     except ValueError:
         return None
+
+
+def _gate_attested_existing_close(bet: dict) -> tuple[float, float, float] | None:
+    """Return reusable values when the onboarding gate was the only cap."""
+    notes = str(bet.get("notes") or "").lower()
+    if "onboarding:" not in notes or "onboarding: demoted" in notes:
+        return None
+    price = _parse_num(bet.get("closing_odds"))
+    decimal = _parse_num(bet.get("decimal_closing"))
+    clv = _parse_num(bet.get("clv"))
+    if price is None or price == 0 or decimal is None or decimal <= 1 or clv is None:
+        return None
+    return price, decimal, clv
 
 
 # ── Repair one row ───────────────────────────────────────────────────────────
@@ -154,6 +174,20 @@ def repair_bet(bet: dict) -> dict:
     original = {"close": bet.get("closing_odds", ""),
                 "decimal": bet.get("decimal_closing", ""), "clv": bet.get("clv", ""),
                 "quality": bet.get("closing_quality", "")}
+
+    existing = _gate_attested_existing_close(bet)
+    if existing is not None:
+        price, decimal_closing, clv = existing
+        repaired = repair_onboarded_close(
+            row_idx, bet_id, price, decimal_closing, clv,
+            original=original, provenance=_restore_provenance(bet))
+        if repaired:
+            outcome["status"] = "repaired"
+            outcome["new_closing"] = price
+            outcome["detail"] = "promoted existing gate-attested close (zero API credits)"
+        else:
+            outcome["detail"] = "atomic in-place repair refused/failed — original row remained untouched"
+        return outcome
 
     # Derive BEFORE clearing so a transient failure leaves the row untouched.
     fetch_bet = {**bet, "_resolve_actual_start": True}
@@ -181,6 +215,52 @@ def repair_bet(bet: dict) -> dict:
     outcome["new_closing"] = result["closing_odds"]
     outcome["detail"] = f"{original['close'] or '(blank)'} -> {result['closing_odds']} (VERIFIED_CLOSE)"
     return outcome
+
+
+def repair_ready_rows(profile: CapabilityProfile, registry: ContextRegistry, *,
+                      apply: bool, max_rows: int = 10,
+                      max_refetch_rows: int = 2) -> dict:
+    """Drain a bounded batch of trusted historical onboarding rows.
+
+    This is the scheduled entrypoint. It intentionally reuses the same pure
+    classification and atomic write path as the manual CLI, so failed fetches or
+    concurrent row changes remain retryable and never partially overwrite data.
+    """
+    bets = load_onboarding_rows()
+    classified = [(bet, classify_repair_row(bet, _is_trusted(profile, registry, bet)))
+                  for bet in bets]
+    ready = [bet for bet, classification in classified
+             if classification["bucket"] == "retry"]
+    zero_credit = [bet for bet in ready if _gate_attested_existing_close(bet) is not None]
+    refetch = [bet for bet in ready if _gate_attested_existing_close(bet) is None]
+    row_limit = max(0, int(max_rows))
+    selected_zero_credit = zero_credit[:row_limit]
+    refetch_slots = min(max(0, row_limit - len(selected_zero_credit)),
+                        max(0, int(max_refetch_rows)))
+    selected_refetch = refetch[:refetch_slots]
+    selected = selected_zero_credit + selected_refetch
+    selected_refetch_ids = {bet["bet_id"] for bet in selected_refetch}
+    summary = {
+        "examined": len(classified), "ready": len(ready), "attempted": 0,
+        "repaired": 0, "still_provisional": 0, "failed": 0,
+        "remaining": len(ready), "zero_credit_ready": len(zero_credit),
+        "refetch_ready": len(refetch), "refetch_attempted": 0, "outcomes": [],
+    }
+    if not apply:
+        return summary
+    for bet in selected:
+        if bet["bet_id"] in selected_refetch_ids:
+            summary["refetch_attempted"] += 1
+        outcome = repair_bet(bet)
+        summary["attempted"] += 1
+        status = outcome.get("status", "failed")
+        if status in summary:
+            summary[status] += 1
+        else:
+            summary["failed"] += 1
+        summary["outcomes"].append(outcome)
+    summary["remaining"] = max(0, len(ready) - summary["repaired"])
+    return summary
 
 
 def main(argv: list[str] | None = None) -> int:

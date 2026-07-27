@@ -309,6 +309,15 @@ def run_once(*, apply: bool, limit_days: int = 14) -> dict:
     ephemeral_verified = _verify_ephemeral_rows(rows, registry, apply=apply)
     before = {record.record_key: (record.health, record.last_checked)
               for record in profile.records()}
+    evidence_rebuilt = any(
+        int(record.evidence.get("evidence_version", 0) or 0) < verifier.EVENT_LEDGER_VERSION
+        for record in profile.records())
+    rebuilt_health = None
+    if evidence_rebuilt:
+        rebuilt_health = {record.record_key: record.health for record in profile.records()}
+        for record in profile.records():
+            verifier.reset_verifier_evidence(record)
+            profile._store(record)
 
     observations = []
     for row in rows:
@@ -317,13 +326,25 @@ def run_once(*, apply: bool, limit_days: int = 14) -> dict:
         obs = verifier.observation_from_bet(row, resolution)
         if obs is not None:
             observations.append(obs)
+    observations.sort(key=lambda observation: observation.observed_at or policy.now_utc())
 
     apply_transitions = apply and config.ONBOARDING_ENFORCE and not config.ONBOARDING_PROMOTE_SHADOW
     proposals = verifier.run_verification(
-        profile, observations, apply=apply_transitions, log_fn=verifier_log)
+        profile, observations, apply=apply_transitions, log_fn=verifier_log,
+        rebuilt_health=rebuilt_health)
     capability_writes = sink.flush() if sink is not None else 0
     reflagged = _reflag_causal_rows(causal_rows, registry, _causal_demotions(profile, before)) \
         if apply else 0
+    repairs = {"examined": 0, "ready": 0, "attempted": 0, "repaired": 0,
+               "still_provisional": 0, "failed": 0, "remaining": 0,
+               "zero_credit_ready": 0, "refetch_ready": 0,
+               "refetch_attempted": 0, "outcomes": []}
+    if apply and config.ONBOARDING_AUTO_REPAIR:
+        from scripts.repair_onboarded_rows import repair_ready_rows
+        repairs = repair_ready_rows(
+            profile, registry, apply=True,
+            max_rows=config.ONBOARDING_AUTO_REPAIR_MAX_ROWS,
+            max_refetch_rows=config.ONBOARDING_AUTO_REPAIR_MAX_REFETCH_ROWS)
     return {"observations": len(observations), "proposals": proposals,
             "decisions": decisions,
             "reflagged": reflagged,
@@ -331,6 +352,8 @@ def run_once(*, apply: bool, limit_days: int = 14) -> dict:
             "starts_hydrated": starts_hydrated,
             "ephemeral_verified": ephemeral_verified,
             "pending_intents": pending_intents,
+            "repairs": repairs,
+            "evidence_rebuilt": evidence_rebuilt,
             "apply": apply, "promote_shadow": config.ONBOARDING_PROMOTE_SHADOW}
 
 
@@ -353,6 +376,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Decisions: {result['decisions']['applied']} applied, "
               f"{result['decisions']['failed']} failed")
         print(f"Causal rows re-flagged: {result['reflagged']}")
+        print(f"Onboarding repairs: {result['repairs']['repaired']} repaired, "
+              f"{result['repairs']['remaining']} still queued")
+        print(f"Distinct-event evidence rebuilt: {result['evidence_rebuilt']}")
     for p in proposals:
         verb = "APPLIED" if p.applied else "proposed"
         print(f"  {verb}: {p.record_key} {p.from_classification}->{p.to_classification} : {p.reason}")

@@ -1,5 +1,6 @@
 """Post-event verifier — §5 outcomes, evidence accumulation, and promotion."""
 
+import json
 from datetime import datetime, timedelta, timezone
 
 import onboarding_policy as policy
@@ -134,6 +135,43 @@ def test_rolling_window_rerun_does_not_double_count_same_event():
     verifier.run_verification(profile, [obs], apply=False, now=NOW)
     verifier.run_verification(profile, [obs], apply=False, now=NOW + timedelta(hours=1))
     key = record_key("soccer/new", policy.CAP_CAPTURE, "draftkings|h2h")
+    assert profile.get_record(key).evidence["clean"] == 1
+
+
+def test_event_ledger_does_not_recount_after_more_than_500_events():
+    profile = CapabilityProfile([])
+    observations = [Observation(
+        context_id="baseball/mlb", event_id=f"event-{i}", observed_at=NOW,
+        start_source="toa_scores", start_outcome=verifier.START_AGREEMENT,
+        capture_book="prophetx", capture_family="featured", capture_clean=True,
+    ) for i in range(600)]
+    verifier.run_verification(profile, observations, apply=False, now=NOW)
+    verifier.run_verification(profile, observations, apply=False,
+                              now=NOW + timedelta(hours=1))
+    key = record_key("baseball/mlb", policy.CAP_CAPTURE, "prophetx|featured")
+    evidence = profile.get_record(key).evidence
+    assert evidence["clean"] == 600
+    assert len(json.dumps(evidence, separators=(",", ":"))) < 50_000
+
+
+def test_missing_event_id_dedupes_multiple_bets_by_fixture_identity():
+    class Resolution:
+        is_known = True
+        context_id = "baseball/mlb"
+
+    base = {
+        "Sport": "baseball_mlb", "Team 1": "Cubs", "Team 2": "Cards",
+        "Game Date": "7/27/2026", "Game Start Time": "7:05 PM",
+        "Book": "FanDuel", "Market Key": "h2h", "Bet Type": "Moneyline",
+        "Closing Quality": "VERIFIED_CLOSE", "Closing Observed At": NOW.isoformat(),
+        "Actual Start": NOW.isoformat(),
+    }
+    first = verifier.observation_from_bet({**base, "BetID": "1"}, Resolution())
+    second = verifier.observation_from_bet({**base, "BetID": "2"}, Resolution())
+    assert first.observation_id == second.observation_id
+    profile = CapabilityProfile([])
+    verifier.run_verification(profile, [first, second], apply=False, now=NOW)
+    key = record_key("baseball/mlb", policy.CAP_CAPTURE, "fanduel|h2h")
     assert profile.get_record(key).evidence["clean"] == 1
 
 

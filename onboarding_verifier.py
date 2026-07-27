@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import onboarding_policy as policy
 from capability_profile import CapabilityProfile, CapabilityRecord, record_key
@@ -111,59 +111,176 @@ def _ensure(profile: CapabilityProfile, context_id: str, capability: str,
     return rec
 
 
-def _claim(record: CapabilityRecord, obs: Observation, signature: str) -> bool:
-    """Claim one durable event/state observation for one grain.
+EVENT_LEDGER_KEY = "event_outcomes_v2"
+EVENT_LEDGER_VERSION = 2
+OUTCOME_CODES = {
+    "clean": "c", "negative": "n", "contradiction": "x",
+    "no_source": "s", "coverage": "v",
+}
 
-    The verifier scans a rolling window on every scheduled run. Without this
-    ledger, the same game (or several bets on that game) would inflate evidence
-    every 30 minutes. A changed state may be claimed once more so a later
-    authoritative resolution can supersede an earlier unresolved observation.
-    """
+
+def _compact_iso(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc) \
+        .isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _reset_legacy_evidence(record: CapabilityRecord) -> None:
+    """Start the v2 ledger without carrying inflated observation counters."""
+    if int(record.evidence.get("evidence_version", 0) or 0) >= EVENT_LEDGER_VERSION:
+        return
+    preserved = {key: record.evidence[key] for key in
+                 ("seeded", "scanner_discoveries") if key in record.evidence}
+    record.evidence.clear()
+    record.evidence.update(preserved)
+    record.evidence["evidence_version"] = EVENT_LEDGER_VERSION
+    record.evidence[EVENT_LEDGER_KEY] = {}
+
+
+def reset_verifier_evidence(record: CapabilityRecord) -> None:
+    """Public rebuild helper: clear derived evidence while preserving discovery."""
+    preserved = {key: record.evidence[key] for key in
+                 ("seeded", "scanner_discoveries") if key in record.evidence}
+    record.evidence.clear()
+    record.evidence.update(preserved)
+    record.evidence["evidence_version"] = EVENT_LEDGER_VERSION
+    record.evidence[EVENT_LEDGER_KEY] = {}
+    record.last_checked = None
+
+
+def _ledger(record: CapabilityRecord) -> dict:
+    _reset_legacy_evidence(record)
+    ledger = record.evidence.setdefault(EVENT_LEDGER_KEY, {})
+    if not isinstance(ledger, dict):
+        ledger = {}
+        record.evidence[EVENT_LEDGER_KEY] = ledger
+    return ledger
+
+
+def _prune_ledger(record: CapabilityRecord, reference: datetime) -> None:
+    ledger = _ledger(record)
+    cutoff = reference - timedelta(days=policy.EVIDENCE_LEDGER_RETENTION_DAYS)
+    for token, entry in list(ledger.items()):
+        at = policy.parse_utc_datetime(entry[1] if isinstance(entry, list)
+                                       and len(entry) > 1 else None)
+        if at is None or at < cutoff:
+            ledger.pop(token, None)
+
+
+def _event_outcomes(record: CapabilityRecord) -> list[tuple[datetime, str]]:
+    out = []
+    for entry in _ledger(record).values():
+        if not isinstance(entry, list) or len(entry) < 3:
+            continue
+        at = policy.parse_utc_datetime(entry[1])
+        outcome = entry[2]
+        if at is None or outcome not in {"c", "n", "x"}:
+            continue
+        out.append((at, "clean" if outcome == "c" else "negative"))
+    return out
+
+
+def _sync_evidence(record: CapabilityRecord) -> None:
+    entries = [entry for entry in _ledger(record).values()
+               if isinstance(entry, list) and len(entry) >= 3]
+    clean = [entry for entry in entries if entry[2] == "c"]
+    negative = [entry for entry in entries if entry[2] == "n"]
+    contradictions = [entry for entry in entries if entry[2] == "x"]
+    no_source = [entry for entry in entries if entry[2] == "s"]
+    record.evidence["clean"] = len(clean)
+    record.evidence["days"] = sorted({str(entry[1])[:10] for entry in clean if entry[1]})
+    record.evidence["irregular_ok"] = sum(
+        1 for entry in clean if len(entry) > 3 and bool(entry[3]))
+    record.evidence["neg"] = len(negative) + len(contradictions)
+    record.evidence["quarantined"] = len(negative)
+    record.evidence["contradictions"] = len(contradictions)
+    record.evidence["no_source"] = len(no_source)
+    # Retain a small causal timestamp tail for row re-flagging/diagnostics; the
+    # authoritative distinct-event history is the compact ledger above.
+    record.evidence["quarantine_events"] = sorted(
+        (entry[1] for entry in negative), reverse=True)[:20]
+
+
+def _claim(record: CapabilityRecord, obs: Observation, signature: str) -> str | None:
+    """Claim one state per sporting event, retained beyond the rescan window."""
     raw_id = obs.event_id or obs.observation_id
     if not raw_id and obs.observed_at is not None:
         raw_id = obs.observed_at.isoformat()
     if not raw_id:
-        return False
+        return None
+    at = obs.observed_at or policy.now_utc()
+    _prune_ledger(record, at)
     token = hashlib.sha256(str(raw_id).encode("utf-8")).hexdigest()[:16]
-    state = hashlib.sha256(signature.encode("utf-8")).hexdigest()[:12]
-    seen = record.evidence.setdefault("seen", {})
-    if not isinstance(seen, dict):
-        seen = {}
-        record.evidence["seen"] = seen
-    if seen.get(token) == state:
-        return False
-    seen[token] = state
-    # Keep Evidence Summary comfortably below Sheets' per-cell limit.
-    while len(seen) > 500:
-        seen.pop(next(iter(seen)))
-    return True
+    state = hashlib.sha256(signature.encode("utf-8")).hexdigest()[:8]
+    prior = _ledger(record).get(token)
+    if isinstance(prior, list) and prior and prior[0] == state:
+        return None
+    prior_at = policy.parse_utc_datetime(prior[1] if isinstance(prior, list)
+                                         and len(prior) > 1 else None)
+    if prior_at is not None and prior_at > at:
+        return None
+    previous_outcome = prior[2] if isinstance(prior, list) and len(prior) > 2 else ""
+    previous_irregular = prior[3] if isinstance(prior, list) and len(prior) > 3 else False
+    _ledger(record)[token] = [state, _compact_iso(at), previous_outcome, previous_irregular]
+    return token
 
 
-def _decay_quarantine(record: CapabilityRecord, at: datetime) -> None:
-    events = [policy.parse_utc_datetime(d)
-              for d in record.evidence.get("quarantine_events", [])]
-    events = [d for d in events if d is not None]
-    last = max(events, default=None)
-    if policy.quarantine_decayed(last, at):
-        record.evidence["quarantine_events"] = []
-        record.evidence["quarantined"] = 0
+def _set_event_outcome(record: CapabilityRecord, token: str, outcome: str,
+                       observed_at: datetime, *, irregular: bool = False) -> None:
+    entry = _ledger(record).get(token)
+    if not isinstance(entry, list):
+        return
+    entry[1] = _compact_iso(observed_at)
+    entry[2] = OUTCOME_CODES[outcome]
+    entry[3] = bool(irregular)
+    _sync_evidence(record)
 
 
 def _record_clean(profile: CapabilityProfile, record: CapabilityRecord,
-                  observed_at: datetime) -> None:
-    _decay_quarantine(record, observed_at)
-    _bump(record, "clean")
-    _add_day(record, "days", observed_at)
+                  observed_at: datetime, event_token: str, *, irregular: bool = False) -> None:
+    _set_event_outcome(record, event_token, "clean", observed_at, irregular=irregular)
     if record.classification in (policy.VERIFIED, policy.LIMITED):
-        recent_quarantine = any(policy.parse_utc_datetime(d) is not None
-                                for d in record.evidence.get("quarantine_events", []))
-        if record.health == policy.STALE and not recent_quarantine:
+        if record.health == policy.STALE \
+                and policy.meets_reconfirmation_bar(_event_outcomes(record)):
             record.health = policy.FRESH
             record.notes = (record.notes + "\n" if record.notes else "") + \
-                f"{observed_at.date().isoformat()} re-confirmed by clean evidence"
+                f"{observed_at.date().isoformat()} re-confirmed by 3 clean events over 2 days"
         if record.health == policy.FRESH:
             record.last_verified = max(filter(None, [record.last_verified, observed_at]))
             record.policy_version = policy.POLICY_VERSION
+
+
+def reconcile_rebuilt_health(record: CapabilityRecord, previous_health: str, *,
+                             now: datetime) -> None:
+    """Set health from rebuilt distinct-event evidence, preserving sparse trust."""
+    if record.classification not in (policy.VERIFIED, policy.LIMITED):
+        return
+    if (record.capability == policy.CAP_CAPTURE
+            and record.qualifier.startswith("any|")
+            and "grandfathered bridge superseded" in record.notes.lower()):
+        record.health = policy.STALE
+        return
+    outcomes = _event_outcomes(record)
+    if int(record.evidence.get("contradictions", 0) or 0):
+        record.health = policy.CONTRADICTED
+        return
+    if policy.reliability_crosses_threshold(outcomes, now):
+        record.health = policy.STALE
+        return
+    clean = int(record.evidence.get("clean", 0) or 0)
+    days = len(set(record.evidence.get("days", []) or []))
+    if clean >= policy.RECONFIRM_CLEAN_EVENTS and days >= policy.RECONFIRM_DISTINCT_DAYS:
+        record.health = policy.FRESH
+        clean_dates = [at for at, outcome in outcomes if outcome == "clean"]
+        if clean_dates:
+            record.last_verified = max(clean_dates)
+        if previous_health != policy.FRESH:
+            record.notes = (record.notes + "\n" if record.notes else "") + \
+                f"{now.date().isoformat()} re-confirmed by rebuilt distinct-event evidence"
+        return
+    # Sparse recent evidence cannot erase an older trust decision either way.
+    record.health = previous_health
 
 
 def age_stale_records(profile: CapabilityProfile, *, now: datetime) -> list[CapabilityRecord]:
@@ -217,29 +334,31 @@ def accumulate(profile: CapabilityProfile, obs: Observation, *, now: datetime) -
     # identity
     ident = _ensure(profile, obs.context_id, policy.CAP_IDENTITY, "toa", now)
     event_time = obs.observed_at or now
-    if _claim(ident, obs, f"identity:{obs.identity_matched}:{obs.irregular}"):
+    claim = _claim(ident, obs, f"identity:{obs.identity_matched}:{obs.irregular}")
+    if claim:
         if obs.identity_matched:
-            _record_clean(profile, ident, event_time)
-            if obs.irregular:
-                _bump(ident, "irregular_ok")
+            _record_clean(profile, ident, event_time, claim, irregular=obs.irregular)
         else:
-            _apply_negative(profile, ident, policy.FAILURE_IDENTITY_MISMATCH, event_time)
+            _apply_negative(profile, ident, policy.FAILURE_IDENTITY_MISMATCH,
+                            event_time, event_token=claim)
         touched.append(ident)
 
     # start
     cap, qual = start_grain(obs.start_source or "toa_scores")
     start_rec = _ensure(profile, obs.context_id, cap, qual, now)
-    if _claim(start_rec, obs, f"start:{obs.start_source}:{obs.start_outcome}:{obs.irregular}"):
+    claim = _claim(start_rec, obs,
+                   f"start:{obs.start_source}:{obs.start_outcome}:{obs.irregular}")
+    if claim:
         if obs.start_outcome in (START_AGREEMENT, START_RECOVERABLE):
-            _record_clean(profile, start_rec, event_time)
-            if obs.irregular:
-                _bump(start_rec, "irregular_ok")
+            _record_clean(profile, start_rec, event_time, claim, irregular=obs.irregular)
         elif obs.start_outcome == START_CONTRADICTION:
-            _apply_negative(profile, start_rec, policy.FAILURE_START_CONTRADICTION, event_time)
+            _apply_negative(profile, start_rec, policy.FAILURE_START_CONTRADICTION,
+                            event_time, event_token=claim)
         elif obs.start_outcome == START_UNRESOLVED:
-            _apply_negative(profile, start_rec, policy.FAILURE_TRANSIENT_EMPTY, event_time)
+            _apply_negative(profile, start_rec, policy.FAILURE_TRANSIENT_EMPTY,
+                            event_time, event_token=claim)
         elif obs.start_outcome == START_MISSING:
-            _bump(start_rec, "no_source")
+            _set_event_outcome(start_rec, claim, "no_source", event_time)
         touched.append(start_rec)
 
     # capture
@@ -247,13 +366,15 @@ def accumulate(profile: CapabilityProfile, obs: Observation, *, now: datetime) -
         book = (obs.capture_book or "any").strip().lower() or "any"
         crec = _ensure(profile, obs.context_id, policy.CAP_CAPTURE,
                        f"{book}|{obs.capture_family}", now)
-        if _claim(crec, obs, f"capture:{obs.capture_clean}:{obs.missing_market}"):
+        claim = _claim(crec, obs, f"capture:{obs.capture_clean}:{obs.missing_market}")
+        if claim:
             if obs.missing_market:
-                pass  # coverage limitation — no evidence for or against (concept §5)
+                _set_event_outcome(crec, claim, "coverage", event_time)
             elif obs.capture_clean:
-                _record_clean(profile, crec, event_time)
+                _record_clean(profile, crec, event_time, claim)
             else:
-                _apply_negative(profile, crec, policy.FAILURE_STALE_QUOTE, event_time)
+                _apply_negative(profile, crec, policy.FAILURE_STALE_QUOTE,
+                                event_time, event_token=claim)
             touched.append(crec)
 
         # Benchmark availability is an independent grain. A miss is a visible
@@ -264,11 +385,12 @@ def accumulate(profile: CapabilityProfile, obs: Observation, *, now: datetime) -
         if brec.classification == policy.BLOCKED and obs.benchmark_available:
             brec = profile.transition(brec.record_key, policy.DISCOVERED,
                                       "benchmark appeared on a later qualifying event")
-        if _claim(brec, obs, f"benchmark:{obs.benchmark_available}"):
+        claim = _claim(brec, obs, f"benchmark:{obs.benchmark_available}")
+        if claim:
             if obs.benchmark_available:
-                _record_clean(profile, brec, event_time)
+                _record_clean(profile, brec, event_time, claim)
             elif obs.benchmark_available is False:
-                _bump(brec, "no_source")
+                _set_event_outcome(brec, claim, "no_source", event_time)
             touched.append(brec)
 
     for rec in touched:
@@ -278,30 +400,32 @@ def accumulate(profile: CapabilityProfile, obs: Observation, *, now: datetime) -
 
 # ── Demotion (never shadowed) ────────────────────────────────────────────────
 def _apply_negative(profile: CapabilityProfile, record: CapabilityRecord,
-                    failure_kind: str, now: datetime) -> None:
+                    failure_kind: str, now: datetime,
+                    event_token: str | None = None) -> None:
     """Attribute a negative observation to `record` and demote if warranted."""
     severity = policy.severity_for(failure_kind)
     if severity == policy.SEV_COVERAGE:
         return
-    _bump(record, "neg")
+    if not event_token:
+        # Direct policy/unit-test calls do not carry an Observation. Give each
+        # such call a stable distinct slot without affecting production keys.
+        event_token = hashlib.sha256(
+            f"manual:{now.isoformat()}:{len(_ledger(record))}".encode("utf-8")
+        ).hexdigest()[:16]
+        _ledger(record)[event_token] = ["manual", _compact_iso(now), "", False]
     if severity == policy.SEV_IMMEDIATE:
-        _bump(record, "contradictions")
+        _set_event_outcome(record, event_token, "contradiction", now)
         if record.classification in (policy.VERIFIED, policy.LIMITED):
             profile.set_health(record.record_key, policy.CONTRADICTED,
                                f"contradicted: {failure_kind}")
         else:
             record.health = policy.CONTRADICTED  # Discovered stays Discovered, health noted
         return
-    # quarantine — count EVENTS (not distinct days) inside the trailing window,
-    # so repeated same-day ambiguities accumulate toward the threshold.
-    _bump(record, "quarantined")
-    record.evidence.setdefault("quarantine_events", []).append(now.isoformat())
-    events = [policy.parse_utc_datetime(d) for d in record.evidence.get("quarantine_events", [])]
-    events = [d for d in events if d is not None]
-    if policy.quarantine_crosses_threshold(events, now) \
+    _set_event_outcome(record, event_token, "negative", now)
+    if policy.reliability_crosses_threshold(_event_outcomes(record), now) \
             and record.classification in (policy.VERIFIED, policy.LIMITED):
         profile.set_health(record.record_key, policy.STALE,
-                           "stale: quarantine threshold crossed")
+                           "stale: distinct-event reliability threshold crossed")
 
 
 # ── Promotion / block decisions ──────────────────────────────────────────────
@@ -367,6 +491,23 @@ _ACTUAL_SOURCE_TO_QUALIFIER = {
 }
 
 
+def observation_identity(bet: dict) -> tuple[str, str]:
+    """Return provider event id plus a stable fixture fallback for dedupe.
+
+    Several bets on an older row may have no provider Event ID. Falling back
+    directly to BetID turns one game into many reliability votes, so use the
+    fixture identity first (date/start disambiguate ordinary doubleheaders).
+    """
+    event_id = str(bet.get("Event ID") or "").strip()
+    if event_id:
+        return event_id, event_id
+    parts = [str(bet.get(key) or "").strip().lower() for key in
+             ("Sport", "Team 1", "Team 2", "Game Date", "Game Start Time")]
+    if parts[0] and parts[3] and (parts[1] or parts[2]):
+        return "", "fixture:" + "|".join(parts)
+    return "", "bet:" + str(bet.get("BetID") or "").strip()
+
+
 def observation_from_bet(bet: dict, resolution) -> Observation | None:
     """Build an Observation from a settled bet's provenance columns. `resolution`
     is a context_registry.ContextResolution (already resolved by the caller); a
@@ -391,10 +532,11 @@ def observation_from_bet(bet: dict, resolution) -> Observation | None:
     quality = str(bet.get("Closing Quality") or "").strip().upper()
     notes = str(bet.get("Notes") or "").lower()
     gate_capped_clean = "onboarding:" in notes and "onboarding: demoted" not in notes
+    event_id, observation_id = observation_identity(bet)
     return Observation(
         context_id=resolution.context_id,
-        event_id=str(bet.get("Event ID") or ""),
-        observation_id=str(bet.get("BetID") or ""),
+        event_id=event_id,
+        observation_id=observation_id,
         observed_at=policy.parse_utc_datetime(bet.get("Closing Observed At")) or policy.now_utc(),
         identity_matched=bool(str(bet.get("Event ID") or "").strip()),
         start_source=start_source, start_outcome=outcome,
@@ -410,7 +552,8 @@ def observation_from_bet(bet: dict, resolution) -> Observation | None:
 # ── Orchestrator ─────────────────────────────────────────────────────────────
 def run_verification(profile: CapabilityProfile, observations: list[Observation], *,
                      apply: bool, now: datetime | None = None,
-                     prior_fn=compute_prior, log_fn=None) -> list[Proposal]:
+                     prior_fn=compute_prior, log_fn=None,
+                     rebuilt_health: dict[str, str] | None = None) -> list[Proposal]:
     """Fold every observation into evidence, then propose (or apply) promotions
     and blocks. Demotions already happened during accumulation. `apply` False =
     shadow: proposals are written as `proposed:` Notes markers, not applied."""
@@ -420,6 +563,12 @@ def run_verification(profile: CapabilityProfile, observations: list[Observation]
     for obs in observations:
         for rec in accumulate(profile, obs, now=now):
             touched[rec.record_key] = rec
+
+    if rebuilt_health is not None:
+        for rec in profile.records():
+            reconcile_rebuilt_health(
+                rec, rebuilt_health.get(rec.record_key, rec.health), now=now)
+            profile._store(rec)
 
     proposals: list[Proposal] = []
     # Re-evaluate every Discovered record with durable evidence, not only grains

@@ -36,39 +36,59 @@ def test_post_start_as_verified_is_immediate():
     assert profile.get_record(key).health == policy.CONTRADICTED
 
 
-def test_quarantine_three_in_fourteen_days_goes_stale():
+def test_three_negative_of_six_distinct_events_goes_stale():
     key = record_key("soccer/x", policy.CAP_IDENTITY, "toa")
     profile = CapabilityProfile([verified("soccer/x", policy.CAP_IDENTITY, "toa")])
-    rec = profile.get_record(key)
-    for day in (0, 5, 13):
-        verifier._apply_negative(profile, rec, policy.FAILURE_AMBIGUOUS_MATCH,
-                                 NOW - timedelta(days=13 - day))
+    observations = [
+        Observation(context_id="soccer/x", event_id=f"clean-{i}", observed_at=NOW,
+                    identity_matched=True) for i in range(3)
+    ] + [
+        Observation(context_id="soccer/x", event_id=f"bad-{i}", observed_at=NOW,
+                    identity_matched=False) for i in range(3)
+    ]
+    verifier.run_verification(profile, observations, apply=True, now=NOW)
     assert profile.get_record(key).health == policy.STALE
 
 
-def test_two_quarantines_in_window_stay_fresh():
+def test_three_negative_among_ten_distinct_events_stays_fresh():
     key = record_key("soccer/x", policy.CAP_IDENTITY, "toa")
     profile = CapabilityProfile([verified("soccer/x", policy.CAP_IDENTITY, "toa")])
-    rec = profile.get_record(key)
-    # Applied in increasing time order (as production would): one aged out of the
-    # 14-day window, then two recent → only 2 in-window at the last check.
-    verifier._apply_negative(profile, rec, policy.FAILURE_AMBIGUOUS_MATCH, NOW - timedelta(days=40))
-    verifier._apply_negative(profile, rec, policy.FAILURE_AMBIGUOUS_MATCH, NOW - timedelta(days=2))
-    verifier._apply_negative(profile, rec, policy.FAILURE_AMBIGUOUS_MATCH, NOW - timedelta(days=1))
+    observations = [
+        Observation(context_id="soccer/x", event_id=f"clean-{i}", observed_at=NOW,
+                    identity_matched=True) for i in range(7)
+    ] + [
+        Observation(context_id="soccer/x", event_id=f"bad-{i}", observed_at=NOW,
+                    identity_matched=False) for i in range(3)
+    ]
+    verifier.run_verification(profile, observations, apply=True, now=NOW)
     assert profile.get_record(key).health == policy.FRESH
 
 
-def test_quarantine_decays_after_thirty_clean_days():
+def test_stale_record_reconfirms_after_three_clean_events_over_two_days():
     key = record_key("soccer/x", policy.CAP_IDENTITY, "toa")
     profile = CapabilityProfile([verified("soccer/x", policy.CAP_IDENTITY, "toa")])
-    rec = profile.get_record(key)
-    verifier._apply_negative(profile, rec, policy.FAILURE_AMBIGUOUS_MATCH,
-                             NOW - timedelta(days=31))
-    obs = Observation(context_id="soccer/x", event_id="clean-later",
-                      observed_at=NOW, identity_matched=True)
-    verifier.accumulate(profile, obs, now=NOW)
-    assert rec.evidence["quarantined"] == 0
-    assert rec.evidence["quarantine_events"] == []
+    initial = [
+        Observation(context_id="soccer/x", event_id=f"clean-{i}", observed_at=NOW,
+                    identity_matched=True) for i in range(3)
+    ] + [
+        Observation(context_id="soccer/x", event_id=f"bad-{i}", observed_at=NOW,
+                    identity_matched=False) for i in range(3)
+    ]
+    verifier.run_verification(profile, initial, apply=True, now=NOW)
+    assert profile.get_record(key).health == policy.STALE
+
+    recovery = [
+        Observation(context_id="soccer/x", event_id="recovery-1",
+                    observed_at=NOW + timedelta(days=1), identity_matched=True),
+        Observation(context_id="soccer/x", event_id="recovery-2",
+                    observed_at=NOW + timedelta(days=2), identity_matched=True),
+        Observation(context_id="soccer/x", event_id="recovery-3",
+                    observed_at=NOW + timedelta(days=2, hours=1), identity_matched=True),
+    ]
+    verifier.run_verification(profile, recovery, apply=True,
+                              now=NOW + timedelta(days=2, hours=1))
+    assert profile.get_record(key).health == policy.FRESH
+    assert "re-confirmed by 3 clean events over 2 days" in profile.get_record(key).notes
 
 
 def test_missing_market_never_demotes():

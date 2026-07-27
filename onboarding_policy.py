@@ -267,10 +267,21 @@ QUARANTINE_FAILURES = frozenset({FAILURE_AMBIGUOUS_MATCH, FAILURE_TRANSIENT_EMPT
 # tolerable detection lag (plan §P0.2 #1).
 START_DISAGREEMENT_CONTRADICTION_SECONDS = 10 * 60
 
-# Quarantine accumulation + decay.
+# Reliability is evaluated over distinct event outcomes, never checker runs or
+# individual bets. Three failures are still the minimum warning bar, but a
+# high-volume grain is not demoted unless failures are at least half of a
+# minimally useful sample.
 QUARANTINE_WINDOW_DAYS = 14
-QUARANTINE_THRESHOLD = 3            # ≥3 quarantined within the window → Stale
-QUARANTINE_DECAY_CLEAN_DAYS = 30   # counters reset after this many clean days
+QUARANTINE_THRESHOLD = 3
+QUARANTINE_MIN_OBSERVATIONS = 6
+QUARANTINE_FAILURE_RATE = 0.50
+EVIDENCE_LEDGER_RETENTION_DAYS = 21
+
+# Stale (but not Contradicted) trust can be re-earned from fresh event evidence
+# instead of waiting only for wall-clock decay.
+RECONFIRM_CLEAN_EVENTS = 3
+RECONFIRM_DISTINCT_DAYS = 2
+QUARANTINE_DECAY_CLEAN_DAYS = 30   # compatibility fallback for legacy evidence
 
 
 def severity_for(failure_kind: str) -> str:
@@ -300,6 +311,31 @@ def quarantine_crosses_threshold(events: list[datetime], now: datetime) -> bool:
     window_start = now - timedelta(days=QUARANTINE_WINDOW_DAYS)
     recent = [event for event in events if event is not None and event >= window_start]
     return len(recent) >= QUARANTINE_THRESHOLD
+
+
+def reliability_crosses_threshold(outcomes: list[tuple[datetime, str]],
+                                  now: datetime) -> bool:
+    """Whether distinct recent event outcomes justify Stale health."""
+    window_start = now - timedelta(days=QUARANTINE_WINDOW_DAYS)
+    recent = [(at, outcome) for at, outcome in outcomes
+              if at is not None and at >= window_start
+              and outcome in {"clean", "negative"}]
+    negatives = sum(1 for _, outcome in recent if outcome == "negative")
+    if negatives < QUARANTINE_THRESHOLD or len(recent) < QUARANTINE_MIN_OBSERVATIONS:
+        return False
+    return negatives / len(recent) >= QUARANTINE_FAILURE_RATE
+
+
+def meets_reconfirmation_bar(outcomes: list[tuple[datetime, str]]) -> bool:
+    """True after enough clean events on enough days since the latest failure."""
+    ordered = sorted(((at, outcome) for at, outcome in outcomes if at is not None),
+                     key=lambda item: item[0])
+    last_negative = max((at for at, outcome in ordered if outcome == "negative"),
+                        default=None)
+    clean = [at for at, outcome in ordered
+             if outcome == "clean" and (last_negative is None or at > last_negative)]
+    return (len(clean) >= RECONFIRM_CLEAN_EVENTS
+            and len({at.date() for at in clean}) >= RECONFIRM_DISTINCT_DAYS)
 
 
 def quarantine_decayed(last_quarantine: datetime | None, now: datetime) -> bool:

@@ -101,6 +101,25 @@ def test_quarantine_threshold_and_decay():
     assert policy.quarantine_decayed(None, NOW)                      # never quarantined
 
 
+def test_reliability_threshold_uses_failure_rate_not_absolute_failures():
+    bad_half = [(NOW - timedelta(days=i), "negative") for i in range(3)] + [
+        (NOW - timedelta(days=i), "clean") for i in range(3)]
+    bad_minority = bad_half + [(NOW, "clean") for _ in range(4)]
+    assert policy.reliability_crosses_threshold(bad_half, NOW)
+    assert not policy.reliability_crosses_threshold(bad_minority, NOW)
+
+
+def test_reconfirmation_requires_three_clean_events_over_two_days_after_failure():
+    outcomes = [
+        (NOW - timedelta(days=2), "negative"),
+        (NOW - timedelta(days=1), "clean"),
+        (NOW, "clean"),
+        (NOW + timedelta(hours=1), "clean"),
+    ]
+    assert policy.meets_reconfirmation_bar(outcomes)
+    assert not policy.meets_reconfirmation_bar(outcomes[:3])
+
+
 # ── Freshness aging (§P0.2 #6) ───────────────────────────────────────────────
 def test_idle_stale_after_window():
     assert not policy.is_idle_stale(NOW - timedelta(days=119), NOW)

@@ -167,6 +167,22 @@ ONBOARDING_ENFORCE = os.getenv("ONBOARDING_ENFORCE", "1") == "1"
 # immediately (concept §8: silent downgrades are as bad as silent upgrades).
 ONBOARDING_PROMOTE_SHADOW = os.getenv("ONBOARDING_PROMOTE_SHADOW", "0") == "1"
 
+# Once all required grains authorize trust, the scheduled verifier drains a
+# bounded number of historical onboarding-provisional rows through the existing
+# guarded repair path. Every write is atomic/idempotent and a transient failure
+# leaves the original row untouched for a later run.
+ONBOARDING_AUTO_REPAIR = os.getenv("ONBOARDING_AUTO_REPAIR", "1") == "1"
+try:
+    ONBOARDING_AUTO_REPAIR_MAX_ROWS = max(
+        0, min(50, int(os.getenv("ONBOARDING_AUTO_REPAIR_MAX_ROWS", "10"))))
+except ValueError:
+    ONBOARDING_AUTO_REPAIR_MAX_ROWS = 10
+try:
+    ONBOARDING_AUTO_REPAIR_MAX_REFETCH_ROWS = max(
+        0, min(10, int(os.getenv("ONBOARDING_AUTO_REPAIR_MAX_REFETCH_ROWS", "2"))))
+except ValueError:
+    ONBOARDING_AUTO_REPAIR_MAX_REFETCH_ROWS = 2
+
 # A leg of a parlay can only be auto-resolved / auto-priced if its own bet
 # type is in this set (same as AUTOMATED_BET_TYPES today, named separately
 # so the parlay path reads clearly and can diverge later if needed).
