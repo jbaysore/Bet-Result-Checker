@@ -3,7 +3,11 @@
 import pytest
 
 from config import BET_TYPE_PARLAY
-from resolver import calculate_pl_and_payout
+from resolver import (
+    calculate_pl_and_payout,
+    displayed_american_from_decimal,
+    settlement_decimal_from_american,
+)
 
 
 @pytest.mark.parametrize(
@@ -205,3 +209,66 @@ def test_half_win_bonus_bet_pays_profit_plus_returned_half():
     # returns its stake. profit(50@-110)=45.45; payout = 45.45 + 50 = 95.45.
     pl, payout = calculate_pl_and_payout("HALF WIN", 100, -110, "Bonus Bet")
     assert (pl, payout) == (45.45, 95.45)
+
+
+# ── Decimal-native books (BetRivers) ────────────────────────────────────────
+# The American price these books display is a rounded label, not the price they
+# settle from. See config.DECIMAL_NATIVE_BOOKS for the four confirming real
+# settlements. Mirrors odds-tool/tests/betReviewPl.test.mjs.
+
+def test_displayed_american_rounds_away_from_zero():
+    # Checked live on the BetRivers board 2026-07-29: decimal 1.89 (exactly
+    # -112.36) displays as -113. Nearest-rounding would show -112, which makes
+    # this the observation that pins the direction.
+    assert displayed_american_from_decimal(1.89) == -113
+    assert displayed_american_from_decimal(1.90) == -112
+    assert displayed_american_from_decimal(1.76) == -132
+    assert displayed_american_from_decimal(1.85) == -118
+    # Plus money converts exactly -- there is nothing to round.
+    assert displayed_american_from_decimal(2.36) == 136
+    assert displayed_american_from_decimal(3.75) == 275
+
+
+def test_settlement_decimal_recovered_from_label():
+    assert settlement_decimal_from_american(-112) == 1.90
+    assert settlement_decimal_from_american(-118) == 1.85
+    assert settlement_decimal_from_american(-132) == 1.76
+    assert settlement_decimal_from_american(-108) == 1.93
+
+
+def test_settlement_decimal_guard_rejects_non_slip_labels():
+    # The Odds API rounds to NEAREST, storing -111 for the same 1.90 BetRivers
+    # labels -112; recovering it would give 1.91 and overpay the bet.
+    assert settlement_decimal_from_american(-111) is None
+    # No two-decimal price maps to -450 (1.22 -> -455, 1.23 -> -435).
+    assert settlement_decimal_from_american(-450) is None
+    # Plus money and junk stay on the American path.
+    assert settlement_decimal_from_american(136) is None
+    assert settlement_decimal_from_american(None) is None
+    assert settlement_decimal_from_american(float("nan")) is None
+
+
+@pytest.mark.parametrize(
+    "bet_id,stake,odds,category,boost_pct,expected_pl,expected_payout",
+    [
+        pytest.param(404, 15, -118, "Standard", None, 12.75, 27.75, id="bet404_2775_not_2771"),
+        pytest.param(459, 10, -132, "Standard", None, 7.60, 17.60, id="bet459_1760_not_1757"),
+        pytest.param(623, 15, -112, "Standard", None, 13.50, 28.50, id="bet623_2850_not_2839"),
+        # A different code path (the boost multiplier) on the same recovered
+        # price -- independent confirmation that the recovery is right.
+        pytest.param(476, 25, -108, "Profit Boost", 25, 29.06, 54.06, id="bet476_5406_not_5394"),
+    ],
+)
+def test_confirmed_betrivers_settlements(bet_id, stake, odds, category, boost_pct,
+                                         expected_pl, expected_payout):
+    pl, payout = calculate_pl_and_payout(
+        "WIN", stake, odds, category, boost_pct=boost_pct,
+        decimal_odds=settlement_decimal_from_american(odds),
+    )
+    assert (pl, payout) == (expected_pl, expected_payout)
+
+
+def test_other_books_still_settle_from_american():
+    # Same bet as 623 at a book with no decimal-native rule: still $28.39.
+    pl, payout = calculate_pl_and_payout("WIN", 15, -112, "Standard")
+    assert (pl, payout) == (13.39, 28.39)

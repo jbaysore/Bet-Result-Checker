@@ -29,6 +29,14 @@ Each run (`trigger.py`) does four work passes over the `Bets` tab, then prints a
    multi-fill settlement cannot be recovered from rounded displayed American
    odds.
 
+   Books in `DECIMAL_NATIVE_BOOKS` (BetRivers) are the recoverable version of
+   that same problem: they price in two-decimal decimal odds and display an
+   American label rounded away from zero, so `OddsTaken` alone underpays a
+   minus-money win by up to ~1% of profit. `resolver.settlement_decimal_from_american()`
+   recovers the real price from the label, guarded by a round-trip check so a
+   label that could not have come off that book's own slip settles from
+   American odds as before.
+
 4. **Capture closing odds** — for started games with a blank `ClosingOdds`
    column, fetch a historical Odds API snapshot at 1 minute before recorded
    game start (same approach as the odds-tool Historical Odds Checker).

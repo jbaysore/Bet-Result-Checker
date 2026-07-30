@@ -1,5 +1,6 @@
+import math
 import re
-from decimal import Decimal, ROUND_CEILING, ROUND_DOWN, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_DOWN, ROUND_HALF_UP
 
 from config import (
     BET_TYPE_SPREAD, BET_TYPE_MONEYLINE, BET_TYPE_TOTAL, BET_TYPE_DRAW, BET_TYPE_PARLAY,
@@ -503,6 +504,69 @@ def _decimal_odds_profit(stake: float, decimal_odds: float, round_to_nearest: bo
     raw = Decimal(str(stake)) * (Decimal(str(decimal_odds)) - Decimal(1))
     rounding = ROUND_HALF_UP if round_to_nearest else ROUND_DOWN
     return float(raw.quantize(Decimal('0.01'), rounding=rounding))
+
+
+def displayed_american_from_decimal(decimal_odds: float) -> int:
+    """
+    The American label a DECIMAL_NATIVE_BOOKS book displays for a decimal
+    price: the exact conversion rounded AWAY FROM ZERO, so the label never
+    overstates the price on offer. Decimal 1.90 is exactly -111.11 and shows
+    as -112; 1.89 is exactly -112.36 and shows as -113 (confirmed on the live
+    BetRivers board 2026-07-29 -- that observation is what rules out
+    nearest-rounding, which would have shown -112).
+
+    Plus money has nothing to round: every two-decimal price >= 2.00 converts
+    to a whole American number exactly (2.36 -> +136).
+    """
+    dec = Decimal(str(decimal_odds))
+    exact = ((dec - Decimal(1)) * Decimal(100) if dec >= 2
+             else -Decimal(100) / (dec - Decimal(1)))
+    magnitude = int(abs(exact).to_integral_value(rounding=ROUND_CEILING))
+    return magnitude if exact > 0 else -magnitude
+
+
+def settlement_decimal_from_american(american: float) -> float | None:
+    """
+    Recovers the two-decimal price a DECIMAL_NATIVE_BOOKS book actually settled
+    from, given the American label it displayed. Returns None when no such
+    price can be recovered, in which case the caller settles from the American
+    price exactly as before.
+
+    Plus money returns None on purpose: the label there IS the price (see
+    displayed_american_from_decimal), so there is nothing to recover.
+    """
+    # Coerce defensively: this runs unattended inside the poller, where a
+    # surprising OddsTaken value must degrade to "settle from American odds",
+    # never raise out of a settlement run.
+    try:
+        label = float(american)
+    except (TypeError, ValueError):
+        return None
+    # Finite whole-number minus-money labels only. Plus money needs no
+    # recovery, and a fractional label did not come off a bet slip.
+    if not math.isfinite(label) or not label < 0 or label != int(label):
+        return None
+    try:
+        dec = Decimal(1) + Decimal(100) / Decimal(str(abs(label)))
+        candidate = dec.quantize(Decimal("0.01"), rounding=ROUND_CEILING)
+    except (InvalidOperation, ZeroDivisionError):
+        return None
+    # NaN survives Decimal arithmetic quietly rather than raising, and an
+    # infinite label recovers to 1.00 (a price that pays nothing) -- neither is
+    # a real price, and both would blow up the round-trip check below.
+    if not candidate.is_finite() or candidate <= 1:
+        return None
+    # Round-trip guard: only a price the book would itself DISPLAY as this
+    # American can be the one it settled from. Rejects the two ways a label
+    # can reach us without having come off a BetRivers bet slip --
+    #   * odds-feed prices, which round to NEAREST instead: The Odds API
+    #     stores -111 for the same 1.90 BetRivers shows as -112, and
+    #     recovering -111 would give 1.91 and OVERPAY the bet;
+    #   * long-shot labels that no two-decimal price maps to at all (-450
+    #     falls between 1.22 -> -455 and 1.23 -> -435).
+    if displayed_american_from_decimal(float(candidate)) != int(label):
+        return None
+    return float(candidate)
 
 
 # ── Moneyline ─────────────────────────────────────────────────────────────────

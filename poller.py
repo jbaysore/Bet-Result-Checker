@@ -16,6 +16,7 @@ from config import (
     MANUAL_PAYOUT_REQUIRED_BOOKS,
     PAYOUT_ROUND_NEAREST_BOOKS,
     PROFIT_BOOST_ROUND_UP_BOOKS,
+    DECIMAL_NATIVE_BOOKS,
     BET_TYPE_PARLAY,
     BET_TYPE_MONEYLINE,
     GAME_STATUS_CANCELLED,
@@ -23,7 +24,7 @@ from config import (
 from sources import odds_api, espn_tennis, espn_fights
 from resolver import (
     resolve, resolve_parlay, calculate_pl_and_payout, derive_pl_from_payout,
-    derive_cashout_pl, _american_odds_profit,
+    derive_cashout_pl, _american_odds_profit, settlement_decimal_from_american,
 )
 from sheets_writer import (
     write_result, write_pl_payout, write_pl_only,
@@ -648,7 +649,9 @@ def complete_pl_payout(bet: dict) -> str:
     # For a manually-resolved parlay, settle a WIN from the exact combined
     # decimal stored in DecimalOddsTaken (if present) rather than the rounded
     # American OddsTaken -- same precision reasoning as the auto-resolution
-    # path. Non-parlay rows pass None and use American odds as before.
+    # path. Non-parlay rows pass None here; _safe_calculate_pl_payout still
+    # recovers a decimal price for DECIMAL_NATIVE_BOOKS, and everything else
+    # settles from American odds as before.
     decimal_odds = None
     if result == RESULT_WIN and bet.get("bet_type", "").strip() == BET_TYPE_PARLAY:
         try:
@@ -739,6 +742,16 @@ def _safe_calculate_pl_payout(bet: dict, result: str,
         print(f"[poller] ⚠️  BetID {bet_id}: {reason}")
         flag_pl_blocked(row_idx, bet_id, reason)
         return None, None
+
+    # Books that price in two-decimal DECIMAL odds show a rounded American
+    # label, so OddsTaken alone underpays a win (see DECIMAL_NATIVE_BOOKS).
+    # Recover the real price from the label unless the caller already supplied
+    # a decimal -- a parlay's exact combined price always wins over a
+    # reconstruction. Recovery is guarded and returns None whenever the label
+    # can't have come off this book's own slip, in which case settlement falls
+    # back to the American price exactly as before.
+    if decimal_odds is None and book_lower in DECIMAL_NATIVE_BOOKS:
+        decimal_odds = settlement_decimal_from_american(odds_taken)
 
     # Win-only percent-fee books (Book Settings "Fee Type" = Percent Of Win
     # Profit or Percent Of Stake On Win) derive their fee at settlement time

@@ -272,6 +272,28 @@ PAYOUT_ROUND_NEAREST_BOOKS = {
 # 203/224/247 and matching FanDuel settlements. Keep in sync with odds-tool.
 PROFIT_BOOST_ROUND_UP_BOOKS = {"draftkings", "fanduel"}
 
+# Books that price in two-decimal DECIMAL odds and display a rounded American
+# label. Unlike PAYOUT_ROUND_NEAREST_BOOKS this is not a cent-rounding rule --
+# the American price itself is wrong, by up to ~1% of profit, because the label
+# is always rounded AWAY FROM ZERO (never overstating the price on offer).
+# resolver.settlement_decimal_from_american() recovers the real price from the
+# label; the round-trip guard there is what keeps odds-feed prices out.
+#
+# betrivers: confirmed 2026-07-29 against four real settlements, each landing
+# on an exact two-decimal price (American-odds math in brackets):
+#   Bet 404: $15 @ -118 -> paid $27.75, exactly 1.85          [$27.71]
+#   Bet 459: $10 @ -132 -> paid $17.60, exactly 1.76          [$17.57]
+#   Bet 623: $15 @ -112 -> paid $28.50, exactly 1.90          [$28.39]
+#   Bet 476: $25 @ -108, 25% Profit Boost -> paid $54.06,
+#            1.93 carried through the boost path              [$53.94]
+# Rounding direction confirmed on the live board the same day: decimal 1.89
+# (exactly -112.36) displays as -113, where nearest-rounding would show -112.
+# Note the odds FEED rounds the other way -- The Odds API stores -111 for the
+# same 1.90 BetRivers labels -112 -- which is why recovery is guarded rather
+# than applied to every American price seen for these books.
+# Keyed by lowercased book key. Keep in sync with odds-tool/betReviewPl.js.
+DECIMAL_NATIVE_BOOKS = {"betrivers"}
+
 # ── Bet Categories ──────────────────────────────────────────────────
 # Matches the 6 canonical values enforced by LogBetWizard.jsx's BET_CATEGORIES
 # (Free Bet was removed -- unused, and its real payout behavior was never
