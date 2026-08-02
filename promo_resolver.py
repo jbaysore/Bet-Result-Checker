@@ -34,6 +34,7 @@ real money. All four types are now implemented:
 """
 
 from datetime import datetime, date, timedelta
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 from config import (
     BET_CATEGORY_QUALIFYING, BET_CATEGORY_BONUS_BET, BET_CATEGORY_PROFIT_BOOST,
@@ -501,6 +502,120 @@ def evaluate_odds_boost_promo(promo: dict, linked_bets: list[dict], today: date,
 # ── Insurance Bet ──────────────────────────────────────────────────────
 # ════════════════════════════════════════════════════════════════════
 
+def _money_to_cents(value) -> int | None:
+    """Parses a Sheets money value into integer cents without float drift."""
+    raw = str(value if value is not None else "").replace("$", "").replace(",", "").strip()
+    if not raw:
+        return None
+    try:
+        amount = Decimal(raw)
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+    if not amount.is_finite():
+        return None
+    return int((amount * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+
+def _format_cents(cents: int) -> str:
+    return f"${cents / 100:.2f}"
+
+
+def _match_insurance_refund(reward_bets: list[dict], start_idx: int,
+                            refund_amount: float, label: str) -> dict:
+    """
+    FIFO-matches one insurance refund to as many Bonus Bet rows as needed.
+
+    A refund is claimed by face value (the linked rows' Stake), not by row
+    count. Automatic resolution is deliberately limited to an exact cent
+    match: if the next row would overfill the refund, its P/L cannot be
+    attributed to this promo without inventing a prorating rule.
+    """
+    target_cents = _money_to_cents(refund_amount)
+    if target_cents is None or target_cents < 0:
+        return {
+            "complete": False,
+            "next_index": start_idx,
+            "value": None,
+            "log": [f"{label}: expected refund amount {refund_amount!r} is invalid -- "
+                    f"leaving Pending for manual review."],
+        }
+    if target_cents == 0:
+        return {
+            "complete": True,
+            "next_index": start_idx,
+            "value": 0.0,
+            "log": [f"{label}: expected refund is $0.00 -- no Bonus Bet rows required."],
+        }
+
+    claimed_cents = 0
+    idx = start_idx
+    matched = []
+
+    while claimed_cents < target_cents:
+        if idx >= len(reward_bets):
+            remaining = target_cents - claimed_cents
+            return {
+                "complete": False,
+                "next_index": idx,
+                "value": None,
+                "log": [f"{label}: {_format_cents(claimed_cents)} of "
+                        f"{_format_cents(target_cents)} in Bonus Bet stake is linked "
+                        f"({_format_cents(remaining)} remaining) -- leaving Pending."],
+            }
+
+        reward_bet = reward_bets[idx]
+        stake_cents = _money_to_cents(reward_bet.get("stake"))
+        if stake_cents is None or stake_cents <= 0:
+            return {
+                "complete": False,
+                "next_index": idx,
+                "value": None,
+                "log": [f"{label}: Bonus Bet BetID {reward_bet.get('bet_id')} has invalid "
+                        f"Stake={reward_bet.get('stake')!r}; refund coverage cannot be "
+                        f"verified -- leaving Pending for manual review."],
+            }
+
+        new_total = claimed_cents + stake_cents
+        if new_total > target_cents:
+            return {
+                "complete": False,
+                "next_index": idx,
+                "value": None,
+                "log": [f"{label}: adding Bonus Bet BetID {reward_bet.get('bet_id')} "
+                        f"({_format_cents(stake_cents)}) would overfill the expected "
+                        f"{_format_cents(target_cents)} refund (current coverage "
+                        f"{_format_cents(claimed_cents)}) -- leaving Pending for manual review."],
+            }
+
+        matched.append(reward_bet)
+        claimed_cents = new_total
+        idx += 1
+
+    for reward_bet in matched:
+        if not _is_final(reward_bet["result"]):
+            status_desc = reward_bet["result"] or "blank"
+            return {
+                "complete": False,
+                "next_index": idx,
+                "value": None,
+                "log": [f"{label}: full refund amount {_format_cents(target_cents)} is linked "
+                        f"across {len(matched)} Bonus Bet row(s), but BetID "
+                        f"{reward_bet['bet_id']} is not yet settled "
+                        f"(Result='{status_desc}') -- waiting."],
+            }
+
+    value = round(sum(_safe_float(bet["pl"]) for bet in matched), 2)
+    bet_ids = ", ".join(str(bet["bet_id"]) for bet in matched)
+    return {
+        "complete": True,
+        "next_index": idx,
+        "value": value,
+        "log": [f"{label}: full refund amount {_format_cents(target_cents)} matched by "
+                f"{len(matched)} settled Bonus Bet row(s) (BetID {bet_ids}); "
+                f"combined value={value}."],
+    }
+
+
 def evaluate_insurance_bet_promo(promo: dict, linked_bets: list[dict], today: date) -> dict:
     """
     Dispatches to the single-day or multi-day Insurance Bet evaluator,
@@ -508,8 +623,8 @@ def evaluate_insurance_bet_promo(promo: dict, linked_bets: list[dict], today: da
     like "10 insurance bets of $100, one per day for 10 days" -- a
     different shape than the original single "first bet" model below).
 
-    Expected Reward Count blank or 1 -> single-day (original model,
-    unchanged). Expected Reward Count > 1 -> multi-day, which REQUIRES
+    Expected Reward Count blank or 1 -> single-day model. Expected Reward
+    Count > 1 -> multi-day, which REQUIRES
     Start Date to be set (otherwise which calendar days are covered is
     ambiguous) -- left Pending with a clear log line if it's missing,
     rather than guessing or silently falling back to single-day (which
@@ -554,10 +669,10 @@ def _evaluate_single_day_insurance(promo: dict, linked_bets: list[dict], today: 
 
       Leg 2 -- ONLY exists if Leg 1 triggered a refund. The refund is
       Bonus Bet credit (logged as Bet Category = "Bonus Bet", same
-      Promo ID) -- structurally identical to a single-grant Bonus Bet
-      token. Realized Amount = Leg 2's own settled P/L (Leg 1's win/loss
-      P/L is an ordinary bet outcome you'd have had regardless of the
-      promo, and is deliberately NOT counted here).
+      Promo ID), and may be split across multiple Bets rows. Linked Bonus
+      Bet stakes must exactly cover the refund face amount before the promo
+      can resolve. Realized Amount = the combined settled P/L of those rows
+      (Leg 1's win/loss P/L is deliberately NOT counted here).
 
     KNOWN GAP (accepted by the user 2026-06-21, not a bug): if Leg 1
     loses and NO Leg 2 row is ever linked, this function cannot
@@ -620,32 +735,27 @@ def _evaluate_single_day_insurance(promo: dict, linked_bets: list[dict], today: 
         key=lambda b: _parse_date(b["date_placed"]) or date.min
     )
 
-    if not reward_bets:
-        log.append("No Leg 2 (Bonus Bet-category) row claiming the refund yet. This "
-                    "system has no 'Result Date' column, so the refund token's usage "
-                    "deadline can't be computed honestly -- per your decision "
-                    "(2026-06-21), this is left for manual close-out rather than "
-                    "guessed at. Leaving Pending.")
+    match = _match_insurance_refund(reward_bets, 0, refund, "Leg 2")
+    log.extend(match["log"])
+    if not match["complete"]:
+        if not reward_bets:
+            log.append("No Result Date column exists to compute the unclaimed refund's "
+                       "deadline -- per the accepted limitation for this promo type, "
+                       "leaving Pending until linked Bonus Bet stake covers the refund.")
         return {"qualifying_cost_fill": None, "finalize": None, "log": log}
 
-    if len(reward_bets) > 1:
-        log.append(f"⚠️  {len(reward_bets)} Bonus Bet-category rows are linked -- only "
-                    f"one refund token should exist per Insurance Bet promo. Using the "
-                    f"earliest one and ignoring the rest. Recommend manual review.")
+    if match["next_index"] < len(reward_bets):
+        extra = len(reward_bets) - match["next_index"]
+        log.append(f"⚠️  {extra} extra Bonus Bet-category row(s) linked after the "
+                   f"refund amount was fully matched -- ignored. Recommend manual review.")
 
-    leg2 = reward_bets[0]
-    if not _is_final(leg2["result"]):
-        status_desc = leg2["result"] or "blank"
-        log.append(f"Leg 2 (BetID {leg2['bet_id']}) claimed but not yet settled "
-                   f"(Result='{status_desc}') -- waiting.")
-        return {"qualifying_cost_fill": None, "finalize": None, "log": log}
-
-    leg2_pl = _safe_float(leg2["pl"])
-    log.append(f"Leg 2 (BetID {leg2['bet_id']}) settled -- its P/L ({leg2_pl}) is the "
-               f"promo's Realized Amount (Leg 1's own bet outcome is not counted, per design).")
+    realized_amount = match["value"]
+    log.append(f"All Bonus Bet rows covering Leg 2 are settled -- combined P/L "
+               f"({realized_amount}) is the promo's Realized Amount (Leg 1's own bet "
+               f"outcome is not counted, per design).")
     return {
         "qualifying_cost_fill": None,
-        "finalize": {"status": PROMO_STATUS_REALIZED, "realized_amount": leg2_pl},
+        "finalize": {"status": PROMO_STATUS_REALIZED, "realized_amount": realized_amount},
         "log": log,
     }
 
@@ -675,13 +785,12 @@ def _evaluate_multi_day_insurance(promo: dict, linked_bets: list[dict], today: d
       - Leg 1 settled WIN/PUSH/VOID -> contributes $0 (matches the
         single-day model's confirmed terms: only a loss triggers a
         refund).
-      - Leg 1 LOSS -> needs a Leg 2 (Bonus Bet-category) row to claim the
-        refund, FIFO-matched against every day's loss in chronological
-        order (mirrors how Bonus Bet/Profit Boost FIFO-match reward bets
-        to earned tokens). Same KNOWN GAP as the single-day model applies
-        per-day: if a day loses and no Leg 2 is linked yet, this is left
-        Pending rather than guessing at a deadline (no Result Date column
-        exists to compute one).
+      - Leg 1 LOSS -> needs enough Leg 2 (Bonus Bet-category) stake to
+        claim the refund. One refund may consume multiple rows, FIFO-matched
+        against every day's loss in chronological order. Same KNOWN GAP as
+        the single-day model applies per-day: if a refund is not fully
+        linked yet, this is left Pending rather than guessing at a deadline
+        (no Result Date column exists to compute one).
 
     Extra Bonus Bet-category rows beyond what any day's losses need are
     logged as a warning (shouldn't happen, but Sheets data can always be
@@ -748,28 +857,21 @@ def _evaluate_multi_day_insurance(promo: dict, linked_bets: list[dict], today: d
         stake = _safe_float(leg1["stake"])
         refund_cap = min(stake, cap) if cap is not None else stake
 
-        if reward_idx >= len(reward_bets):
-            log.append(f"{day_label}: Leg 1 (BetID {leg1['bet_id']}) lost, refund up to "
-                        f"{refund_cap} expected -- no Leg 2 (Bonus Bet) row linked yet. "
-                        f"No Result Date column exists to compute a deadline -- per the "
-                        f"accepted limitation for this promo type, leaving Pending until "
-                        f"a Leg 2 row appears.")
+        match = _match_insurance_refund(
+            reward_bets,
+            reward_idx,
+            refund_cap,
+            f"{day_label}: Leg 1 (BetID {leg1['bet_id']}) refund",
+        )
+        log.extend(match["log"])
+        if not match["complete"]:
+            log.append(f"{day_label}: No Result Date column exists to compute the "
+                       f"unclaimed refund's deadline -- leaving Pending until linked "
+                       f"Bonus Bet stake covers the refund and all covering rows settle.")
             return {"qualifying_cost_fill": None, "finalize": None, "log": log}
 
-        leg2 = reward_bets[reward_idx]
-        reward_idx += 1
-
-        if not _is_final(leg2["result"]):
-            status_desc = leg2["result"] or "blank"
-            log.append(f"{day_label}: Leg 1 (BetID {leg1['bet_id']}) lost -- Leg 2 "
-                        f"(BetID {leg2['bet_id']}) claimed but not yet settled "
-                        f"(Result='{status_desc}') -- waiting.")
-            return {"qualifying_cost_fill": None, "finalize": None, "log": log}
-
-        leg2_pl = _safe_float(leg2["pl"])
-        log.append(f"{day_label}: Leg 1 (BetID {leg1['bet_id']}) lost -- Leg 2 "
-                    f"(BetID {leg2['bet_id']}) settled, value={leg2_pl}.")
-        values.append(leg2_pl)
+        reward_idx = match["next_index"]
+        values.append(match["value"])
 
     if reward_idx < len(reward_bets):
         extra = len(reward_bets) - reward_idx

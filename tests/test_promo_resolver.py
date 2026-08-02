@@ -337,6 +337,7 @@ def test_insurance_leg1_loss_leg2_win():
             bet_category=BET_CATEGORY_BONUS_BET,
             date_placed="2026-06-02",
             result="WIN",
+            stake="50",
             pl="40",
         ),
     ]
@@ -362,6 +363,198 @@ def test_insurance_leg1_loss_no_leg2_stays_pending():
     ]
     verdict = evaluate_promo(promo, bets, date(2026, 6, 15))
     assert verdict["finalize"] is None
+
+
+def test_insurance_split_refund_waits_until_full_face_amount_is_linked():
+    promo = make_promo(promo_type=PROMO_TYPE_INSURANCE_BET, bonus_amount="100")
+    bets = [
+        make_bet(
+            bet_id="30",
+            bet_category=BET_CATEGORY_INSURANCE_BET,
+            result="LOSS",
+            stake="100",
+        ),
+        make_bet(
+            bet_id="31",
+            bet_category=BET_CATEGORY_BONUS_BET,
+            date_placed="2026-06-02",
+            result="WIN",
+            stake="50",
+            pl="35",
+        ),
+    ]
+
+    verdict = evaluate_promo(promo, bets, date(2026, 6, 15))
+
+    assert verdict["finalize"] is None
+    assert any("$50.00 of $100.00" in line for line in verdict["log"])
+
+
+def test_insurance_split_refund_waits_for_every_covering_bet_to_settle():
+    promo = make_promo(promo_type=PROMO_TYPE_INSURANCE_BET, bonus_amount="100")
+    bets = [
+        make_bet(
+            bet_id="30",
+            bet_category=BET_CATEGORY_INSURANCE_BET,
+            result="LOSS",
+            stake="100",
+        ),
+        make_bet(
+            bet_id="31",
+            bet_category=BET_CATEGORY_BONUS_BET,
+            date_placed="2026-06-02",
+            result="WIN",
+            stake="50",
+            pl="35",
+        ),
+        make_bet(
+            bet_id="32",
+            bet_category=BET_CATEGORY_BONUS_BET,
+            date_placed="2026-06-03",
+            result="",
+            stake="50",
+            pl="",
+        ),
+    ]
+
+    verdict = evaluate_promo(promo, bets, date(2026, 6, 15))
+
+    assert verdict["finalize"] is None
+    assert any("BetID 32 is not yet settled" in line for line in verdict["log"])
+
+
+def test_insurance_split_refund_sums_every_covering_bets_pl():
+    promo = make_promo(promo_type=PROMO_TYPE_INSURANCE_BET, bonus_amount="$100.00")
+    bets = [
+        make_bet(
+            bet_id="30",
+            bet_category=BET_CATEGORY_INSURANCE_BET,
+            result="LOSS",
+            stake="150",
+        ),
+        make_bet(
+            bet_id="31",
+            bet_category=BET_CATEGORY_BONUS_BET,
+            date_placed="2026-06-02",
+            result="WIN",
+            stake="50",
+            pl="35.25",
+        ),
+        make_bet(
+            bet_id="32",
+            bet_category=BET_CATEGORY_BONUS_BET,
+            date_placed="2026-06-03",
+            result="LOSS",
+            stake="50",
+            pl="0",
+        ),
+    ]
+
+    verdict = evaluate_promo(promo, bets, date(2026, 6, 15))
+
+    assert verdict["finalize"] == {
+        "status": PROMO_STATUS_REALIZED,
+        "realized_amount": 35.25,
+    }
+
+
+def test_insurance_refund_overfill_requires_manual_review():
+    promo = make_promo(promo_type=PROMO_TYPE_INSURANCE_BET, bonus_amount="100")
+    bets = [
+        make_bet(
+            bet_id="30",
+            bet_category=BET_CATEGORY_INSURANCE_BET,
+            result="LOSS",
+            stake="100",
+        ),
+        make_bet(
+            bet_id="31",
+            bet_category=BET_CATEGORY_BONUS_BET,
+            date_placed="2026-06-02",
+            result="WIN",
+            stake="60",
+            pl="40",
+        ),
+        make_bet(
+            bet_id="32",
+            bet_category=BET_CATEGORY_BONUS_BET,
+            date_placed="2026-06-03",
+            result="WIN",
+            stake="50",
+            pl="30",
+        ),
+    ]
+
+    verdict = evaluate_promo(promo, bets, date(2026, 6, 15))
+
+    assert verdict["finalize"] is None
+    assert any("overfill" in line for line in verdict["log"])
+
+
+def test_multi_day_insurance_fifo_matches_split_refunds_by_amount():
+    promo = make_promo(
+        promo_type=PROMO_TYPE_INSURANCE_BET,
+        bonus_amount="100",
+        expected_reward_count="2",
+        start_date="2026-06-01",
+    )
+    bets = [
+        make_bet(
+            bet_id="40",
+            bet_category=BET_CATEGORY_INSURANCE_BET,
+            date_placed="2026-06-01",
+            result="LOSS",
+            stake="100",
+        ),
+        make_bet(
+            bet_id="41",
+            bet_category=BET_CATEGORY_INSURANCE_BET,
+            date_placed="2026-06-02",
+            result="LOSS",
+            stake="60",
+        ),
+        make_bet(
+            bet_id="42",
+            bet_category=BET_CATEGORY_BONUS_BET,
+            date_placed="2026-06-03",
+            result="WIN",
+            stake="50",
+            pl="30",
+        ),
+        make_bet(
+            bet_id="43",
+            bet_category=BET_CATEGORY_BONUS_BET,
+            date_placed="2026-06-04",
+            result="LOSS",
+            stake="50",
+            pl="0",
+        ),
+        make_bet(
+            bet_id="44",
+            bet_category=BET_CATEGORY_BONUS_BET,
+            date_placed="2026-06-05",
+            result="WIN",
+            stake="25",
+            pl="15",
+        ),
+        make_bet(
+            bet_id="45",
+            bet_category=BET_CATEGORY_BONUS_BET,
+            date_placed="2026-06-06",
+            result="WIN",
+            stake="35",
+            pl="21",
+        ),
+    ]
+
+    verdict = evaluate_promo(promo, bets, date(2026, 6, 15))
+
+    assert verdict["finalize"] == {
+        "status": PROMO_STATUS_REALIZED,
+        "realized_amount": 66.0,
+    }
+    assert any("BetID 42, 43" in line for line in verdict["log"])
+    assert any("BetID 44, 45" in line for line in verdict["log"])
 
 
 # ── Dispatch / edge cases ────────────────────────────────────────────────
