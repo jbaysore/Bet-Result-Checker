@@ -47,6 +47,7 @@ from sheets_writer import upsert_notes_line, write_closing_odds
 from sources.scores_live import COMPLETED, LIVE, PREGAME, event_live_state, fetch_scores_live
 from pinnacle_closing import fetch_pinnacle_featured, pinnacle_quote_for_bet
 import onboarding_gate
+import capture_alerts
 
 
 QUEUE_TAB = os.getenv("CLOSING_CAPTURE_TAB", "ClosingCapture")
@@ -384,9 +385,10 @@ def finalize(
 
 def capture_record(tab, row_idx: int, record: dict, start_state: str,
                    now: datetime, headers: list[str], pinnacle_events: list | None = None,
-                   cadence_seconds: int | None = None):
+                   cadence_seconds: int | None = None) -> dict | None:
+    """Sample one queue row. Returns a small stats dict when a sample ran."""
     if not sample_due(record, now, cadence_seconds):
-        return
+        return None
     credits_before = live_credit_total()
     result = fetch_live_closing_odds({
         "bet_id": record["BetID"], "sport": record["Sport"],
@@ -425,6 +427,10 @@ def capture_record(tab, row_idx: int, record: dict, start_state: str,
         changes["Per-Leg/Pinnacle Audit JSON"] = json.dumps(audit_entries[-SAMPLE_SLOTS:], separators=(",", ":"))
     update_queue_row(tab, row_idx, changes, headers)
     record.update(changes)
+    return {
+        "priced": bool(str(price).strip()),
+        "invalid_key": capture_alerts.is_invalid_key_error(error),
+    }
 
 
 def _resolve_event_id(record: dict, games: list, commence: datetime,
@@ -496,9 +502,26 @@ def process_queue(tab, now: datetime | None = None):
             _record_credits(pinnacle_credits.get("last"), fallback=1)
             print(f"[closing-capture] Pinnacle {sport} credits: last={pinnacle_credits.get('last')} "
                   f"used={pinnacle_credits.get('used')} remaining={pinnacle_credits.get('remaining')}")
+            if not pinnacle_by_sport[sport].get("ok"):
+                pinnacle_error = str(pinnacle_by_sport[sport].get("error") or "")
+                if capture_alerts.is_invalid_key_error(pinnacle_error):
+                    capture_alerts.deliver_alert(
+                        code=capture_alerts.CODE_INVALID_KEY,
+                        title="Closing capture: Odds API key rejected",
+                        text=(
+                            f"Pinnacle featured fetch failed for {sport}: {pinnacle_error}. "
+                            "Check Railway ODDS_API_KEY."
+                        ),
+                        severity="critical",
+                        details={"sport": sport, "error": pinnacle_error},
+                    )
     print(f"[closing-capture] credit mode={mode}; estimated daily credits="
           f"{_estimated_daily_credits}/{DAILY_SOFT_BUDGET}; cadence={cadence_seconds}s")
     roster_cache: dict[str, list] = {}
+    cycle_sampled = 0
+    cycle_priced = 0
+    cycle_invalid_key = 0
+    cycle_fallbacks = 0
 
     for row_idx, record, commence in parsed_active:
         if now < commence - timedelta(seconds=TRACK_BEFORE_COMMENCE_SECONDS):
@@ -511,7 +534,7 @@ def process_queue(tab, now: datetime | None = None):
             )
             sample = verified or max(samples, key=lambda item: item.fetched_at, default=None)
             trusted = record.get("Sport", "") in TRUSTED_FLIP_SPORTS
-            finalize(
+            status = finalize(
                 tab, row_idx, record, sample.price if sample else None,
                 start_status=(START_VERIFIED if verified and trusted else (
                     START_UNVERIFIED if sample else START_UNKNOWN
@@ -519,6 +542,8 @@ def process_queue(tab, now: datetime | None = None):
                 quality=(QUALITY_EARLY if verified and trusted else QUALITY_PROVISIONAL),
                 sample=sample, headers=headers,
             )
+            if status == "FALLBACK":
+                cycle_fallbacks += 1
             continue
         sport = record.get("Sport", "")
         scores = scores_by_sport.get(sport)
@@ -579,9 +604,29 @@ def process_queue(tab, now: datetime | None = None):
                 mode != "critical" or critical_sample_allowed(now, commence, sample_state)
         )):
             pinnacle = pinnacle_by_sport.get(sport) or {}
-            capture_record(tab, row_idx, record, sample_state, now, headers,
-                           pinnacle.get("events") if pinnacle.get("ok") else None,
-                           cadence_seconds=cadence_seconds)
+            sample_stats = capture_record(
+                tab, row_idx, record, sample_state, now, headers,
+                pinnacle.get("events") if pinnacle.get("ok") else None,
+                cadence_seconds=cadence_seconds,
+            )
+            if sample_stats:
+                cycle_sampled += 1
+                if sample_stats.get("priced"):
+                    cycle_priced += 1
+                if sample_stats.get("invalid_key"):
+                    cycle_invalid_key += 1
+
+    for report in capture_alerts.note_cycle_health(
+        sampled=cycle_sampled,
+        priced=cycle_priced,
+        invalid_key_errors=cycle_invalid_key,
+        fallbacks_this_cycle=cycle_fallbacks,
+    ):
+        if report.get("sent"):
+            print(f"[closing-capture] alert sent code={report.get('code')}")
+        elif report.get("skipped") and report.get("skipped") != "no_alert_channel_configured":
+            print(f"[closing-capture] alert skipped code={report.get('code')} "
+                  f"reason={report.get('skipped')}")
 
 
 def reconcile_bets(tab):
@@ -632,9 +677,13 @@ def main():
     require_migration_marker()
     tab = ensure_queue_tab()
     added = reconcile_bets(tab)
+    alert_status = (
+        "webhook/ntfy configured" if capture_alerts.alerts_configured()
+        else "no CAPTURE_ALERT_WEBHOOK_URL / CAPTURE_ALERT_NTFY_TOPIC set"
+    )
     print(f"[closing-capture] worker started; poll={POLL_SECONDS}s; reconciled={added}; "
           f"margin={SAFETY_MARGIN_SECONDS}s slots={SAMPLE_SLOTS} max_age={MAX_SAMPLE_AGE_SECONDS}s "
-          f"book_stale={BOOK_STALE_SECONDS}s")
+          f"book_stale={BOOK_STALE_SECONDS}s; alerts={alert_status}")
     next_reconcile = time.monotonic() + RECONCILE_SECONDS
     while True:
         try:
@@ -645,6 +694,9 @@ def main():
                 next_reconcile = time.monotonic() + RECONCILE_SECONDS
         except Exception as exc:
             print(f"[closing-capture] loop error: {exc}")
+            report = capture_alerts.alert_loop_error(exc)
+            if report.get("sent"):
+                print(f"[closing-capture] alert sent code={report.get('code')}")
         time.sleep(POLL_SECONDS)
 
 

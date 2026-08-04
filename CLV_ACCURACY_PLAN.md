@@ -288,7 +288,7 @@ schema and keeps every closing write fail-closed during cutover.
 Bet-Result-Checker:
 
 ```powershell
-cd C:\Users\Joshua\APIs\Bet-Result-Checker-github
+cd "C:\Users\Joshua\Projects\Odds Tool\Bet-Result-Checker-github"
 py -m pip install -r requirements.txt -r requirements-dev.txt
 py -m pytest -q
 ```
@@ -296,7 +296,7 @@ py -m pytest -q
 odds-tool:
 
 ```powershell
-cd C:\Users\Joshua\APIs\odds-tool
+cd "C:\Users\Joshua\Projects\Odds Tool\odds-tool"
 npm.cmd test
 npm.cmd run build:client
 ```
@@ -307,15 +307,15 @@ npm.cmd run build:client
 `origin=https://github.com/jbaysore/Bet-Result-Checker.git`.
 
 ```powershell
-cd C:\Users\Joshua\APIs\Bet-Result-Checker-github
+cd "C:\Users\Joshua\Projects\Odds Tool\Bet-Result-Checker-github"
 git status --short
 git add -A
 git commit -m "Implement actual-start-aware CLV capture"
 git push origin main
 ```
 
-At implementation time, `C:\Users\Joshua\APIs\odds-tool` was **not** inside a
-usable Git worktree: it had no `.git`, and `C:\Users\Joshua\APIs\.git` was an
+At implementation time, `C:\Users\Joshua\Projects\Odds Tool\odds-tool` was **not** inside a
+usable Git worktree: it had no `.git`, and `C:\Users\Joshua\Projects\Odds Tool\.git` was an
 empty directory. Its changes are therefore local-only. Do not run `git init`
 over it blindly. If odds-tool is supposed to be backed by a remote repository,
 restore its actual worktree/remote before attempting to push; otherwise the
@@ -328,7 +328,7 @@ service that already looks healthy, so leaving the old Node process alive would
 leave the old code in memory.
 
 ```powershell
-cd C:\Users\Joshua\APIs
+cd "C:\Users\Joshua\Projects\Odds Tool"
 powershell -NoProfile -ExecutionPolicy Bypass -File .\odds-tool\scripts\start-dev.ps1
 ```
 
@@ -341,7 +341,7 @@ The checker `.env` must contain `SHEET_ID`, `SHEET_TAB=Bets`, and either
 `GOOGLE_APPLICATION_CREDENTIALS` or `GOOGLE_APPLICATION_CREDENTIALS_JSON`.
 
 ```powershell
-cd C:\Users\Joshua\APIs\Bet-Result-Checker-github
+cd "C:\Users\Joshua\Projects\Odds Tool\Bet-Result-Checker-github"
 py scripts\migrate_clv_provenance.py
 ```
 
@@ -380,7 +380,7 @@ selected sport per poll. Select only sports with events in the window. Example
 for an MLB/WNBA/MLS slate:
 
 ```powershell
-cd C:\Users\Joshua\APIs\Bet-Result-Checker-github
+cd "C:\Users\Joshua\Projects\Odds Tool\Bet-Result-Checker-github"
 $env:SHADOW_SPORTS="baseball_mlb,basketball_wnba,soccer_usa_mls"
 $env:SHADOW_POLL_SECONDS="60"
 $env:SHADOW_MARGIN_SECONDS="90"
@@ -412,7 +412,7 @@ This writes only Actual Start/source/confidence and Start Audit for
 `LEGACY_UNAUDITED` rows. It does not change ClosingOdds or CLV.
 
 ```powershell
-cd C:\Users\Joshua\APIs\Bet-Result-Checker-github
+cd "C:\Users\Joshua\Projects\Odds Tool\Bet-Result-Checker-github"
 py scripts\clv_start_audit.py 2>&1 | Tee-Object -FilePath clv_start_audit_report.txt
 ```
 
