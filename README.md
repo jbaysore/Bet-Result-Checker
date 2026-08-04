@@ -175,12 +175,12 @@ start command and restart policy. Set these service variables:
 | `CLOSING_UNKNOWN_GRACE_SECONDS` | No | `300` (wait through transient score failures) |
 | `CLOSING_CRITICAL_WINDOW_SECONDS` | No | `300` (same-book capture retained at budget ceiling) |
 | `CLOSING_DAILY_SOFT_BUDGET` | No | `2500` (slows at 70%; at the ceiling drops Pinnacle/non-critical samples but preserves the close) |
-| `CAPTURE_ALERT_WEBHOOK_URL` | No | Discord/Slack/generic webhook — POSTs JSON when the Odds API key fails or samples go silent |
-| `CAPTURE_ALERT_NTFY_TOPIC` | No | [ntfy.sh](https://ntfy.sh) topic name (phone push without Discord) |
+| `CAPTURE_ALERT_WEBHOOK_URL` | No | Optional Discord/Slack webhook if you want push when the odds-tool UI is closed |
+| `CAPTURE_ALERT_NTFY_TOPIC` | No | Optional [ntfy.sh](https://ntfy.sh) topic (phone push without Discord) |
 | `CAPTURE_ALERT_NTFY_URL` | No | `https://ntfy.sh` (default); set if you self-host ntfy |
 | `CAPTURE_ALERT_COOLDOWN_SECONDS` | No | `21600` (6h) — per alert code, so a revoked key does not spam every poll |
 
-**Alerts:** The worker stays up even with a revoked `ODDS_API_KEY` (samples just FALLBACK). Set `CAPTURE_ALERT_WEBHOOK_URL` and/or `CAPTURE_ALERT_NTFY_TOPIC` so a bad key pages you within one poll cycle. A successful sample clears the streak; cooldown prevents repeat noise.
+**Alerts:** The worker stays up even with a revoked `ODDS_API_KEY` (samples just FALLBACK). **Primary signal is in odds-tool:** Needs Review (bell) reads `ClosingCapture` and shows a red “Closing Capture Outage” item while recent samples are failing with an invalid key and none are getting prices. Optional webhook/ntfy above is only if you also want a phone ping when the dashboard isn’t open.
 
 The service account needs edit access to the spreadsheet. On first startup the
 worker creates the queue tab if `odds-tool` has not already created it. A healthy
